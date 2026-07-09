@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useWallets } from '@privy-io/react-auth'
+import { useWalletClient } from 'wagmi'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   localChatStorage,
   type ConversationSummary,
 } from '@/lib/chat-storage'
+import { executeSwap } from '@/lib/execute-swap'
 import {
   getAgent,
   initialActivity,
@@ -43,6 +45,7 @@ export function NockApp() {
 
   const { wallets } = useWallets()
   const walletAddress = wallets[0]?.address
+  const { data: walletClient } = useWalletClient()
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRobinLoading, setIsRobinLoading] = useState(false)
@@ -153,7 +156,7 @@ export function NockApp() {
     )
   }, [])
 
-  const handleLoose = useCallback((actionId: string) => {
+  const handleLoose = useCallback(async (actionId: string) => {
     // Enter confirming state.
     setMessages((prev) =>
       prev.map((m) =>
@@ -163,66 +166,171 @@ export function NockApp() {
       ),
     )
 
-    // After a brief moment, execute: mark executed, remove matching attention,
-    // add active position, add activity row, and confirm in chat.
-    setTimeout(() => {
-      setMessages((prev) => {
-        const target = prev.find(
-          (m) => m.role === 'robin' && m.action?.id === actionId,
-        ) as Extract<ChatMessage, { role: 'robin' }> | undefined
-        const action = target?.action
-        if (!action) return prev
+    // Get the action to execute
+    const targetMsg = messages.find(
+      (m) => m.role === 'robin' && m.action?.id === actionId,
+    ) as Extract<ChatMessage, { role: 'robin' }> | undefined
+    const action = targetMsg?.action
 
-        const agent = getAgent(action.agent)
+    if (!action) {
+      console.error('Action not found:', actionId)
+      return
+    }
 
-        // Mark executed and append a confirmation message.
-        const updated = prev.map((m) =>
+    // REAL SWAP EXECUTION - NO MOCK DATA
+    if (action.agent === 'swap' && walletClient) {
+      try {
+        // Extract transaction data from action
+        // The transaction data is stored in the action from the swap quote
+        const txData = (action as any).transactionData
+        
+        if (!txData) {
+          throw new Error('No transaction data in action')
+        }
+
+        console.log('Executing real swap transaction...')
+        const result = await executeSwap({
+          walletClient,
+          fromToken: (action as any).fromToken || 'USDG',
+          toToken: (action as any).toToken || 'TSLA',
+          amount: (action as any).amount || '0',
+          transaction: txData,
+        })
+
+        if (result.error) {
+          throw new Error(result.error)
+        }
+
+        console.log('Swap executed! TX Hash:', result.txHash)
+
+        // Update UI with success
+        setMessages((prev) => {
+          const agent = getAgent(action.agent)
+          const updated = prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'executed' as const } }
+              : m,
+          )
+
+          const confirm: ChatMessage = {
+            id: `${Date.now()}-c`,
+            role: 'robin',
+            text: `Done! Swap executed on Robinhood Chain. TX: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}`,
+          }
+
+          const newPosition: Position = {
+            id: `pos-${actionId}`,
+            agent: action.agent,
+            title: action.outcome.title,
+            subtitle: `${agent.name} · active`,
+            value: action.outcome.value,
+            meta: action.outcome.meta,
+            metaPositive: true,
+          }
+          const newActivity: ActivityItem = {
+            id: `act-log-${actionId}`,
+            agent: action.agent,
+            title: action.outcome.activityTitle,
+            detail: action.detail,
+            time: 'Just now',
+            amount: action.outcome.activityAmount,
+          }
+
+          setPositions((p) =>
+            p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
+          )
+          setActivity((a) =>
+            a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
+          )
+          setAttention((att) => att.filter((x) => x.agent !== action.agent))
+          setAddedValue(
+            (v) =>
+              v + parseFloat(action.outcome.value.replace(/[^0-9.]/g, '') || '0'),
+          )
+
+          return [...updated, confirm]
+        })
+      } catch (error) {
+        console.error('Swap execution failed:', error)
+        setMessages((prev) => [
+          ...prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'pending' as const } }
+              : m,
+          ),
+          {
+            id: `${Date.now()}-error`,
+            role: 'robin',
+            text: `Swap failed: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+          },
+        ])
+      }
+    } else if (!walletClient) {
+      // No wallet connected
+      setMessages((prev) => [
+        ...prev.map((m) =>
           m.role === 'robin' && m.action && m.action.id === actionId
-            ? { ...m, action: { ...m.action, status: 'executed' as const } }
+            ? { ...m, action: { ...m.action, status: 'pending' as const } }
             : m,
-        )
-
-        const confirm: ChatMessage = {
-          id: `${Date.now()}-c`,
+        ),
+        {
+          id: `${Date.now()}-error`,
           role: 'robin',
-          text: `Done. ${action.outcome.title} is now live and tracked in your dashboard under active positions.`,
-        }
+          text: 'Please connect your wallet first to execute this action.',
+        },
+      ])
+    } else {
+      // Other agent types - keep mock behavior for now
+      setTimeout(() => {
+        setMessages((prev) => {
+          const agent = getAgent(action.agent)
+          const updated = prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'executed' as const } }
+              : m,
+          )
 
-        // Side effects for the shared event.
-        const newPosition: Position = {
-          id: `pos-${actionId}`,
-          agent: action.agent,
-          title: action.outcome.title,
-          subtitle: `${agent.name} · active`,
-          value: action.outcome.value,
-          meta: action.outcome.meta,
-          metaPositive: true,
-        }
-        const newActivity: ActivityItem = {
-          id: `act-log-${actionId}`,
-          agent: action.agent,
-          title: action.outcome.activityTitle,
-          detail: action.detail,
-          time: 'Just now',
-          amount: action.outcome.activityAmount,
-        }
+          const confirm: ChatMessage = {
+            id: `${Date.now()}-c`,
+            role: 'robin',
+            text: `Done. ${action.outcome.title} is now live and tracked in your dashboard under active positions.`,
+          }
 
-        setPositions((p) =>
-          p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
-        )
-        setActivity((a) =>
-          a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
-        )
-        setAttention((att) => att.filter((x) => x.agent !== action.agent))
-        setAddedValue(
-          (v) =>
-            v + parseFloat(action.outcome.value.replace(/[^0-9.]/g, '') || '0'),
-        )
+          const newPosition: Position = {
+            id: `pos-${actionId}`,
+            agent: action.agent,
+            title: action.outcome.title,
+            subtitle: `${agent.name} · active`,
+            value: action.outcome.value,
+            meta: action.outcome.meta,
+            metaPositive: true,
+          }
+          const newActivity: ActivityItem = {
+            id: `act-log-${actionId}`,
+            agent: action.agent,
+            title: action.outcome.activityTitle,
+            detail: action.detail,
+            time: 'Just now',
+            amount: action.outcome.activityAmount,
+          }
 
-        return [...updated, confirm]
-      })
-    }, 1200)
-  }, [])
+          setPositions((p) =>
+            p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
+          )
+          setActivity((a) =>
+            a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
+          )
+          setAttention((att) => att.filter((x) => x.agent !== action.agent))
+          setAddedValue(
+            (v) =>
+              v + parseFloat(action.outcome.value.replace(/[^0-9.]/g, '') || '0'),
+          )
+
+          return [...updated, confirm]
+        })
+      }, 1200)
+    }
+  }, [messages, walletClient])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

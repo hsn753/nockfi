@@ -212,6 +212,7 @@ export async function POST(request: Request) {
 
     let action: ActionPreview | undefined
     let responseText = ''
+    let lastSwapQuote: any = null
 
     for (let i = 0; i < 10; i++) {
       const response = await client.messages.create({
@@ -251,7 +252,14 @@ export async function POST(request: Request) {
               metrics: input.metrics,
               status: 'pending',
               outcome: input.outcome,
-            }
+              // Include swap transaction data if this is a swap action
+              ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
+                transactionData: lastSwapQuote.transaction,
+                fromToken: lastSwapQuote.fromSymbol,
+                toToken: lastSwapQuote.toSymbol,
+                amount: lastSwapQuote.fromAmount,
+              } : {}),
+            } as any
             result = { status: 'preview_ready' }
 
           } else if (block.name === 'get_wallet_holdings') {
@@ -286,6 +294,9 @@ export async function POST(request: Request) {
                   amount,
                   taker: walletAddress,
                 })
+                if (!quote.error) {
+                  lastSwapQuote = quote
+                }
                 result = quote.error
                   ? { error: quote.error, supportedTokens: supportedSymbols }
                   : { ...quote, supportedTokens: supportedSymbols }
