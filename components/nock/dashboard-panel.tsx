@@ -61,10 +61,6 @@ export function DashboardPanel({
               <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums text-foreground">
                 {portfolioValue}
               </p>
-              <p className="mt-2 flex items-center gap-1 text-sm font-medium text-primary">
-                <ArrowUpRight className="size-4" strokeWidth={2} />
-                +3.4% this week
-              </p>
             </div>
 
             {/* Needs attention */}

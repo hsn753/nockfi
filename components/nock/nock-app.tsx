@@ -49,9 +49,9 @@ export function NockApp() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRobinLoading, setIsRobinLoading] = useState(false)
-  const [attention, setAttention] = useState<AttentionItem[]>(initialAttention)
-  const [positions, setPositions] = useState<Position[]>(initialPositions)
-  const [activity, setActivity] = useState<ActivityItem[]>(initialActivity)
+  const [attention, setAttention] = useState<AttentionItem[]>([])
+  const [positions, setPositions] = useState<Position[]>([])
+  const [activity, setActivity] = useState<ActivityItem[]>([])
   const [addedValue, setAddedValue] = useState(0)
 
   // Chat history
