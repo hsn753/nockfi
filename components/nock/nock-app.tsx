@@ -1,0 +1,427 @@
+'use client'
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useWallets } from '@privy-io/react-auth'
+import { Menu, X } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import {
+  localChatStorage,
+  type ConversationSummary,
+} from '@/lib/chat-storage'
+import {
+  getAgent,
+  initialActivity,
+  initialAttention,
+  initialMessages,
+  initialPositions,
+  type ActionPreview,
+  type ActivityItem,
+  type AgentId,
+  type AttentionItem,
+  type ChatMessage,
+  type NavView,
+  type Position,
+} from './data'
+import { Sidebar } from './sidebar'
+import { ChatPanel } from './chat-panel'
+import { DashboardPanel } from './dashboard-panel'
+import { AgentsView } from './agents-view'
+import { ActivityView } from './activity-view'
+import { SettingsView } from './settings-view'
+import { BottomNav } from './bottom-nav'
+
+const PORTFOLIO_BASE = 38236.5
+const DEMO_IDS = new Set(['m1', 'm2'])
+
+export function NockApp() {
+  const [activeView, setActiveView] = useState<NavView>('chat')
+  const [selectedAgent, setSelectedAgent] = useState<AgentId | null>(null)
+  const [dashboardTab, setDashboardTab] = useState<
+    'overview' | 'balances' | 'activity'
+  >('overview')
+  const [drawerOpen, setDrawerOpen] = useState(false)
+
+  const { wallets } = useWallets()
+  const walletAddress = wallets[0]?.address
+
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [isRobinLoading, setIsRobinLoading] = useState(false)
+  const [attention, setAttention] = useState<AttentionItem[]>(initialAttention)
+  const [positions, setPositions] = useState<Position[]>(initialPositions)
+  const [activity, setActivity] = useState<ActivityItem[]>(initialActivity)
+  const [addedValue, setAddedValue] = useState(0)
+
+  // Chat history
+  const conversationIdRef = useRef<string | null>(null)
+  const [history, setHistory] = useState<ConversationSummary[]>([])
+
+  useEffect(() => {
+    setHistory(localChatStorage.list())
+  }, [])
+
+  // Auto-save whenever messages change, skipping the initial demo state and empty chats.
+  useEffect(() => {
+    if (messages === initialMessages || messages.length === 0) return
+    const firstUserMsg = messages.find((m) => m.role === 'user')
+    if (!firstUserMsg) return
+
+    if (!conversationIdRef.current) {
+      conversationIdRef.current = `conv-${Date.now()}`
+    }
+    const existing = localChatStorage.get(conversationIdRef.current)
+    localChatStorage.save({
+      id: conversationIdRef.current,
+      title: firstUserMsg.text.slice(0, 60),
+      createdAt: existing?.createdAt ?? Date.now(),
+      messages,
+    })
+    setHistory(localChatStorage.list())
+  }, [messages])
+
+  const portfolioValue = (PORTFOLIO_BASE + addedValue).toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  })
+
+  const handleNavigate = useCallback((view: NavView) => {
+    setActiveView(view)
+    setSelectedAgent(null)
+    setDrawerOpen(false)
+  }, [])
+
+  const handleSelectAgent = useCallback((id: AgentId | null) => {
+    if (id) {
+      setActiveView('agents')
+      setSelectedAgent(id)
+    } else {
+      setSelectedAgent(null)
+    }
+    setDrawerOpen(false)
+  }, [])
+
+  const handleSend = useCallback(
+    async (text: string) => {
+      const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
+      setMessages((prev) => [...prev, userMsg])
+      setIsRobinLoading(true)
+
+      try {
+        const history: ChatMessage[] = [
+          ...messages.filter((m) => !DEMO_IDS.has(m.id)),
+          userMsg,
+        ]
+
+        const res = await fetch('/api/robin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: history, walletAddress }),
+        })
+
+        const { text: replyText, action } = (await res.json()) as {
+          text: string
+          action?: ActionPreview
+        }
+
+        const replyMsg: ChatMessage = {
+          id: `${Date.now()}-r`,
+          role: 'robin',
+          text: replyText,
+          ...(action ? { action } : {}),
+        }
+
+        setMessages((prev) => [...prev, replyMsg])
+      } catch {
+        setMessages((prev) => [
+          ...prev,
+          { id: `${Date.now()}-r`, role: 'robin', text: 'Something went wrong. Please try again.' },
+        ])
+      } finally {
+        setIsRobinLoading(false)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messages],
+  )
+
+  const handleDraw = useCallback((actionId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.role === 'robin' && m.action && m.action.id === actionId
+          ? { ...m, action: { ...m.action, status: 'reviewing' as const } }
+          : m,
+      ),
+    )
+  }, [])
+
+  const handleLoose = useCallback((actionId: string) => {
+    // Enter confirming state.
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.role === 'robin' && m.action && m.action.id === actionId
+          ? { ...m, action: { ...m.action, status: 'confirming' } }
+          : m,
+      ),
+    )
+
+    // After a brief moment, execute: mark executed, remove matching attention,
+    // add active position, add activity row, and confirm in chat.
+    setTimeout(() => {
+      setMessages((prev) => {
+        const target = prev.find(
+          (m) => m.role === 'robin' && m.action?.id === actionId,
+        ) as Extract<ChatMessage, { role: 'robin' }> | undefined
+        const action = target?.action
+        if (!action) return prev
+
+        const agent = getAgent(action.agent)
+
+        // Mark executed and append a confirmation message.
+        const updated = prev.map((m) =>
+          m.role === 'robin' && m.action && m.action.id === actionId
+            ? { ...m, action: { ...m.action, status: 'executed' as const } }
+            : m,
+        )
+
+        const confirm: ChatMessage = {
+          id: `${Date.now()}-c`,
+          role: 'robin',
+          text: `Done. ${action.outcome.title} is now live and tracked in your dashboard under active positions.`,
+        }
+
+        // Side effects for the shared event.
+        const newPosition: Position = {
+          id: `pos-${actionId}`,
+          agent: action.agent,
+          title: action.outcome.title,
+          subtitle: `${agent.name} · active`,
+          value: action.outcome.value,
+          meta: action.outcome.meta,
+          metaPositive: true,
+        }
+        const newActivity: ActivityItem = {
+          id: `act-log-${actionId}`,
+          agent: action.agent,
+          title: action.outcome.activityTitle,
+          detail: action.detail,
+          time: 'Just now',
+          amount: action.outcome.activityAmount,
+        }
+
+        setPositions((p) =>
+          p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
+        )
+        setActivity((a) =>
+          a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
+        )
+        setAttention((att) => att.filter((x) => x.agent !== action.agent))
+        setAddedValue(
+          (v) =>
+            v + parseFloat(action.outcome.value.replace(/[^0-9.]/g, '') || '0'),
+        )
+
+        return [...updated, confirm]
+      })
+    }, 1200)
+  }, [])
+
+  const handleNewChat = useCallback(() => {
+    setMessages([])
+    conversationIdRef.current = null
+    setActiveView('chat')
+    setDrawerOpen(false)
+  }, [])
+
+  const handleLoadConversation = useCallback((id: string) => {
+    const conv = localChatStorage.get(id)
+    if (!conv) return
+    setMessages(conv.messages)
+    conversationIdRef.current = id
+    setActiveView('chat')
+    setDrawerOpen(false)
+  }, [])
+
+  const handleDeleteConversation = useCallback((id: string) => {
+    localChatStorage.remove(id)
+    setHistory(localChatStorage.list())
+    if (conversationIdRef.current === id) {
+      setMessages([])
+      conversationIdRef.current = null
+    }
+  }, [])
+
+  // ---- Rendering helpers ----
+  function renderDesktopMain() {
+    if (activeView === 'agents') {
+      return (
+        <AgentsView
+          selectedAgent={selectedAgent}
+          onSelect={handleSelectAgent}
+        />
+      )
+    }
+    if (activeView === 'activity') {
+      return <ActivityView activity={activity} />
+    }
+    if (activeView === 'settings') {
+      return <SettingsView />
+    }
+    // chat / overview / dashboard -> split
+    return (
+      <div className="flex h-full min-h-0 flex-1">
+        <div className="min-w-0 flex-1">
+          <ChatPanel
+            messages={messages}
+            onSend={handleSend}
+            onDraw={handleDraw}
+            onLoose={handleLoose}
+            onNewChat={handleNewChat}
+            isLoading={isRobinLoading}
+          />
+        </div>
+        <div className="hidden w-72 shrink-0 border-l border-border md:block lg:w-80">
+          <DashboardPanel
+            tab={dashboardTab}
+            onTabChange={setDashboardTab}
+            attention={attention}
+            positions={positions}
+            activity={activity}
+            portfolioValue={portfolioValue}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  function renderMobileMain() {
+    switch (activeView) {
+      case 'agents':
+        return (
+          <AgentsView
+            selectedAgent={selectedAgent}
+            onSelect={handleSelectAgent}
+          />
+        )
+      case 'activity':
+        return <ActivityView activity={activity} />
+      case 'settings':
+        return <SettingsView />
+      case 'dashboard':
+      case 'overview':
+        return (
+          <DashboardPanel
+            tab={dashboardTab}
+            onTabChange={setDashboardTab}
+            attention={attention}
+            positions={positions}
+            activity={activity}
+            portfolioValue={portfolioValue}
+          />
+        )
+      default:
+        return (
+          <ChatPanel
+            messages={messages}
+            onSend={handleSend}
+            onDraw={handleDraw}
+            onLoose={handleLoose}
+            onNewChat={handleNewChat}
+            isLoading={isRobinLoading}
+          />
+        )
+    }
+  }
+
+  const mobileTitle =
+    activeView === 'agents'
+      ? 'Agents'
+      : activeView === 'activity'
+        ? 'Activity'
+        : activeView === 'settings'
+          ? 'Settings'
+          : activeView === 'dashboard' || activeView === 'overview'
+            ? 'Dashboard'
+            : 'Robin'
+
+  return (
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-background text-foreground">
+      {/* Desktop sidebar */}
+      <aside className="hidden w-44 shrink-0 border-r border-border md:block lg:w-60">
+        <Sidebar
+          activeView={activeView}
+          onNavigate={handleNavigate}
+          onSelectAgent={handleSelectAgent}
+          selectedAgent={selectedAgent}
+          history={history}
+          activeConversationId={conversationIdRef.current}
+          onLoadConversation={handleLoadConversation}
+          onDeleteConversation={handleDeleteConversation}
+        />
+      </aside>
+
+      {/* Main column */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Mobile top bar */}
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4 md:hidden">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Open menu"
+            className="-ml-1 flex size-9 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+          >
+            <Menu className="size-5" strokeWidth={1.75} />
+          </button>
+          <span className="text-base font-semibold tracking-tight">
+            <span className="text-foreground">N</span>
+            <span className="text-primary">ock</span>
+          </span>
+          <span className="ml-auto text-sm text-muted-foreground">
+            {mobileTitle}
+          </span>
+        </header>
+
+        {/* Desktop main */}
+        <main className="hidden min-h-0 flex-1 md:flex">
+          {renderDesktopMain()}
+        </main>
+
+        {/* Mobile main */}
+        <main className="min-h-0 flex-1 md:hidden">{renderMobileMain()}</main>
+
+        {/* Mobile bottom nav */}
+        <BottomNav active={activeView} onChange={handleNavigate} />
+      </div>
+
+      {/* Mobile drawer */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={() => setDrawerOpen(false)}
+            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+          />
+          <div className="absolute inset-y-0 left-0 w-72 max-w-[80%] border-r border-border shadow-xl">
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(false)}
+              aria-label="Close menu"
+              className="absolute right-3 top-4 z-10 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-4" strokeWidth={1.75} />
+            </button>
+            <Sidebar
+              activeView={activeView}
+              onNavigate={handleNavigate}
+              onSelectAgent={handleSelectAgent}
+              selectedAgent={selectedAgent}
+              history={history}
+              activeConversationId={conversationIdRef.current}
+              onLoadConversation={handleLoadConversation}
+              onDeleteConversation={handleDeleteConversation}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
