@@ -1,20 +1,31 @@
 import { defineChain } from 'viem'
 
-// Public, keyless RPC for the browser-side chain definition (rate-limited but fine
-// for wallet connectivity). All balance reads use the keyed server-side RPC_URL.
-const PUBLIC_RPC = 'https://rpc.testnet.chain.robinhood.com'
+const PUBLIC_RPC = process.env.NEXT_PUBLIC_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com'
+const CHAIN_ID = 4663
+const BLOCK_EXPLORER_URL = 'https://robinhoodchain.blockscout.com'
 
-const CHAIN_ID = parseInt(process.env.NEXT_PUBLIC_CHAIN_ID!, 10)
-const BLOCK_EXPLORER_URL = process.env.NEXT_PUBLIC_BLOCK_EXPLORER_URL!
-
-export const nockChain = defineChain({
+export const robinhoodChain = defineChain({
   id: CHAIN_ID,
-  name: 'Robinhood Testnet',
+  name: 'Robinhood Chain',
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
   rpcUrls: {
     default: { http: [PUBLIC_RPC] },
   },
   blockExplorers: {
-    default: { name: 'Explorer', url: BLOCK_EXPLORER_URL },
+    default: { name: 'Blockscout', url: BLOCK_EXPLORER_URL },
   },
 })
+
+export const robinhoodTestnet = defineChain({
+  id: 46630,
+  name: 'Robinhood Chain Testnet',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://rpc.testnet.chain.robinhood.com'] },
+  },
+  blockExplorers: {
+    default: { name: 'Blockscout', url: 'https://explorer.testnet.chain.robinhood.com' },
+  },
+})
+
+export const nockChain = robinhoodChain
