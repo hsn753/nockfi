@@ -1,7 +1,7 @@
 import { parseUnits, formatUnits } from 'viem'
 
 const ZEROX_BASE = 'https://api.0x.org'
-const CHAIN_ID = 46630
+const CHAIN_ID = 4663
 
 export const SWAP_TOKENS: Record<string, { address: string; decimals: number }> = {
   USDG: { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
