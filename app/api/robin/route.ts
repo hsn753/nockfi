@@ -225,8 +225,8 @@ export async function POST(request: Request) {
 
     for (let i = 0; i < 10; i++) {
       const response = await client.messages.create({
-        model: 'claude-3-haiku-20240307',
-        max_tokens: 2048,
+        model: 'claude-3-opus-20240229',
+        max_tokens: 1024,
         system: SYSTEM_PROMPT,
         tools: TOOLS,
         messages: anthropicMessages,
