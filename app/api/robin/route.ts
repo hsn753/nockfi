@@ -200,6 +200,15 @@ const TOOLS: Anthropic.Messages.Tool[] = [
 
 export async function POST(request: Request) {
   try {
+    // Validate API key
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error('[robin] Missing ANTHROPIC_API_KEY')
+      return NextResponse.json(
+        { text: 'AI service not configured. Please contact support.' },
+        { status: 500 },
+      )
+    }
+
     const { messages, walletAddress } = (await request.json()) as {
       messages: ChatMessage[]
       walletAddress?: string
@@ -330,9 +339,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ text: responseText || fallback, action })
   } catch (err) {
-    console.error('[robin] API error', err)
+    console.error('[robin] API error:', err)
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    console.error('[robin] Error details:', errorMessage)
+    
     return NextResponse.json(
-      { text: 'Something went wrong on my end. Please try again in a moment.' },
+      { 
+        text: process.env.NODE_ENV === 'development' 
+          ? `Error: ${errorMessage}` 
+          : 'Something went wrong on my end. Please try again in a moment.' 
+      },
       { status: 500 },
     )
   }
