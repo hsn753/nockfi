@@ -32,7 +32,8 @@ import { ActivityView } from './activity-view'
 import { SettingsView } from './settings-view'
 import { BottomNav } from './bottom-nav'
 
-const PORTFOLIO_BASE = 38236.5
+// Portfolio value calculation - will be real once we have price feeds
+const PORTFOLIO_BASE = 0
 const DEMO_IDS = new Set(['m1', 'm2'])
 
 export function NockApp() {
@@ -62,9 +63,9 @@ export function NockApp() {
     setHistory(localChatStorage.list())
   }, [])
 
-  // Auto-save whenever messages change, skipping the initial demo state and empty chats.
+  // Auto-save whenever messages change, skipping empty chats.
   useEffect(() => {
-    if (messages === initialMessages || messages.length === 0) return
+    if (messages.length === 0) return
     const firstUserMsg = messages.find((m) => m.role === 'user')
     if (!firstUserMsg) return
 

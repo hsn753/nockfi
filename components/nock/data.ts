@@ -152,37 +152,7 @@ export type Balance = {
   positive: boolean
 }
 
-export const initialMessages: ChatMessage[] = [
-  {
-    id: 'm1',
-    role: 'user',
-    text: 'Put my idle USDC to work.',
-  },
-  {
-    id: 'm2',
-    role: 'robin',
-    text: "You have 12,400 USDC sitting idle. I'll route this to the yield agent for a lending position on Marlin, currently the best risk-adjusted rate. Review the preview and confirm when you're ready.",
-    action: {
-      id: 'act-1',
-      agent: 'yield',
-      action: 'Lend 12,400 USDC on Marlin',
-      detail: 'Supply-side lending, withdraw anytime, no lockup.',
-      metrics: [
-        { label: 'Estimated APY', value: '7.02%', positive: true },
-        { label: 'Projected yearly', value: '+$870', positive: true },
-        { label: 'Lockup', value: 'None' },
-      ],
-      status: 'pending',
-      outcome: {
-        title: 'USDC lending',
-        value: '$12,400.00',
-        meta: '7.02% APY',
-        activityTitle: 'Lent 12,400 USDC on Marlin',
-        activityAmount: '12,400 USDC',
-      },
-    },
-  },
-]
+export const initialMessages: ChatMessage[] = []
 
 export const initialAttention: AttentionItem[] = [
   {
