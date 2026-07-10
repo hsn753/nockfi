@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, Fragment } from 'react'
 import { Send, SquarePen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from './data'
@@ -14,6 +14,31 @@ type Props = {
   onLoose: (id: string) => void
   onNewChat: () => void
   isLoading?: boolean
+}
+
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g
+
+// Message text is plain (no markdown), but URLs Robin sends — e.g. a bridge or
+// block explorer link — need to actually be tappable rather than inert text.
+// split() with a capturing group always puts matches at odd indices, so index
+// parity tells us which parts are URLs without re-testing a stateful global regex.
+function renderMessageText(text: string) {
+  const parts = text.split(URL_PATTERN)
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <a
+        key={i}
+        href={part}
+        target="_blank"
+        rel="noreferrer"
+        className="underline underline-offset-2 hover:text-primary"
+      >
+        {part}
+      </a>
+    ) : (
+      <Fragment key={i}>{part}</Fragment>
+    ),
+  )
 }
 
 export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoading }: Props) {
@@ -75,7 +100,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
             m.role === 'user' ? (
               <div key={m.id} className="flex justify-end">
                 <div className="max-w-[82%] rounded-2xl rounded-br-md border border-border bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
-                  {m.text}
+                  {renderMessageText(m.text)}
                 </div>
               </div>
             ) : (
@@ -83,7 +108,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
                 <RobinAvatar className="mt-1 size-8 shrink-0" />
                 <div className="min-w-0 max-w-[88%]">
                   <div className="rounded-2xl rounded-tl-md border border-border bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground">
-                    {m.text}
+                    {renderMessageText(m.text)}
                   </div>
                   {m.action && (
                     <ActionPreviewCard action={m.action} onDraw={onDraw} onLoose={onLoose} />
