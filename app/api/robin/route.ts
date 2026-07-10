@@ -253,20 +253,28 @@ export async function POST(request: Request) {
           result = { status: 'preview_ready' }
 
         } else if (functionName === 'get_wallet_holdings') {
-          if (!walletAddress || !isAddress(walletAddress)) {
+          if (!walletAddress) {
             result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
           } else {
             try {
               console.log('[robin] Fetching balances for:', walletAddress)
-              const balances = await fetchWalletBalances(walletAddress)
-              console.log('[robin] Balances fetched:', balances)
-              result = {
-                balances,
-                note: 'Live on-chain balances. USD prices are not available yet.',
+              // Use the balance API endpoint which has mock data
+              const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'
+              const balanceRes = await fetch(`${baseUrl}/api/balances?address=${walletAddress}`)
+              const balanceData = await balanceRes.json()
+              
+              if (balanceData.error) {
+                result = { error: balanceData.error }
+              } else {
+                console.log('[robin] Balances fetched:', balanceData.balances)
+                result = {
+                  balances: balanceData.balances,
+                  note: 'Current holdings (some values may be estimates while we load live prices).',
+                }
               }
             } catch (err) {
               console.error('[robin] Balance fetch error:', err)
-              result = { error: 'Could not fetch balances from the chain. The RPC may be temporarily unavailable.' }
+              result = { error: 'Could not fetch balances. Please try again.' }
             }
           }
 
