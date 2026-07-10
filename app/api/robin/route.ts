@@ -35,7 +35,7 @@ When the user asks what they hold, their portfolio, their balances, or anything 
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
 
 When the user wants to swap, trade, buy, or sell any token:
-- Call get_swap_quote with fromToken, toToken, and amount. Supported tokens are USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens trade against USDG (e.g. USDG -> TSLA or TSLA -> USDG). If the user doesn't specify an amount, ask for one before calling the tool.
+- Call get_swap_quote with fromToken, toToken, and amount. Supported tokens are ETH, USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens trade against USDG, and ETH trades against USDG too (e.g. ETH -> USDG, USDG -> TSLA, or TSLA -> USDG). If the user says USDC or dollars, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user doesn't specify an amount, ask for one before calling the tool.
 - If the quote comes back with an error field, tell the user what it says. Do not guess prices. If the error mentions the buy token is not authorized for trade, explain that regulated stock tokens require an authorized/verified wallet to trade, and this isn't a transient bug.
 - If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers.
 
@@ -131,7 +131,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_swap_quote',
-      description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
+      description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: ETH, USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens and ETH both trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
       parameters: {
         type: 'object',
         properties: {

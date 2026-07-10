@@ -6,7 +6,12 @@ const CHAIN_ID = 4663
 // Verified against https://docs.robinhood.com/chain/contracts/ (Robinhood Chain MAINNET, id 4663).
 // The previous addresses here were Robinhood Chain testnet addresses with no code on mainnet,
 // which is why every quote for these tokens returned no liquidity.
+// ETH uses the standard 0xEeee...EEeE pseudo-address 0x/1inch/etc. use for the native token —
+// it's not an ERC-20 contract, 0x's API special-cases it.
+const NATIVE_ETH_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+
 export const SWAP_TOKENS: Record<string, { address: string; decimals: number }> = {
+  ETH:  { address: NATIVE_ETH_ADDRESS, decimals: 18 },
   USDG: { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
   TSLA: { address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d', decimals: 18 },
   AMD:  { address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC', decimals: 18 },
