@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useWallets } from '@privy-io/react-auth'
-import { useWalletClient } from 'wagmi'
+import { useWalletClient, usePublicClient } from 'wagmi'
+import { erc20Abi, formatUnits, parseUnits } from 'viem'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -10,6 +11,7 @@ import {
   type ConversationSummary,
 } from '@/lib/chat-storage'
 import { executeSwap } from '@/lib/execute-swap'
+import { SWAP_TOKENS } from '@/lib/get-swap-quote'
 import {
   getAgent,
   initialActivity,
@@ -47,6 +49,7 @@ export function NockApp() {
   const { wallets } = useWallets()
   const walletAddress = wallets[0]?.address
   const { data: walletClient } = useWalletClient()
+  const publicClient = usePublicClient()
 
   // Debug logging
   useEffect(() => {
@@ -228,9 +231,48 @@ export function NockApp() {
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
         const txData = (action as any).transactionData
-        
+        const fromToken = ((action as any).fromToken || 'USDG') as string
+        const fromAmount = (action as any).amount || '0'
+
         if (!txData) {
           throw new Error('No transaction data in action')
+        }
+
+        // Pre-flight balance check — without this, a wallet that can't cover the
+        // transaction tends to hang and time out instead of failing cleanly, which
+        // reads as a broken app rather than "you don't have enough funds."
+        if (publicClient && walletAddress) {
+          const tokenInfo = SWAP_TOKENS[fromToken.toUpperCase()]
+          const isNativeEth = fromToken.toUpperCase() === 'ETH'
+          const requiredAmount = tokenInfo ? parseUnits(fromAmount, tokenInfo.decimals) : BigInt(0)
+          const ethBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` })
+          const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
+
+          if (isNativeEth) {
+            const totalNeeded = requiredAmount + gasCost
+            if (ethBalance < totalNeeded) {
+              throw new Error(
+                `Not enough ETH. You need about ${formatUnits(totalNeeded, 18)} ETH (swap amount + gas) but this wallet has ${formatUnits(ethBalance, 18)} ETH on Robinhood Chain. Bridge more ETH in first.`,
+              )
+            }
+          } else if (tokenInfo) {
+            const tokenBalance = await publicClient.readContract({
+              address: tokenInfo.address as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'balanceOf',
+              args: [walletAddress as `0x${string}`],
+            })
+            if (tokenBalance < requiredAmount) {
+              throw new Error(
+                `Not enough ${fromToken}. You need ${fromAmount} ${fromToken} but this wallet has ${formatUnits(tokenBalance, tokenInfo.decimals)} ${fromToken} on Robinhood Chain.`,
+              )
+            }
+            if (ethBalance < gasCost) {
+              throw new Error(
+                `Not enough ETH for gas. This swap needs about ${formatUnits(gasCost, 18)} ETH for gas, but this wallet has ${formatUnits(ethBalance, 18)} ETH on Robinhood Chain.`,
+              )
+            }
+          }
         }
 
         console.log('Executing real swap transaction...')
