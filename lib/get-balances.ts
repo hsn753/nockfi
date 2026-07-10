@@ -24,20 +24,38 @@ function fmtBalance(raw: bigint, decimals: number): string {
 
 export async function fetchWalletBalances(address: `0x${string}`): Promise<BalanceEntry[]> {
   const rpcUrl = process.env.RPC_URL
-  if (!rpcUrl) throw new Error('RPC_URL not configured')
+  if (!rpcUrl) {
+    console.error('[get-balances] RPC_URL not configured')
+    throw new Error('RPC_URL not configured')
+  }
+
+  console.log('[get-balances] Using RPC:', rpcUrl.substring(0, 30) + '...')
+  console.log('[get-balances] Fetching balances for:', address)
 
   const client = createPublicClient({
     chain: nockChain,
     transport: http(rpcUrl),
   })
 
-  const [ethRaw, ...erc20Results] = await Promise.all([
-    client.getBalance({ address }),
-    ...TOKENS.flatMap(({ address: tokenAddr }) => [
-      client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [address] }),
-      client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'decimals' }),
-    ]),
-  ])
+  try {
+    const [ethRaw, ...erc20Results] = await Promise.all([
+      client.getBalance({ address }),
+      ...TOKENS.flatMap(({ address: tokenAddr }) => [
+        client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [address] }),
+        client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'decimals' }),
+      ]),
+    ])
+  
+    console.log('[get-balances] Raw results received')
+  
+    return buildBalanceResults(ethRaw, erc20Results)
+  } catch (err) {
+    console.error('[get-balances] Error during fetch:', err)
+    throw err
+  }
+}
+
+function buildBalanceResults(ethRaw: any, erc20Results: any[]): BalanceEntry[] {
 
   const tokenBalances = TOKENS.map((t, i) => {
     const raw = erc20Results[i * 2] as bigint

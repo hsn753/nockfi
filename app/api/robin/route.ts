@@ -257,12 +257,15 @@ export async function POST(request: Request) {
             result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
           } else {
             try {
+              console.log('[robin] Fetching balances for:', walletAddress)
               const balances = await fetchWalletBalances(walletAddress)
+              console.log('[robin] Balances fetched:', balances)
               result = {
                 balances,
                 note: 'Live on-chain balances. USD prices are not available yet.',
               }
-            } catch {
+            } catch (err) {
+              console.error('[robin] Balance fetch error:', err)
               result = { error: 'Could not fetch balances from the chain. The RPC may be temporarily unavailable.' }
             }
           }
