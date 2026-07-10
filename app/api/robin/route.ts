@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 import { isAddress } from 'viem'
 import { fetchWalletBalances } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const SYSTEM_PROMPT = `You are Robin, the concierge for Nock, an onchain agent platform. You help users put their capital to work across five specialized agents: yield, swap, perps, stock tokens, and vaults.
 
@@ -89,120 +89,92 @@ type ProposeActionInput = {
   }
 }
 
-const TOOLS: Anthropic.Messages.Tool[] = [
+const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
-    name: 'get_wallet_holdings',
-    description: "Returns the user's real on-chain balances from their connected wallet: native ETH and the five stock tokens (TSLA, AMD, AMZN, NFLX, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_yield_options',
-    description: "Returns current lending options and APYs for stablecoin balances across vetted protocols.",
-    input_schema: {
-      type: 'object',
-      properties: { asset: { type: 'string', description: 'Token symbol to get yield options for, e.g. USDC' } },
-      required: [],
-    },
-  },
-  {
-    name: 'get_swap_quote',
-    description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: USDG, TSLA, AMD, AMZN, NFLX, PLTR. Stock tokens trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        fromToken: { type: 'string', description: 'Token symbol to sell, e.g. USDG or TSLA' },
-        toToken:   { type: 'string', description: 'Token symbol to buy, e.g. TSLA or USDG' },
-        amount:    { type: 'string', description: 'Human-readable amount to sell, e.g. "100" or "0.5"' },
+    type: 'function',
+    function: {
+      name: 'get_wallet_holdings',
+      description: "Returns the user's real on-chain balances from their connected wallet: native ETH and the five stock tokens (TSLA, AMD, AMZN, NFLX, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
       },
-      required: ['fromToken', 'toToken', 'amount'],
     },
   },
   {
-    name: 'get_perps_info',
-    description: "Returns perpetual futures market data and the user's current collateral and open positions.",
-    input_schema: {
-      type: 'object',
-      properties: { asset: { type: 'string', description: 'Asset to get perps info for, e.g. ETH' } },
-      required: [],
-    },
-  },
-  {
-    name: 'get_stock_token_info',
-    description: 'Returns current reference prices for tokenized stock tokens: TSLA, AMD, AMZN, NFLX, PLTR.',
-    input_schema: {
-      type: 'object',
-      properties: { symbol: { type: 'string', description: 'Stock symbol, e.g. TSLA' } },
-      required: [],
-    },
-  },
-  {
-    name: 'check_vault_limits',
-    description: "Returns vault deposit limits and current APY targets.",
-    input_schema: {
-      type: 'object',
-      properties: { vaultName: { type: 'string', description: 'Vault name to check, e.g. Balanced' } },
-      required: [],
-    },
-  },
-  {
-    name: 'propose_action',
-    description: 'Emit a structured action preview card for the user to review before executing. Call this after gathering data from the relevant tool.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        agent: {
-          type: 'string',
-          enum: ['yield', 'perps', 'swap', 'stock', 'vault'],
-          description: 'Which agent handles this action',
+    type: 'function',
+    function: {
+      name: 'get_swap_quote',
+      description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: USDG, TSLA, AMD, AMZN, NFLX, PLTR. Stock tokens trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromToken: { type: 'string', description: 'Token symbol to sell, e.g. USDG or TSLA' },
+          toToken:   { type: 'string', description: 'Token symbol to buy, e.g. TSLA or USDG' },
+          amount:    { type: 'string', description: 'Human-readable amount to sell, e.g. "100" or "0.5"' },
         },
-        action: {
-          type: 'string',
-          description: 'Short label for the action, e.g. "Lend 12,400 USDC on Marlin"',
-        },
-        detail: {
-          type: 'string',
-          description: 'One-sentence detail about the action and any key conditions',
-        },
-        metrics: {
-          type: 'array',
-          description: 'Two to four key metrics to display on the card',
-          items: {
-            type: 'object',
-            properties: {
-              label: { type: 'string' },
-              value: { type: 'string' },
-              positive: { type: 'boolean', description: 'If true, value is highlighted green' },
+        required: ['fromToken', 'toToken', 'amount'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'propose_action',
+      description: 'Emit a structured action preview card for the user to review before executing. Call this after gathering data from the relevant tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agent: {
+            type: 'string',
+            enum: ['yield', 'perps', 'swap', 'stock', 'vault'],
+            description: 'Which agent handles this action',
+          },
+          action: {
+            type: 'string',
+            description: 'Short label for the action, e.g. "Swap 100 USDG for TSLA"',
+          },
+          detail: {
+            type: 'string',
+            description: 'One-sentence detail about the action and any key conditions',
+          },
+          metrics: {
+            type: 'array',
+            description: 'Two to four key metrics to display on the card',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                value: { type: 'string' },
+                positive: { type: 'boolean', description: 'If true, value is highlighted green' },
+              },
+              required: ['label', 'value'],
             },
-            required: ['label', 'value'],
+          },
+          outcome: {
+            type: 'object',
+            description: 'Data used to build the resulting position and activity row after execution',
+            properties: {
+              title: { type: 'string', description: 'Short position title, e.g. "TSLA position"' },
+              value: { type: 'string', description: 'Dollar value of the position, e.g. "$347.80"' },
+              meta: { type: 'string', description: 'Position meta label, e.g. "1.0 TSLA"' },
+              activityTitle: { type: 'string', description: 'Activity log title, e.g. "Swapped 100 USDG for TSLA"' },
+              activityAmount: { type: 'string', description: 'Optional amount shown in the activity row' },
+            },
+            required: ['title', 'value', 'meta', 'activityTitle'],
           },
         },
-        outcome: {
-          type: 'object',
-          description: 'Data used to build the resulting position and activity row after execution',
-          properties: {
-            title: { type: 'string', description: 'Short position title, e.g. "USDC lending"' },
-            value: { type: 'string', description: 'Dollar value of the position, e.g. "$12,400.00"' },
-            meta: { type: 'string', description: 'Position meta label, e.g. "7.02% APY"' },
-            activityTitle: { type: 'string', description: 'Activity log title, e.g. "Lent 12,400 USDC on Marlin"' },
-            activityAmount: { type: 'string', description: 'Optional amount shown in the activity row' },
-          },
-          required: ['title', 'value', 'meta', 'activityTitle'],
-        },
+        required: ['agent', 'action', 'detail', 'metrics', 'outcome'],
       },
-      required: ['agent', 'action', 'detail', 'metrics', 'outcome'],
     },
   },
 ]
 
 export async function POST(request: Request) {
   try {
-    // Validate API key
-    if (!process.env.ANTHROPIC_API_KEY) {
-      console.error('[robin] Missing ANTHROPIC_API_KEY')
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('[robin] Missing OPENAI_API_KEY')
       return NextResponse.json(
         { text: 'AI service not configured. Please contact support.' },
         { status: 500 },
@@ -214,7 +186,7 @@ export async function POST(request: Request) {
       walletAddress?: string
     }
 
-    const anthropicMessages: Anthropic.Messages.MessageParam[] = messages.map((m) => ({
+    const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = messages.map((m) => ({
       role: m.role === 'user' ? 'user' : 'assistant',
       content: m.text,
     }))
@@ -223,115 +195,118 @@ export async function POST(request: Request) {
     let responseText = ''
     let lastSwapQuote: any = null
 
-    for (let i = 0; i < 10; i++) {
-      const response = await client.messages.create({
-        model: 'claude-3-opus-20240229',
-        max_tokens: 1024,
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
-        messages: anthropicMessages,
-      })
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...openaiMessages,
+      ],
+      tools: TOOLS,
+      tool_choice: 'auto',
+      max_tokens: 1024,
+    })
 
-      const textBlocks = response.content.filter(
-        (b): b is Anthropic.Messages.TextBlock => b.type === 'text',
-      )
+    const message = response.choices[0]?.message
 
-      if (response.stop_reason === 'end_turn') {
-        responseText = textBlocks.map((b) => b.text).join(' ').trim()
-        break
-      }
+    if (!message) {
+      return NextResponse.json({ text: 'No response from AI' }, { status: 500 })
+    }
 
-      if (response.stop_reason === 'tool_use') {
-        anthropicMessages.push({ role: 'assistant', content: response.content })
+    // Handle tool calls
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      const toolMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        ...openaiMessages,
+        message as any,
+      ]
 
-        const toolResults: Anthropic.Messages.ToolResultBlockParam[] = []
+      for (const toolCall of message.tool_calls) {
+        const functionName = toolCall.function.name
+        const functionArgs = JSON.parse(toolCall.function.arguments)
 
-        for (const block of response.content) {
-          if (block.type !== 'tool_use') continue
+        let result: unknown
 
-          let result: unknown
+        if (functionName === 'propose_action') {
+          const input = functionArgs as ProposeActionInput
+          action = {
+            id: `act-${Date.now()}`,
+            agent: input.agent,
+            action: input.action,
+            detail: input.detail,
+            metrics: input.metrics,
+            status: 'pending',
+            outcome: input.outcome,
+            ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
+              transactionData: lastSwapQuote.transaction,
+              fromToken: lastSwapQuote.fromSymbol,
+              toToken: lastSwapQuote.toSymbol,
+              amount: lastSwapQuote.fromAmount,
+            } : {}),
+          } as any
+          result = { status: 'preview_ready' }
 
-          if (block.name === 'propose_action') {
-            const input = block.input as ProposeActionInput
-            action = {
-              id: `act-${Date.now()}`,
-              agent: input.agent,
-              action: input.action,
-              detail: input.detail,
-              metrics: input.metrics,
-              status: 'pending',
-              outcome: input.outcome,
-              // Include swap transaction data if this is a swap action
-              ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
-                transactionData: lastSwapQuote.transaction,
-                fromToken: lastSwapQuote.fromSymbol,
-                toToken: lastSwapQuote.toSymbol,
-                amount: lastSwapQuote.fromAmount,
-              } : {}),
-            } as any
-            result = { status: 'preview_ready' }
-
-          } else if (block.name === 'get_wallet_holdings') {
-            if (!walletAddress || !isAddress(walletAddress)) {
-              result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
-            } else {
-              try {
-                const balances = await fetchWalletBalances(walletAddress)
-                result = {
-                  balances,
-                  note: 'Live on-chain balances. USD prices are not available yet.',
-                }
-              } catch {
-                result = { error: 'Could not fetch balances from the chain. The RPC may be temporarily unavailable.' }
-              }
-            }
-
-          } else if (block.name === 'get_swap_quote') {
-            const { fromToken, toToken, amount } = block.input as {
-              fromToken: string
-              toToken: string
-              amount: string
-            }
-            if (!fromToken || !toToken || !amount) {
-              result = { error: 'fromToken, toToken, and amount are all required.' }
-            } else {
-              const supportedSymbols = Object.keys(SWAP_TOKENS).join(', ')
-              try {
-                const quote = await fetchSwapQuote({
-                  fromToken,
-                  toToken,
-                  amount,
-                  taker: walletAddress,
-                })
-                if (!quote.error) {
-                  lastSwapQuote = quote
-                }
-                result = quote.error
-                  ? { error: quote.error, supportedTokens: supportedSymbols }
-                  : { ...quote, supportedTokens: supportedSymbols }
-              } catch {
-                result = { error: 'Failed to reach the 0x swap API. Try again in a moment.', supportedTokens: supportedSymbols }
-              }
-            }
-
+        } else if (functionName === 'get_wallet_holdings') {
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
           } else {
-            result = callStubTool(block.name, block.input)
+            try {
+              const balances = await fetchWalletBalances(walletAddress)
+              result = {
+                balances,
+                note: 'Live on-chain balances. USD prices are not available yet.',
+              }
+            } catch {
+              result = { error: 'Could not fetch balances from the chain. The RPC may be temporarily unavailable.' }
+            }
           }
 
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(result),
-          })
+        } else if (functionName === 'get_swap_quote') {
+          const { fromToken, toToken, amount } = functionArgs
+          if (!fromToken || !toToken || !amount) {
+            result = { error: 'fromToken, toToken, and amount are all required.' }
+          } else {
+            const supportedSymbols = Object.keys(SWAP_TOKENS).join(', ')
+            try {
+              const quote = await fetchSwapQuote({
+                fromToken,
+                toToken,
+                amount,
+                taker: walletAddress,
+              })
+              if (!quote.error) {
+                lastSwapQuote = quote
+              }
+              result = quote.error
+                ? { error: quote.error, supportedTokens: supportedSymbols }
+                : { ...quote, supportedTokens: supportedSymbols }
+            } catch {
+              result = { error: 'Failed to reach the 0x swap API. Try again in a moment.', supportedTokens: supportedSymbols }
+            }
+          }
+
+        } else {
+          result = callStubTool(functionName, functionArgs)
         }
 
-        anthropicMessages.push({ role: 'user', content: toolResults })
-        continue
+        toolMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        })
       }
 
-      // Unexpected stop reason — take whatever text we have and exit
-      responseText = textBlocks.map((b) => b.text).join(' ').trim()
-      break
+      // Get final response after tool calls
+      const finalResponse = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...toolMessages,
+        ],
+        max_tokens: 512,
+      })
+
+      responseText = finalResponse.choices[0]?.message?.content || ''
+    } else {
+      responseText = message.content || ''
     }
 
     const fallback =
