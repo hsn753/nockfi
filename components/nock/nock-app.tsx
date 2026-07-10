@@ -76,14 +76,12 @@ export function NockApp() {
 
         const data = await res.json()
         console.log('[Nock] Balances received:', data.balances)
-        
-        // For now, just show ETH value as portfolio (we don't have prices for tokens yet)
-        const ethBalance = data.balances?.find((b: any) => b.symbol === 'ETH')
-        if (ethBalance) {
-          const ethAmount = parseFloat(ethBalance.amount.replace(/,/g, '')) || 0
-          // Rough estimate: 1 ETH = $3000 (we'll add real prices later)
-          setRealPortfolioValue(ethAmount * 3000)
-        }
+
+        const total = (data.balances || []).reduce(
+          (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
+          0,
+        )
+        setRealPortfolioValue(total)
       } catch (err) {
         console.error('[Nock] Error fetching portfolio value:', err)
       }

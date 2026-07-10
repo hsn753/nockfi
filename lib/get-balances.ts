@@ -1,10 +1,12 @@
 import { createPublicClient, http, erc20Abi, formatUnits } from 'viem'
 import { nockChain } from './chain'
+import { getReferencePrices } from './get-prices'
 
 export type BalanceEntry = {
   symbol: string
   name: string
   amount: string
+  usdValue: number | null
 }
 
 // Verified against https://docs.robinhood.com/chain/contracts/ (Robinhood Chain MAINNET, id 4663).
@@ -25,6 +27,11 @@ function fmtBalance(raw: bigint, decimals: number): string {
   return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 })
 }
 
+function usdValueFor(raw: bigint, decimals: number, price: number | undefined): number | null {
+  if (price === undefined) return null
+  return parseFloat(formatUnits(raw, decimals)) * price
+}
+
 export async function fetchWalletBalances(address: `0x${string}`): Promise<BalanceEntry[]> {
   const rpcUrl = process.env.RPC_URL
   if (!rpcUrl) {
@@ -41,33 +48,39 @@ export async function fetchWalletBalances(address: `0x${string}`): Promise<Balan
   })
 
   try {
-    const [ethRaw, ...erc20Results] = await Promise.all([
-      client.getBalance({ address }),
-      ...TOKENS.flatMap(({ address: tokenAddr }) => [
-        client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [address] }),
-        client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'decimals' }),
+    const [[ethRaw, ...erc20Results], prices] = await Promise.all([
+      Promise.all([
+        client.getBalance({ address }),
+        ...TOKENS.flatMap(({ address: tokenAddr }) => [
+          client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [address] }),
+          client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'decimals' }),
+        ]),
       ]),
+      getReferencePrices().catch((err) => {
+        console.error('[get-balances] Price fetch failed:', err)
+        return {} as Record<string, number>
+      }),
     ])
-  
+
     console.log('[get-balances] Raw results received')
-  
-    return buildBalanceResults(ethRaw, erc20Results)
+
+    return buildBalanceResults(ethRaw, erc20Results, prices)
   } catch (err) {
     console.error('[get-balances] Error during fetch:', err)
     throw err
   }
 }
 
-function buildBalanceResults(ethRaw: any, erc20Results: any[]): BalanceEntry[] {
+function buildBalanceResults(ethRaw: any, erc20Results: any[], prices: Record<string, number>): BalanceEntry[] {
 
   const tokenBalances = TOKENS.map((t, i) => {
     const raw = erc20Results[i * 2] as bigint
     const dec = Number(erc20Results[i * 2 + 1])
-    return { symbol: t.symbol, name: t.name, amount: fmtBalance(raw, dec) }
+    return { symbol: t.symbol, name: t.name, amount: fmtBalance(raw, dec), usdValue: usdValueFor(raw, dec, prices[t.symbol]) }
   })
 
   return [
-    { symbol: 'ETH', name: 'Ether', amount: fmtBalance(ethRaw as bigint, 18) },
+    { symbol: 'ETH', name: 'Ether', amount: fmtBalance(ethRaw as bigint, 18), usdValue: usdValueFor(ethRaw as bigint, 18, prices.ETH) },
     ...tokenBalances,
   ]
 }

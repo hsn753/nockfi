@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { isAddress } from 'viem'
 import { fetchWalletBalances } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
+import { getReferencePrices } from '@/lib/get-prices'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -31,7 +32,7 @@ When the user asks for their wallet address, deposit address, or where to send/b
 When the user asks what they hold, their portfolio, their balances, or anything about their specific holdings:
 - IMMEDIATELY call get_wallet_holdings tool. This is REQUIRED - you MUST call this tool, never skip it.
 - Do not ask if they have a wallet connected - just call the tool, it will tell you if no wallet is connected.
-- Present the real amounts you get back. Since live prices are not available yet, give amounts and symbols only and mention that dollar values are coming soon. Do not make up USD values.
+- Each holding includes a real usdValue (ETH from CoinGecko, stock tokens from live market price — null if a price feed failed for that one asset). Present both the token amount and its $ value, and total them into a portfolio $ figure if more than one asset has a usdValue. If usdValue is null for something, show the amount and say its dollar value isn't available right now rather than guessing.
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
 
 When the user wants to swap, trade, buy, or sell any token:
@@ -119,7 +120,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_wallet_holdings',
-      description: "Returns the user's real on-chain balances from their connected wallet: native ETH and the five stock tokens (TSLA, AMD, AMZN, AAPL, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
+      description: "Returns the user's real on-chain balances from their connected wallet, each with a live usdValue: native ETH and the five stock tokens (TSLA, AMD, AMZN, AAPL, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
       parameters: {
         type: 'object',
         properties: {},
@@ -283,7 +284,7 @@ export async function POST(request: Request) {
               console.log('[robin] Balances fetched:', balances)
               result = {
                 balances,
-                note: 'Live on-chain balances. USD prices are not available yet.',
+                note: 'Live on-chain balances with live USD reference prices.',
               }
             } catch (err) {
               console.error('[robin] Balance fetch error:', err)
@@ -313,6 +314,23 @@ export async function POST(request: Request) {
             } catch {
               result = { error: 'Failed to reach the 0x swap API. Try again in a moment.', supportedTokens: supportedSymbols }
             }
+          }
+
+        } else if (functionName === 'get_stock_token_info') {
+          try {
+            const prices = await getReferencePrices()
+            result = {
+              tokens: Object.keys(SWAP_TOKENS)
+                .filter((s) => s !== 'ETH' && s !== 'USDG')
+                .map((symbol) => ({
+                  symbol,
+                  referencePrice: prices[symbol] !== undefined ? `$${prices[symbol].toFixed(2)}` : null,
+                })),
+              tradingHours: '24/7',
+              requiresNock: true,
+            }
+          } catch {
+            result = callStubTool(functionName, functionArgs)
           }
 
         } else {
