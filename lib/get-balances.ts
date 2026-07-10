@@ -13,6 +13,7 @@ export type BalanceEntry = {
 // The previous addresses here were Robinhood Chain testnet addresses with no code on mainnet,
 // which is why every balance/quote call for these tokens was reverting.
 const TOKENS = [
+  { symbol: 'USDG', name: 'USDG',                 address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as `0x${string}` },
   { symbol: 'TSLA', name: 'Tesla stock token',    address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d' as `0x${string}` },
   { symbol: 'AMD',  name: 'AMD stock token',      address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC' as `0x${string}` },
   { symbol: 'AMZN', name: 'Amazon stock token',   address: '0x12f190a9F9d7D37a250758b26824B97CE941bF54' as `0x${string}` },

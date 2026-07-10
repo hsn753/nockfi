@@ -121,7 +121,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_wallet_holdings',
-      description: "Returns the user's real on-chain balances from their connected wallet, each with a live usdValue: native ETH and the five stock tokens (TSLA, AMD, AMZN, AAPL, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
+      description: "Returns the user's real on-chain balances from their connected wallet, each with a live usdValue: native ETH, USDG, and the five stock tokens (TSLA, AMD, AMZN, AAPL, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
       parameters: {
         type: 'object',
         properties: {},

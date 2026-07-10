@@ -273,9 +273,14 @@ export function NockApp() {
           }
         }
 
+        if (!publicClient) {
+          throw new Error('Not connected to Robinhood Chain — refresh and try again.')
+        }
+
         console.log('Executing real swap transaction...')
         const result = await executeSwap({
           walletClient,
+          publicClient,
           fromToken: (action as any).fromToken || 'USDG',
           toToken: (action as any).toToken || 'TSLA',
           amount: (action as any).amount || '0',
@@ -283,7 +288,8 @@ export function NockApp() {
         })
 
         if (result.error) {
-          throw new Error(result.error)
+          const hashSuffix = result.txHash && result.txHash !== '0x' ? ` (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)})` : ''
+          throw new Error(`${result.error}${hashSuffix}`)
         }
 
         console.log('Swap executed! TX Hash:', result.txHash)
