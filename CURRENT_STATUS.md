@@ -46,16 +46,18 @@
 
 ## 🔧 CONFIGURATION
 
-### Environment Variables (Set on Vercel)
+### Environment Variables (Set on Vercel — see Vercel dashboard for actual values, never commit them here)
 ```
-ANTHROPIC_API_KEY=sk-ant-api03-...
-NEXT_PUBLIC_ALCHEMY_API_KEY=9HMJCmlFrm2tcQWV83AI5
-NEXT_PUBLIC_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/9HMJCmlFrm2tcQWV83AI5
-RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/9HMJCmlFrm2tcQWV83AI5
+ANTHROPIC_API_KEY=
+NEXT_PUBLIC_ALCHEMY_API_KEY=
+NEXT_PUBLIC_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>
+RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>
 NEXT_PUBLIC_PRIVY_APP_ID=cmrd7fljy00hk0dih0hlbfmnp
-PRIVY_APP_SECRET=privy_app_secret_...
-ZEROX_API_KEY=ab88e8ba-73ca-460b-8db9-58ac8362095f
+PRIVY_APP_SECRET=
+ZEROX_API_KEY=
 ```
+
+> Note: real Alchemy and 0x API keys were previously committed here in plaintext. Both have been rotated. Never put real secret values in a tracked file — only in Vercel env vars / `.env.local` (gitignored).
 
 ## 🚀 LIVE DEPLOYMENT
 

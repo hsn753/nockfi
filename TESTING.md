@@ -110,15 +110,15 @@ pnpm install
 ```
 
 ### Environment Variables
-Create `.env.local` with:
+Create `.env.local` (gitignored — pull real values with `vercel env pull .env.local`, never commit them):
 ```bash
-ANTHROPIC_API_KEY=sk-ant-api03-...
-NEXT_PUBLIC_ALCHEMY_API_KEY=9HMJCmlFrm2tcQWV83AI5
-NEXT_PUBLIC_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/9HMJCmlFrm2tcQWV83AI5
-RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/9HMJCmlFrm2tcQWV83AI5
+ANTHROPIC_API_KEY=
+NEXT_PUBLIC_ALCHEMY_API_KEY=
+NEXT_PUBLIC_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>
+RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>
 NEXT_PUBLIC_PRIVY_APP_ID=cmrd7fljy00hk0dih0hlbfmnp
-PRIVY_APP_SECRET=privy_app_secret_...
-ZEROX_API_KEY=ab88e8ba-73ca-460b-8db9-58ac8362095f
+PRIVY_APP_SECRET=
+ZEROX_API_KEY=
 ```
 
 ### Run

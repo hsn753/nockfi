@@ -5,7 +5,13 @@ import { fetchWalletBalances } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+export const dynamic = 'force-dynamic'
+
+let openaiClient: OpenAI | null = null
+function getOpenAI(): OpenAI {
+  if (!openaiClient) openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  return openaiClient
+}
 
 const SYSTEM_PROMPT = `You are Robin, the concierge for Nock, an onchain agent platform. You help users put their capital to work across five specialized agents: yield, swap, perps, stock tokens, and vaults.
 
@@ -17,7 +23,7 @@ When the user asks what they hold, their portfolio, their balances, or anything 
 - Present the real amounts you get back. Since live prices are not available yet, give amounts and symbols only and mention that dollar values are coming soon. Do not make up USD values.
 
 When the user wants to swap, trade, buy, or sell any token:
-- Call get_swap_quote with fromToken, toToken, and amount. Supported tokens are USDG, TSLA, AMD, AMZN, NFLX, PLTR. Stock tokens trade against USDG (e.g. USDG -> TSLA or TSLA -> USDG). If the user doesn't specify an amount, ask for one before calling the tool.
+- Call get_swap_quote with fromToken, toToken, and amount. Supported tokens are USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens trade against USDG (e.g. USDG -> TSLA or TSLA -> USDG). If the user doesn't specify an amount, ask for one before calling the tool.
 - If the quote comes back with an error field, tell the user what it says. Do not guess prices.
 - If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers.
 
@@ -62,7 +68,7 @@ function callStubTool(name: string, _input: unknown): unknown {
           { symbol: 'TSLA', referencePrice: '$347.80', change24h: '+1.2%' },
           { symbol: 'AMD',  referencePrice: '$168.40', change24h: '-0.4%' },
           { symbol: 'AMZN', referencePrice: '$224.10', change24h: '+0.8%' },
-          { symbol: 'NFLX', referencePrice: '$1,124.50', change24h: '+2.1%' },
+          { symbol: 'AAPL', referencePrice: '$254.10', change24h: '+0.6%' },
           { symbol: 'PLTR', referencePrice: '$41.20', change24h: '+3.3%' },
         ],
         tradingHours: '24/7', requiresNock: true,
@@ -100,7 +106,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_wallet_holdings',
-      description: "Returns the user's real on-chain balances from their connected wallet: native ETH and the five stock tokens (TSLA, AMD, AMZN, NFLX, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
+      description: "Returns the user's real on-chain balances from their connected wallet: native ETH and the five stock tokens (TSLA, AMD, AMZN, AAPL, PLTR). Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.",
       parameters: {
         type: 'object',
         properties: {},
@@ -112,7 +118,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_swap_quote',
-      description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: USDG, TSLA, AMD, AMZN, NFLX, PLTR. Stock tokens trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
+      description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
       parameters: {
         type: 'object',
         properties: {
@@ -203,7 +209,7 @@ export async function POST(request: Request) {
     let responseText = ''
     let lastSwapQuote: any = null
 
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAI().chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -314,7 +320,7 @@ export async function POST(request: Request) {
       }
 
       // Get final response after tool calls
-      const finalResponse = await openai.chat.completions.create({
+      const finalResponse = await getOpenAI().chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },

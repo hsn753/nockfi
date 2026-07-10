@@ -3,13 +3,16 @@ import { parseUnits, formatUnits } from 'viem'
 const ZEROX_BASE = 'https://api.0x.org'
 const CHAIN_ID = 4663
 
+// Verified against https://docs.robinhood.com/chain/contracts/ (Robinhood Chain MAINNET, id 4663).
+// The previous addresses here were Robinhood Chain testnet addresses with no code on mainnet,
+// which is why every quote for these tokens returned no liquidity.
 export const SWAP_TOKENS: Record<string, { address: string; decimals: number }> = {
   USDG: { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
-  TSLA: { address: '0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E', decimals: 18 },
-  AMD:  { address: '0x71178BAc73cBeb415514eB542a8995b82669778d', decimals: 18 },
-  AMZN: { address: '0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02', decimals: 18 },
-  NFLX: { address: '0x3b8262A63d25f0477c4DDE23F83cfe22Cb768C93', decimals: 18 },
-  PLTR: { address: '0x1FBE1a0e43594b3455993B5dE5Fd0A7A266298d0', decimals: 18 },
+  TSLA: { address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d', decimals: 18 },
+  AMD:  { address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC', decimals: 18 },
+  AMZN: { address: '0x12f190a9F9d7D37a250758b26824B97CE941bF54', decimals: 18 },
+  AAPL: { address: '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9', decimals: 18 },
+  PLTR: { address: '0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A', decimals: 18 },
 }
 
 export type SwapQuoteResult = {
