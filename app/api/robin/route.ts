@@ -52,6 +52,7 @@ If the user asks about anything NOT related to crypto, DeFi, trading, or blockch
 Rules:
 - Keep all copy human, in sentence case.
 - Never use em dashes.
+- Never use markdown — no **bold**, no bullet dashes, no headers. The chat renders your text as plain text, so markdown syntax shows up as literal asterisks and dashes. Write plain sentences, and use "X: Y, Z: W" style lists inline if you need to enumerate a few things.
 - Never invent balances, prices, or protocol names. Only use data from tool calls.
 - Never say you will execute or confirm anything. You only preview. The user clicks Draw to review and Loose to execute.
 - Be warm and direct. Get to the point fast.
@@ -257,22 +258,33 @@ export async function POST(request: Request) {
 
         if (functionName === 'propose_action') {
           const input = functionArgs as ProposeActionInput
-          action = {
-            id: `act-${Date.now()}`,
-            agent: input.agent,
-            action: input.action,
-            detail: input.detail,
-            metrics: input.metrics,
-            status: 'pending',
-            outcome: input.outcome,
-            ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
-              transactionData: lastSwapQuote.transaction,
-              fromToken: lastSwapQuote.fromSymbol,
-              toToken: lastSwapQuote.toSymbol,
-              amount: lastSwapQuote.fromAmount,
-            } : {}),
-          } as any
-          result = { status: 'preview_ready' }
+
+          // A swap preview is only real if it's backed by a transaction from a quote
+          // fetched in THIS turn — otherwise the model can (and did, in testing) build a
+          // preview card from numbers it just remembered/recomputed from earlier chat
+          // history, which looks identical but has no transaction to actually execute.
+          if (input.agent === 'swap' && !lastSwapQuote?.transaction) {
+            result = {
+              error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
+            }
+          } else {
+            action = {
+              id: `act-${Date.now()}`,
+              agent: input.agent,
+              action: input.action,
+              detail: input.detail,
+              metrics: input.metrics,
+              status: 'pending',
+              outcome: input.outcome,
+              ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
+                transactionData: lastSwapQuote.transaction,
+                fromToken: lastSwapQuote.fromSymbol,
+                toToken: lastSwapQuote.toSymbol,
+                amount: lastSwapQuote.fromAmount,
+              } : {}),
+            } as any
+            result = { status: 'preview_ready' }
+          }
 
         } else if (functionName === 'get_wallet_holdings') {
           if (!walletAddress || !isAddress(walletAddress)) {
