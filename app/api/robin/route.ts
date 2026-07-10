@@ -30,9 +30,8 @@ When the user asks for their wallet address or deposit address:
 - If no wallet is connected, tell them to connect one first.
 
 When the user asks how to bridge, move, or send funds onto Robinhood Chain from Ethereum or another chain:
-- Explain they need to use the official Arbitrum bridge (Robinhood Chain is an Arbitrum Orbit L2) and give them this direct link: https://portal.arbitrum.io/bridge?destinationChain=robinhood-chain&sourceChain=ethereum
-- Tell them to bridge into the same wallet address connected here (the one above) so it shows up automatically once confirmed, and that deposits typically confirm in about 10 minutes.
-- Do not invent other bridge links or third-party bridges. This is the only one to recommend.
+- IMMEDIATELY call get_bridge_info. This is REQUIRED — never answer a bridging question from memory, always call the tool first, then use its real link and eta in your reply.
+- Mention bridging into the same connected wallet address so it shows up automatically, and that the app will watch for it and let them know once it lands.
 - If no wallet is connected, tell them to connect one first so you can give them the right deposit address.
 
 When the user asks what they hold, their portfolio, their balances, or anything about their specific holdings:
@@ -138,6 +137,18 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_bridge_info',
+      description: 'Returns the official bridge link and instructions for moving funds from Ethereum (or another chain) onto Robinhood Chain. Call this whenever the user asks how to bridge, deposit, move, or send funds onto Robinhood Chain from elsewhere — this also flags the app to start watching for the bridged funds to arrive. Never make up a bridge link yourself, always call this tool.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_swap_quote',
       description: 'Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: ETH, USDG, TSLA, AMD, AMZN, AAPL, PLTR. Stock tokens and ETH both trade against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.',
       parameters: {
@@ -232,6 +243,7 @@ export async function POST(request: Request) {
     let action: ActionPreview | undefined
     let responseText = ''
     let lastSwapQuote: any = null
+    let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
     // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
     // to fetch real numbers, then propose_action to build the preview card from them.
@@ -310,6 +322,18 @@ export async function POST(request: Request) {
             }
           }
 
+        } else if (functionName === 'get_bridge_info') {
+          bridgeInfo = {
+            link: 'https://portal.arbitrum.io/bridge?destinationChain=robinhood-chain&sourceChain=ethereum',
+            sourceChain: 'ethereum',
+            destinationChain: 'robinhood-chain',
+            etaMinutes: 10,
+          }
+          result = {
+            ...bridgeInfo,
+            instructions: 'This is the official Arbitrum bridge (Robinhood Chain is an Arbitrum Orbit L2). Bridge into the same wallet address already connected — funds show up automatically once confirmed.',
+          }
+
         } else if (functionName === 'get_swap_quote') {
           const { fromToken, toToken, amount } = functionArgs
           if (!fromToken || !toToken || !amount) {
@@ -366,7 +390,7 @@ export async function POST(request: Request) {
     const fallback =
       "I'm not sure how to help with that. Try asking me what you hold, to put idle funds to work, swap tokens, open a perps position, buy a stock token, or deposit into a vault."
 
-    return NextResponse.json({ text: responseText || fallback, action })
+    return NextResponse.json({ text: responseText || fallback, action, bridgeInfo })
   } catch (err) {
     console.error('[robin] API error:', err)
     const errorMessage = err instanceof Error ? err.message : 'Unknown error'

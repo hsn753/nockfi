@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-storage'
 import { executeSwap } from '@/lib/execute-swap'
 import { SWAP_TOKENS } from '@/lib/get-swap-quote'
+import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import {
   getAgent,
   initialActivity,
@@ -57,39 +58,6 @@ export function NockApp() {
     console.log('[Nock] Wallet address:', walletAddress)
   }, [wallets, walletAddress])
 
-  // Fetch real portfolio value when wallet connects
-  useEffect(() => {
-    if (!walletAddress) {
-      setRealPortfolioValue(0)
-      return
-    }
-
-    const fetchPortfolioValue = async () => {
-      try {
-        console.log('[Nock] Fetching balances for portfolio value...')
-        const res = await fetch(`/api/balances?address=${walletAddress}`)
-        
-        if (!res.ok) {
-          console.error('[Nock] Balance fetch failed:', res.status)
-          return
-        }
-
-        const data = await res.json()
-        console.log('[Nock] Balances received:', data.balances)
-
-        const total = (data.balances || []).reduce(
-          (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
-          0,
-        )
-        setRealPortfolioValue(total)
-      } catch (err) {
-        console.error('[Nock] Error fetching portfolio value:', err)
-      }
-    }
-
-    fetchPortfolioValue()
-  }, [walletAddress])
-
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRobinLoading, setIsRobinLoading] = useState(false)
   const [attention, setAttention] = useState<AttentionItem[]>([])
@@ -97,6 +65,90 @@ export function NockApp() {
   const [activity, setActivity] = useState<ActivityItem[]>([])
   const [addedValue, setAddedValue] = useState(0)
   const [realPortfolioValue, setRealPortfolioValue] = useState(0)
+  const [pendingBridge, setPendingBridge] = useState<PendingBridge | null>(null)
+
+  const fetchPortfolioValue = useCallback(async (): Promise<number | null> => {
+    if (!walletAddress) return null
+    try {
+      console.log('[Nock] Fetching balances for portfolio value...')
+      const res = await fetch(`/api/balances?address=${walletAddress}`)
+
+      if (!res.ok) {
+        console.error('[Nock] Balance fetch failed:', res.status)
+        return null
+      }
+
+      const data = await res.json()
+      console.log('[Nock] Balances received:', data.balances)
+
+      const total = (data.balances || []).reduce(
+        (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
+        0,
+      )
+      setRealPortfolioValue(total)
+      return total
+    } catch (err) {
+      console.error('[Nock] Error fetching portfolio value:', err)
+      return null
+    }
+  }, [walletAddress])
+
+  // Fetch real portfolio value when wallet connects, and pick up any bridge watch
+  // left over from before a refresh.
+  useEffect(() => {
+    if (!walletAddress) {
+      setRealPortfolioValue(0)
+      setPendingBridge(null)
+      return
+    }
+    fetchPortfolioValue()
+    setPendingBridge(getPendingBridge(walletAddress))
+  }, [walletAddress, fetchPortfolioValue])
+
+  const BRIDGE_ATTENTION_ID = 'bridge-pending'
+
+  // While a bridge is pending, poll for the Robinhood Chain balance to actually
+  // increase — that's the only signal available since bridging happens entirely
+  // on Ethereum L1 outside this app, with no transaction of ours to await.
+  useEffect(() => {
+    if (!walletAddress || !pendingBridge) {
+      setAttention((prev) => prev.filter((a) => a.id !== BRIDGE_ATTENTION_ID))
+      return
+    }
+
+    setAttention((prev) =>
+      prev.some((a) => a.id === BRIDGE_ATTENTION_ID)
+        ? prev
+        : [
+            {
+              id: BRIDGE_ATTENTION_ID,
+              agent: 'swap',
+              title: 'Bridge to Robinhood Chain in progress',
+              subtitle: 'Typically arrives within about 10 minutes',
+              meta: 'Watching',
+            },
+            ...prev,
+          ],
+    )
+
+    const interval = setInterval(async () => {
+      const total = await fetchPortfolioValue()
+      if (total !== null && total > pendingBridge.snapshotUsd + 0.01) {
+        clearBridgeWatch(walletAddress)
+        setPendingBridge(null)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-bridge`,
+            role: 'robin',
+            text: `Your bridged funds have arrived on Robinhood Chain — your balance went from about $${pendingBridge.snapshotUsd.toFixed(2)} to $${total.toFixed(2)}. Ready to put it to work whenever you are.`,
+          },
+        ])
+      }
+    }, 20000)
+
+    return () => clearInterval(interval)
+  }, [walletAddress, pendingBridge, fetchPortfolioValue])
 
   // Chat history
   const conversationIdRef = useRef<string | null>(null)
@@ -166,9 +218,10 @@ export function NockApp() {
           body: JSON.stringify({ messages: history, walletAddress }),
         })
 
-        const { text: replyText, action } = (await res.json()) as {
+        const { text: replyText, action, bridgeInfo } = (await res.json()) as {
           text: string
           action?: ActionPreview
+          bridgeInfo?: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number }
         }
 
         const replyMsg: ChatMessage = {
@@ -179,6 +232,15 @@ export function NockApp() {
         }
 
         setMessages((prev) => [...prev, replyMsg])
+
+        // Robin just gave out the bridge link — start watching for the balance to
+        // actually move so we can tell the user once funds land, without them having
+        // to keep asking.
+        if (bridgeInfo && walletAddress) {
+          const snapshotUsd = (await fetchPortfolioValue()) ?? realPortfolioValue
+          startBridgeWatch(walletAddress, snapshotUsd)
+          setPendingBridge({ startedAt: Date.now(), snapshotUsd })
+        }
       } catch {
         setMessages((prev) => [
           ...prev,
