@@ -48,6 +48,12 @@ export function NockApp() {
   const walletAddress = wallets[0]?.address
   const { data: walletClient } = useWalletClient()
 
+  // Debug logging
+  useEffect(() => {
+    console.log('[Nock] Wallets detected:', wallets)
+    console.log('[Nock] Wallet address:', walletAddress)
+  }, [wallets, walletAddress])
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRobinLoading, setIsRobinLoading] = useState(false)
   const [attention, setAttention] = useState<AttentionItem[]>([])
@@ -114,6 +120,8 @@ export function NockApp() {
           ...messages.filter((m) => !DEMO_IDS.has(m.id)),
           userMsg,
         ]
+
+        console.log('[Nock] Sending to API - wallet address:', walletAddress)
 
         const res = await fetch('/api/robin', {
           method: 'POST',
