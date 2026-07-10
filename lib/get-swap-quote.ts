@@ -108,6 +108,7 @@ export async function fetchSwapQuote({
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { reason?: string; validationErrors?: { reason: string }[] }
+    console.error('[get-swap-quote] 0x API non-OK response:', res.status, JSON.stringify(body))
     const message =
       body?.validationErrors?.[0]?.reason ??
       body?.reason ??
