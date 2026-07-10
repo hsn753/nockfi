@@ -213,38 +213,40 @@ export async function POST(request: Request) {
 
     console.log('[robin] Wallet address received:', walletAddress)
 
-    const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = messages.map((m) => ({
-      role: m.role === 'user' ? 'user' : 'assistant',
-      content: m.text,
-    }))
+    const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      { role: 'system', content: buildSystemPrompt(walletAddress) },
+      ...messages.map((m) => ({
+        role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+        content: m.text,
+      })),
+    ]
 
     let action: ActionPreview | undefined
     let responseText = ''
     let lastSwapQuote: any = null
 
-    const response = await getOpenAI().chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: buildSystemPrompt(walletAddress) },
-        ...openaiMessages,
-      ],
-      tools: TOOLS,
-      tool_choice: 'auto',
-      max_tokens: 1024,
-    })
+    // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
+    // to fetch real numbers, then propose_action to build the preview card from them.
+    // A single non-looped round (the previous implementation) meant propose_action was
+    // never reachable after a data-fetching tool call, so no Draw/Loose card ever appeared.
+    for (let round = 0; round < 6; round++) {
+      const response = await getOpenAI().chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: openaiMessages,
+        tools: TOOLS,
+        tool_choice: 'auto',
+        max_tokens: 1024,
+      })
 
-    const message = response.choices[0]?.message
+      const message = response.choices[0]?.message
+      if (!message) break
 
-    if (!message) {
-      return NextResponse.json({ text: 'No response from AI' }, { status: 500 })
-    }
+      if (!message.tool_calls || message.tool_calls.length === 0) {
+        responseText = message.content || ''
+        break
+      }
 
-    // Handle tool calls
-    if (message.tool_calls && message.tool_calls.length > 0) {
-      const toolMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        ...openaiMessages,
-        message as any,
-      ]
+      openaiMessages.push(message as any)
 
       for (const toolCall of message.tool_calls) {
         const functionName = (toolCall as any).function.name
@@ -317,26 +319,12 @@ export async function POST(request: Request) {
           result = callStubTool(functionName, functionArgs)
         }
 
-        toolMessages.push({
+        openaiMessages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
           content: JSON.stringify(result),
         })
       }
-
-      // Get final response after tool calls
-      const finalResponse = await getOpenAI().chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: buildSystemPrompt(walletAddress) },
-          ...toolMessages,
-        ],
-        max_tokens: 512,
-      })
-
-      responseText = finalResponse.choices[0]?.message?.content || ''
-    } else {
-      responseText = message.content || ''
     }
 
     const fallback =
