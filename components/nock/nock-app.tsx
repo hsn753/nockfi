@@ -229,6 +229,7 @@ export function NockApp() {
           role: 'robin',
           text: replyText,
           ...(action ? { action } : {}),
+          ...(bridgeInfo ? { bridgeInfo } : {}),
         }
 
         setMessages((prev) => [...prev, replyMsg])

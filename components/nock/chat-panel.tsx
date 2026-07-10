@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 import type { ChatMessage } from './data'
 import { RobinAvatar } from './robin-avatar'
 import { ActionPreviewCard } from './action-preview-card'
+import { BridgeInfoCard } from './bridge-info-card'
 
 type Props = {
   messages: ChatMessage[]
@@ -113,6 +114,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
                   {m.action && (
                     <ActionPreviewCard action={m.action} onDraw={onDraw} onLoose={onLoose} />
                   )}
+                  {m.bridgeInfo && <BridgeInfoCard bridgeInfo={m.bridgeInfo} />}
                 </div>
               </div>
             ),

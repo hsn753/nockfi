@@ -112,9 +112,16 @@ export type ActionPreview = {
   }
 }
 
+export type BridgeInfo = {
+  link: string
+  sourceChain: string
+  destinationChain: string
+  etaMinutes: number
+}
+
 export type ChatMessage =
   | { id: string; role: 'user'; text: string }
-  | { id: string; role: 'robin'; text: string; action?: ActionPreview }
+  | { id: string; role: 'robin'; text: string; action?: ActionPreview; bridgeInfo?: BridgeInfo }
 
 export type Position = {
   id: string
