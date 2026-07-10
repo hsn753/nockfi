@@ -191,6 +191,8 @@ export async function POST(request: Request) {
       walletAddress?: string
     }
 
+    console.log('[robin] Wallet address received:', walletAddress)
+
     const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = messages.map((m) => ({
       role: m.role === 'user' ? 'user' : 'assistant',
       content: m.text,
@@ -225,8 +227,8 @@ export async function POST(request: Request) {
       ]
 
       for (const toolCall of message.tool_calls) {
-        const functionName = toolCall.function.name
-        const functionArgs = JSON.parse(toolCall.function.arguments)
+        const functionName = (toolCall as any).function.name
+        const functionArgs = JSON.parse((toolCall as any).function.arguments)
 
         let result: unknown
 
