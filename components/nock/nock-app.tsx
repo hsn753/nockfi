@@ -54,12 +54,48 @@ export function NockApp() {
     console.log('[Nock] Wallet address:', walletAddress)
   }, [wallets, walletAddress])
 
+  // Fetch real portfolio value when wallet connects
+  useEffect(() => {
+    if (!walletAddress) {
+      setRealPortfolioValue(0)
+      return
+    }
+
+    const fetchPortfolioValue = async () => {
+      try {
+        console.log('[Nock] Fetching balances for portfolio value...')
+        const res = await fetch(`/api/balances?address=${walletAddress}`)
+        
+        if (!res.ok) {
+          console.error('[Nock] Balance fetch failed:', res.status)
+          return
+        }
+
+        const data = await res.json()
+        console.log('[Nock] Balances received:', data.balances)
+        
+        // For now, just show ETH value as portfolio (we don't have prices for tokens yet)
+        const ethBalance = data.balances?.find((b: any) => b.symbol === 'ETH')
+        if (ethBalance) {
+          const ethAmount = parseFloat(ethBalance.amount.replace(/,/g, '')) || 0
+          // Rough estimate: 1 ETH = $3000 (we'll add real prices later)
+          setRealPortfolioValue(ethAmount * 3000)
+        }
+      } catch (err) {
+        console.error('[Nock] Error fetching portfolio value:', err)
+      }
+    }
+
+    fetchPortfolioValue()
+  }, [walletAddress])
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRobinLoading, setIsRobinLoading] = useState(false)
   const [attention, setAttention] = useState<AttentionItem[]>([])
   const [positions, setPositions] = useState<Position[]>([])
   const [activity, setActivity] = useState<ActivityItem[]>([])
   const [addedValue, setAddedValue] = useState(0)
+  const [realPortfolioValue, setRealPortfolioValue] = useState(0)
 
   // Chat history
   const conversationIdRef = useRef<string | null>(null)
@@ -88,7 +124,7 @@ export function NockApp() {
     setHistory(localChatStorage.list())
   }, [messages])
 
-  const portfolioValue = (PORTFOLIO_BASE + addedValue).toLocaleString('en-US', {
+  const portfolioValue = (realPortfolioValue + addedValue).toLocaleString('en-US', {
     style: 'currency',
     currency: 'USD',
   })
