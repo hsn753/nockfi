@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { usePrivy, useWallets } from '@privy-io/react-auth'
+import { usePrivy, useWallets, useCreateWallet, useDelegatedActions } from '@privy-io/react-auth'
+import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { user } from './data'
 
@@ -100,6 +101,8 @@ export function SettingsView() {
             )}
           </section>
 
+          {ready && authenticated && <InstantSwapsSection />}
+
           <section className="mt-4 rounded-xl border border-border bg-card p-4">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Agent preferences
@@ -151,5 +154,91 @@ export function SettingsView() {
         </div>
       </div>
     </div>
+  )
+}
+
+function InstantSwapsSection() {
+  const { user: privyUser } = usePrivy()
+  const { createWallet } = useCreateWallet()
+  const { delegateWallet, revokeWallets } = useDelegatedActions()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const embeddedWallet = privyUser?.linkedAccounts?.find(
+    (a): a is Extract<typeof a, { type: 'wallet' }> =>
+      a.type === 'wallet' && (a as any).walletClientType === 'privy' && (a as any).chainType === 'ethereum',
+  ) as { address: string; delegated: boolean } | undefined
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    setError('')
+    try {
+      await fn()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Instant swaps
+      </h2>
+      <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+        Skip the per-transaction mobile approval by creating a separate Nock wallet and
+        granting Robin permission to swap on your behalf, within a spend limit you control.
+        This is a different address from your connected wallet — you'll need to bridge or
+        send funds to it separately.
+      </p>
+
+      {!embeddedWallet ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => run(() => createWallet())}
+          className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-secondary/60 disabled:opacity-50"
+        >
+          {busy && <Loader2 className="size-3.5 animate-spin" />}
+          Create instant-swap wallet
+        </button>
+      ) : (
+        <div className="mt-3 flex items-center justify-between gap-4 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <div>
+            <p className="text-xs text-muted-foreground">Instant-swap wallet</p>
+            <p className="font-mono text-sm text-foreground">{embeddedWallet.address}</p>
+          </div>
+          {embeddedWallet.delegated ? (
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-primary" />
+                Enabled
+              </span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => run(revokeWallets)}
+                className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                Disable
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => run(() => delegateWallet({ address: embeddedWallet.address, chainType: 'ethereum' }))}
+              className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              {busy && <Loader2 className="size-3 animate-spin" />}
+              Enable
+            </button>
+          )}
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </section>
   )
 }

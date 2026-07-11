@@ -14,6 +14,9 @@ importers:
       '@base-ui/react':
         specifier: ^1.5.0
         version: 1.5.0(@date-fns/tz@1.4.1)(@types/react@19.2.14)(date-fns@4.1.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@privy-io/node':
+        specifier: ^0.25.0
+        version: 0.25.0(@solana/kit@5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10))(viem@2.54.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)(zod@3.25.76))
       '@privy-io/react-auth':
         specifier: ^3.32.2
         version: 3.32.2(@solana-program/system@0.10.0(@solana/kit@5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)))(@solana-program/token@0.9.0(@solana/kit@5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)))(@solana/kit@5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10))(@solana/sysvars@5.5.1(typescript@5.7.3))(@tanstack/query-core@5.101.2)(@tanstack/react-query@5.101.2(react@19.2.4))(@types/react@19.2.14)(bufferutil@4.1.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.7.3)(use-sync-external-store@1.4.0(react@19.2.4))(utf-8-validate@5.0.10)(zod@3.25.76)
@@ -371,6 +374,18 @@ packages:
     engines: {node: '>=18.14.1'}
     peerDependencies:
       hono: ^4
+
+  '@hpke/chacha20poly1305@1.8.0':
+    resolution: {integrity: sha512-FcBfAQ+Y99vMNJP2yrZ9wpL8V0GOwp1+zMyzvc6alasrBygfFjFm1yeUtyADJCu/27C3Lm5mJzx6u7pwg+cX5w==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/common@1.10.1':
+    resolution: {integrity: sha512-moJwhmtLtuxiUzzNp1jpfBfx8yefKoO9D/RCR9dmwrnc7qjJqId1rEtQz+lSlU5cabX8daToMSx/7HayXOiaFw==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/core@1.9.0':
+    resolution: {integrity: sha512-pFxWl1nNJeQCSUFs7+GAblHvXBCjn9EPN65vdKlYQil2aURaRxfGMO6vBKGqm1YHTKwiAxJQNEI70PbSowMP9Q==}
+    engines: {node: '>=16.0.0'}
 
   '@img/colour@1.0.0':
     resolution: {integrity: sha512-A5P/LfWGFSl6nsckYtjw9da+19jB8hkJ6ACTGcDfEJ0aE+l2n2El7dsVM7UVHZQ9s2lmYMWlrS21YLy2IR1LUw==}
@@ -864,6 +879,26 @@ packages:
       viem: 2.52.0
     peerDependenciesMeta:
       permissionless:
+        optional: true
+      viem:
+        optional: true
+
+  '@privy-io/node@0.25.0':
+    resolution: {integrity: sha512-nIdX+iZ13Dz0PLhbEdMJlC/lfsM/JZnhvM47X2qNLnr6wmes+H37S4AYjluiC/bUrL2TptjaKtKrWBl0rSMe3Q==}
+    peerDependencies:
+      '@solana/kit': ^5.1.0
+      '@x402/evm': ^2.3.0
+      '@x402/fetch': ^2.3.0
+      '@x402/svm': ^2.3.0
+      viem: ^2.44.2
+    peerDependenciesMeta:
+      '@solana/kit':
+        optional: true
+      '@x402/evm':
+        optional: true
+      '@x402/fetch':
+        optional: true
+      '@x402/svm':
         optional: true
       viem:
         optional: true
@@ -3874,6 +3909,9 @@ packages:
     resolution: {integrity: sha512-7JpaAoX2NGyoFlI9NBh66BQXGONc+uE+MRS5i2iOBKuS4e+ccgMDjATgZldkah+33DakBxDHiss9kvUcGAO8UQ==}
     engines: {node: '>=14.0.0'}
 
+  svix@1.96.1:
+    resolution: {integrity: sha512-l+GyPS6gjL0okiXplLazEY2GbBsv1jZ4UIwtjp553YkDDv635xMKbM5sABpIdiWy1BYxgyV8M6tHeTwY0gyXlQ==}
+
   tabbable@6.5.0:
     resolution: {integrity: sha512-wieBHXygIm7OyQOu5hQlkk62/WyCFYGlWg7L6/ZCUZwx0o398Zkn4pVmMyfYhfMG8kGrj/Krt8eIk6UKC6VzwA==}
 
@@ -4852,6 +4890,16 @@ snapshots:
     dependencies:
       hono: 4.12.25
 
+  '@hpke/chacha20poly1305@1.8.0':
+    dependencies:
+      '@hpke/common': 1.10.1
+
+  '@hpke/common@1.10.1': {}
+
+  '@hpke/core@1.9.0':
+    dependencies:
+      '@hpke/common': 1.10.1
+
   '@img/colour@1.0.0':
     optional: true
 
@@ -5374,6 +5422,21 @@ snapshots:
       set-cookie-parser: 2.7.2
     optionalDependencies:
       viem: 2.52.0(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)(zod@3.25.76)
+
+  '@privy-io/node@0.25.0(@solana/kit@5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10))(viem@2.54.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)(zod@3.25.76))':
+    dependencies:
+      '@hpke/chacha20poly1305': 1.8.0
+      '@hpke/core': 1.9.0
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+      '@scure/base': 1.2.6
+      canonicalize: 2.1.0
+      jose: 6.2.3
+      lru-cache: 11.5.1
+      svix: 1.96.1
+    optionalDependencies:
+      '@solana/kit': 5.5.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)
+      viem: 2.54.1(bufferutil@4.1.0)(typescript@5.7.3)(utf-8-validate@5.0.10)(zod@3.25.76)
 
   '@privy-io/popup@0.0.4': {}
 
@@ -9821,6 +9884,10 @@ snapshots:
   stylis@4.4.0: {}
 
   superstruct@1.0.4: {}
+
+  svix@1.96.1:
+    dependencies:
+      standardwebhooks: 1.0.0
 
   tabbable@6.5.0: {}
 

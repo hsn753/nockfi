@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useWallets } from '@privy-io/react-auth'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useWallets, usePrivy } from '@privy-io/react-auth'
 import { useWalletClient, usePublicClient } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits } from 'viem'
 import { Menu, X } from 'lucide-react'
@@ -48,9 +48,22 @@ export function NockApp() {
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const { wallets } = useWallets()
-  const walletAddress = wallets[0]?.address
+  const { user: privyUser } = usePrivy()
   const { data: walletClient } = useWalletClient()
   const publicClient = usePublicClient()
+
+  // Once a user delegates an embedded "instant swap" wallet (see Settings), that
+  // wallet becomes the one Nock reads balances from and executes swaps against —
+  // it's the wallet that will actually hold funds and sign without a mobile prompt.
+  // Otherwise, fall back to whatever external wallet is connected.
+  const delegatedWallet = useMemo(() => {
+    const match = privyUser?.linkedAccounts?.find(
+      (a: any) => a.type === 'wallet' && a.walletClientType === 'privy' && a.chainType === 'ethereum' && a.delegated,
+    ) as { address: string; id?: string } | undefined
+    return match
+  }, [privyUser])
+
+  const walletAddress = delegatedWallet?.address || wallets[0]?.address
 
   // Debug logging
   useEffect(() => {
@@ -287,7 +300,7 @@ export function NockApp() {
     }
 
     // REAL SWAP EXECUTION - NO MOCK DATA
-    if (action.agent === 'swap' && walletClient) {
+    if (action.agent === 'swap' && (walletClient || delegatedWallet)) {
       try {
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
@@ -341,14 +354,24 @@ export function NockApp() {
         }
 
         console.log('Executing real swap transaction...')
-        const result = await executeSwap({
-          walletClient,
-          publicClient,
-          fromToken: (action as any).fromToken || 'USDG',
-          toToken: (action as any).toToken || 'TSLA',
-          amount: (action as any).amount || '0',
-          transaction: txData,
-        })
+        const result = delegatedWallet
+          ? await (async () => {
+              const res = await fetch('/api/execute-delegated-swap', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ walletId: (delegatedWallet as any).id, address: delegatedWallet.address, transaction: txData }),
+              })
+              const data = await res.json()
+              return { txHash: data.txHash as `0x${string}` | undefined, error: data.error as string | undefined }
+            })()
+          : await executeSwap({
+              walletClient: walletClient!,
+              publicClient,
+              fromToken: (action as any).fromToken || 'USDG',
+              toToken: (action as any).toToken || 'TSLA',
+              amount: (action as any).amount || '0',
+              transaction: txData,
+            })
 
         if (result.error) {
           const hashSuffix = result.txHash && result.txHash !== '0x' ? ` (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)})` : ''
@@ -369,7 +392,7 @@ export function NockApp() {
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Done! Swap executed on Robinhood Chain. TX: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}`,
+            text: `Done! Swap executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
           const newPosition: Position = {
