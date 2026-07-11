@@ -47,7 +47,7 @@ export function NockApp() {
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const { wallets } = useWallets()
-  const { user: privyUser } = usePrivy()
+  const { user: privyUser, ready: privyReady } = usePrivy()
   const publicClient = usePublicClient()
 
   // Privy's own wallet.chainId (CAIP-2, e.g. "eip155:4663") is the authoritative source
@@ -249,6 +249,25 @@ export function NockApp() {
   const handleSend = useCallback(
     async (text: string) => {
       const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
+
+      // Privy takes a moment to restore the session after a page load/refresh — sending
+      // a message in that brief window meant walletAddress was still undefined, which
+      // read as "please connect your wallet" even though a wallet plainly was connected
+      // and the very next attempt (once hydration finished) worked fine. Refuse to send
+      // with a stale/incomplete wallet state instead of guessing.
+      if (!privyReady) {
+        setMessages((prev) => [
+          ...prev,
+          userMsg,
+          {
+            id: `${Date.now()}-notready`,
+            role: 'robin',
+            text: "Still finishing loading your wallet — give it a second and try that again.",
+          },
+        ])
+        return
+      }
+
       setMessages((prev) => [...prev, userMsg])
       setIsRobinLoading(true)
 
@@ -300,7 +319,7 @@ export function NockApp() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages],
+    [messages, privyReady],
   )
 
   const handleDraw = useCallback((actionId: string) => {
