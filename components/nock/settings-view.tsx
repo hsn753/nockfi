@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { usePrivy, useWallets, useCreateWallet, useDelegatedActions } from '@privy-io/react-auth'
+import { usePrivy, useWallets, useCreateWallet, useSigners } from '@privy-io/react-auth'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { user } from './data'
@@ -157,10 +157,17 @@ export function SettingsView() {
   )
 }
 
+// Key quorum + policy registered in the Privy Dashboard (Wallet infrastructure ->
+// Keys and quorums / Policies) for Nock's server-side signer. Not secret — only the
+// authorization private key backing this quorum (PRIVY_AUTHORIZATION_PRIVATE_KEY,
+// server-side only) needs to stay confidential.
+const SESSION_SIGNER_ID = 'cv6ka6rbhmabtaydbh9e6pbo'
+const SESSION_POLICY_ID = 'mw6vn6xz49aehqip0ia7ezl4'
+
 function InstantSwapsSection() {
   const { user: privyUser } = usePrivy()
   const { createWallet } = useCreateWallet()
-  const { delegateWallet, revokeWallets } = useDelegatedActions()
+  const { addSigners, removeSigners } = useSigners()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -218,7 +225,7 @@ function InstantSwapsSection() {
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => run(revokeWallets)}
+                onClick={() => run(() => removeSigners({ address: embeddedWallet.address }))}
                 className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
               >
                 Disable
@@ -228,7 +235,14 @@ function InstantSwapsSection() {
             <button
               type="button"
               disabled={busy}
-              onClick={() => run(() => delegateWallet({ address: embeddedWallet.address, chainType: 'ethereum' }))}
+              onClick={() =>
+                run(() =>
+                  addSigners({
+                    address: embeddedWallet.address,
+                    signers: [{ signerId: SESSION_SIGNER_ID, policyIds: [SESSION_POLICY_ID] }],
+                  }),
+                )
+              }
               className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
             >
               {busy && <Loader2 className="size-3 animate-spin" />}
