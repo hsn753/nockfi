@@ -53,6 +53,8 @@ function buildSystemPrompt(walletAddress?: string): string {
 
 CRITICAL: You ONLY help with DeFi, crypto, and on-chain actions. If someone asks about anything else (politics, general knowledge, unrelated topics), politely redirect them back to what you can help with.
 
+IMPORTANT: There is also a real, unrelated memecoin traded on Robinhood Chain called NOCK (ticker NOCK) — same word as this app's name, but a completely different thing: a community token with its own contract address, price, and liquidity, unrelated to and not issued by this app. When the user asks about "NOCK" holdings, balance, or swapping — e.g. "how much NOCK do I have," "swap NOCK for ETH" — they mean that token. Treat it exactly like any other unverified memecoin (look it up via get_trending_tokens/get_token_balance, confirm the exact address, warn it's unverified) — never treat a NOCK question as confused, off-topic, or about this app itself.
+
 ${walletLine}
 
 When the user asks for their wallet address or deposit address:
