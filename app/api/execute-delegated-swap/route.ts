@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isAddress, parseUnits } from 'viem'
 import { executeDelegatedTransaction } from '@/lib/privy-server'
+import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,6 +26,16 @@ export async function POST(req: NextRequest) {
   }
   if (sellToken && !isAddress(sellToken.address)) {
     return NextResponse.json({ error: 'Invalid sellToken.address' }, { status: 400 })
+  }
+
+  // Confirmed real gap before this check existed: anyone who knew a walletId+address
+  // pair could ask this server to sign a transaction against it, constrained only by
+  // the Privy spend-policy cap, not by any check that the caller actually owns it.
+  try {
+    await requireAuthenticatedWallet(req, address)
+  } catch (err) {
+    if (err instanceof AuthError) return NextResponse.json({ error: err.message }, { status: err.status })
+    throw err
   }
 
   try {

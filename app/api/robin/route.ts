@@ -5,6 +5,7 @@ import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balan
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
+import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -333,6 +334,21 @@ export async function POST(request: Request) {
     const { messages, walletAddress } = (await request.json()) as {
       messages: ChatMessage[]
       walletAddress?: string
+    }
+
+    // Confirmed real gap before this check existed: walletAddress was accepted as a
+    // plain, unverified client-supplied value — anyone could ask for holdings/quotes
+    // under any address. Only enforced when a walletAddress is actually claimed; a
+    // wallet-less general question still works exactly as before.
+    if (walletAddress) {
+      try {
+        await requireAuthenticatedWallet(request, walletAddress)
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return NextResponse.json({ text: err.message }, { status: err.status })
+        }
+        throw err
+      }
     }
 
     // Always the connected wallet — the same one every balance check and the pre-flight/

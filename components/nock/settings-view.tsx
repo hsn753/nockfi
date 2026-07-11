@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet } from '@privy-io/react-auth'
+import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet, useIdentityToken } from '@privy-io/react-auth'
+import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
+import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { user } from './data'
@@ -202,16 +204,33 @@ const SESSION_POLICY_ID = 'mw6vn6xz49aehqip0ia7ezl4'
 
 function InstantSwapsSection() {
   const { user: privyUser } = usePrivy()
+  const { wallets } = useWallets()
   const { createWallet } = useCreateWallet()
   const { addSigners, removeSigners } = useSigners()
   const { exportWallet } = useExportWallet()
+  const { identityToken } = useIdentityToken()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  const ownerWalletAddress = wallets[0]?.address
 
   const embeddedWallet = privyUser?.linkedAccounts?.find(
     (a): a is Extract<typeof a, { type: 'wallet' }> =>
       a.type === 'wallet' && (a as any).walletClientType === 'privy' && (a as any).chainType === 'ethereum',
-  ) as { address: string; delegated: boolean } | undefined
+  ) as { address: string; delegated: boolean; id?: string } | undefined
+
+  const logEvent = (eventType: DelegatedWalletEventType) => {
+    if (!ownerWalletAddress || !embeddedWallet?.id) return
+    logDelegatedWalletEventClient({
+      ownerWalletAddress,
+      embeddedAddress: embeddedWallet.address,
+      privyWalletId: embeddedWallet.id,
+      signerId: SESSION_SIGNER_ID,
+      policyId: SESSION_POLICY_ID,
+      eventType,
+      identityToken,
+    })
+  }
 
   const { totalUsd: embeddedBalanceUsd, loading: balanceLoading } = useEmbeddedBalance(embeddedWallet?.address)
 
@@ -243,7 +262,22 @@ function InstantSwapsSection() {
         <button
           type="button"
           disabled={busy}
-          onClick={() => run(() => createWallet())}
+          onClick={() =>
+            run(async () => {
+              const wallet = await createWallet()
+              if (ownerWalletAddress && wallet.id) {
+                logDelegatedWalletEventClient({
+                  ownerWalletAddress,
+                  embeddedAddress: wallet.address,
+                  privyWalletId: wallet.id,
+                  signerId: SESSION_SIGNER_ID,
+                  policyId: SESSION_POLICY_ID,
+                  eventType: 'created',
+                  identityToken,
+                })
+              }
+            })
+          }
           className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-secondary/60 disabled:opacity-50"
         >
           {busy && <Loader2 className="size-3.5 animate-spin" />}
@@ -272,7 +306,12 @@ function InstantSwapsSection() {
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => run(() => removeSigners({ address: embeddedWallet.address }))}
+                  onClick={() =>
+                    run(async () => {
+                      await removeSigners({ address: embeddedWallet.address })
+                      logEvent('disabled')
+                    })
+                  }
                   className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
                 >
                   Disable
@@ -283,12 +322,13 @@ function InstantSwapsSection() {
                 type="button"
                 disabled={busy}
                 onClick={() =>
-                  run(() =>
-                    addSigners({
+                  run(async () => {
+                    await addSigners({
                       address: embeddedWallet.address,
                       signers: [{ signerId: SESSION_SIGNER_ID, policyIds: [SESSION_POLICY_ID] }],
-                    }),
-                  )
+                    })
+                    logEvent('enabled')
+                  })
                 }
                 className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
@@ -299,7 +339,12 @@ function InstantSwapsSection() {
           </div>
           <button
             type="button"
-            onClick={() => run(() => exportWallet({ address: embeddedWallet.address }))}
+            onClick={() =>
+              run(async () => {
+                await exportWallet({ address: embeddedWallet.address })
+                logEvent('export_initiated')
+              })
+            }
             className="mt-2.5 flex w-full items-center justify-center rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             Export private key

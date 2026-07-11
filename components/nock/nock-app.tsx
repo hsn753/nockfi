@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useWallets, usePrivy } from '@privy-io/react-auth'
+import { useWallets, usePrivy, useIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits, createWalletClient, custom } from 'viem'
 import { Menu, X } from 'lucide-react'
@@ -48,6 +48,10 @@ export function NockApp() {
 
   const { wallets } = useWallets()
   const { user: privyUser, ready: privyReady } = usePrivy()
+  // Sent as a header on every request that reads/writes data scoped to a wallet, so the
+  // server can verify the caller actually controls the address it claims (see
+  // lib/auth-server.ts) — previously every route just trusted a client-supplied address.
+  const { identityToken } = useIdentityToken()
   const publicClient = usePublicClient()
 
   // Privy's own wallet.chainId (CAIP-2, e.g. "eip155:4663") is the authoritative source
@@ -281,7 +285,7 @@ export function NockApp() {
 
         const res = await fetch('/api/robin', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
           body: JSON.stringify({ messages: history, walletAddress }),
         })
 
@@ -325,7 +329,7 @@ export function NockApp() {
     // could keep using a stale (undefined) walletAddress captured before the wallet
     // connected, until some unrelated state change happened to force a new closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages, privyReady, walletAddress],
+    [messages, privyReady, walletAddress, identityToken],
   )
 
   const handleDraw = useCallback((actionId: string) => {
@@ -435,7 +439,7 @@ export function NockApp() {
           ? await (async () => {
               const res = await fetch('/api/execute-delegated-swap', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
                 body: JSON.stringify({
                   walletId: (delegatedWallet as any).id,
                   address: delegatedWallet.address,
@@ -474,6 +478,33 @@ export function NockApp() {
                 transaction: txData,
               })
             })()
+
+        // Phase 1 of the transaction audit trail — log this attempt regardless of
+        // outcome, before verify-tx (below) fills in the real, independently-checked
+        // result. Fire-and-forget: logging must never block or break the actual swap
+        // flow the user is waiting on.
+        fetch('/api/transactions/log-submission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+          body: JSON.stringify({
+            txHash: result.txHash,
+            walletAddress,
+            signerAddress,
+            signerType: isUsingDelegatedWallet ? 'delegated' : 'external',
+            privyWalletId: isUsingDelegatedWallet ? (delegatedWallet as any)?.id : undefined,
+            agent: action.agent,
+            actionId: action.id,
+            fromTokenSymbol: fromToken,
+            fromTokenAddress: sellTokenAddress,
+            fromAmount,
+            toTokenSymbol: (action as any).toToken,
+            quoteJson: action,
+            broadcastStatus: !result.txHash || result.txHash === '0x'
+              ? 'no_hash_returned'
+              : result.error ? 'client_error' : 'submitted',
+            errorMessage: result.error,
+          }),
+        }).catch((err) => console.error('[Nock] Could not log transaction submission:', err))
 
         // Independent server-side confirmation is the ONLY thing allowed to decide
         // success/revert/didn't-happen — never result.error or result.txHash's own
@@ -616,7 +647,7 @@ export function NockApp() {
         })
       }, 1200)
     }
-  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue])
+  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress, identityToken])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

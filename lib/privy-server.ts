@@ -6,7 +6,9 @@ import { NATIVE_ETH_ADDRESS } from './get-swap-quote'
 
 let client: PrivyClient | null = null
 
-function getPrivyClient(): PrivyClient {
+// Exported for lib/auth-server.ts to reuse the same singleton for identity-token
+// verification — no reason to instantiate a second PrivyClient just for auth checks.
+export function getPrivyClient(): PrivyClient {
   if (!client) {
     const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
     const appSecret = process.env.PRIVY_APP_SECRET

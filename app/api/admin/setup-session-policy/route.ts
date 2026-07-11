@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 
 export const dynamic = 'force-dynamic'
@@ -21,7 +21,21 @@ const SWAP_TOKEN_ADDRESSES = Object.values(SWAP_TOKENS)
   .map((t) => t.address)
   .filter((address) => address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase())
 
-export async function POST() {
+// This (re)creates/overwrites the app-wide session-signer policy — a rare, operational,
+// one-time action, not a per-user one. Confirmed this route previously had zero inbound
+// auth at all (the Authorization header below is outbound, to Privy's own API — it does
+// nothing to protect this route itself), meaning anyone who found the URL could call it.
+// Fails closed: if ADMIN_SETUP_TOKEN isn't configured, this refuses rather than silently
+// staying open.
+export async function POST(req: NextRequest) {
+  const adminToken = process.env.ADMIN_SETUP_TOKEN
+  if (!adminToken) {
+    return NextResponse.json({ error: 'ADMIN_SETUP_TOKEN not configured — refusing to run.' }, { status: 500 })
+  }
+  if (req.headers.get('x-admin-token') !== adminToken) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
   const appSecret = process.env.PRIVY_APP_SECRET
   if (!appId || !appSecret) {

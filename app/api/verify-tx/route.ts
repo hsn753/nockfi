@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createPublicClient, http, isHash } from 'viem'
 import { nockChain } from '@/lib/chain'
+import { updateTransactionVerification } from '@/lib/db/transactions'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,14 +31,29 @@ export async function POST(req: NextRequest) {
 
   try {
     const receipt = await client.getTransactionReceipt({ hash: txHash as `0x${string}` })
+    const status = receipt.status === 'success' ? 'success' : 'reverted'
+
+    // This is the sole writer of verify_status on the transactions audit table — keeps
+    // the database in permanent agreement with what the user was actually told, since
+    // this endpoint is already the app's sole authority on success/revert/not-found.
+    // A missing row (nothing logged yet, or DB not provisioned) is a real, harmless
+    // no-op, not an error — never let an audit-logging side effect break the actual
+    // verification response this endpoint exists to give.
+    updateTransactionVerification(txHash, status, receipt.blockNumber.toString()).catch((err) => {
+      console.error('[verify-tx] Could not update transaction audit log:', err)
+    })
+
     return NextResponse.json({
       found: true,
-      status: receipt.status === 'success' ? 'success' : 'reverted',
+      status,
       blockNumber: receipt.blockNumber.toString(),
     })
-  } catch {
+  } catch (err) {
     // getTransactionReceipt throws if the hash isn't found (not yet mined, or never
     // broadcast at all) - both are real "not confirmed" states, not errors to hide.
+    updateTransactionVerification(txHash, 'not_found').catch((dbErr) => {
+      console.error('[verify-tx] Could not update transaction audit log:', dbErr)
+    })
     return NextResponse.json({ found: false, status: 'not_found' })
   }
 }
