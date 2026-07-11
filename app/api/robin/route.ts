@@ -355,6 +355,23 @@ export async function POST(request: Request) {
               error: `The user's message mentions "${mismatchedTokenWord}", which doesn't match either side of this quote (${lastSwapQuote.fromSymbol} -> ${lastSwapQuote.toSymbol}). Do not propose this swap. Either "${mismatchedTokenWord}" is a token that needs to be looked up (call get_trending_tokens for it) and confirmed with the user first, or you misread which token the user meant — ask them to clarify exactly which token before calling get_swap_quote or propose_action again. Never substitute a different token than what the user actually named without their explicit confirmation.`,
             }
           } else {
+            // The model was putting the raw token quantity into outcome.value as if it
+            // were a dollar figure (a position of "4,672.36 NOCK" showed up as "$4,672.36",
+            // a ~700x overstatement that then got added straight into the portfolio total).
+            // Never trust the model's own arithmetic for a dollar amount — compute it here
+            // from the verified price of the token actually being sold, which is real data
+            // we already have. If we don't have a verified price for the sell side (e.g.
+            // selling an unverified memecoin), say so plainly instead of guessing.
+            let outcomeValue = input.outcome.value
+            if (input.agent === 'swap' && lastSwapQuote?.transaction) {
+              const prices = await getReferencePrices()
+              const fromPrice = prices[(lastSwapQuote.fromSymbol || '').toUpperCase()]
+              const fromAmountNum = parseFloat(String(lastSwapQuote.fromAmount).replace(/,/g, ''))
+              outcomeValue = fromPrice !== undefined && !isNaN(fromAmountNum)
+                ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
+                : 'Value unavailable'
+            }
+
             action = {
               id: `act-${Date.now()}`,
               agent: input.agent,
@@ -362,7 +379,7 @@ export async function POST(request: Request) {
               detail: input.detail,
               metrics: input.metrics,
               status: 'pending',
-              outcome: input.outcome,
+              outcome: { ...input.outcome, value: outcomeValue },
               ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
                 transactionData: lastSwapQuote.transaction,
                 fromToken: lastSwapQuote.fromSymbol,
