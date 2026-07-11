@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet, useIdentityToken } from '@privy-io/react-auth'
+import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet, getIdentityToken } from '@privy-io/react-auth'
 import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
 import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
@@ -208,7 +208,6 @@ function InstantSwapsSection() {
   const { createWallet } = useCreateWallet()
   const { addSigners, removeSigners } = useSigners()
   const { exportWallet } = useExportWallet()
-  const { identityToken } = useIdentityToken()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -219,8 +218,12 @@ function InstantSwapsSection() {
       a.type === 'wallet' && (a as any).walletClientType === 'privy' && (a as any).chainType === 'ethereum',
   ) as { address: string; delegated: boolean; id?: string } | undefined
 
-  const logEvent = (eventType: DelegatedWalletEventType) => {
+  // identityToken fetched fresh here (not from the reactive useIdentityToken() hook,
+  // confirmed live to not reliably reflect a usable token for an already-connected
+  // session) rather than cached.
+  const logEvent = async (eventType: DelegatedWalletEventType) => {
     if (!ownerWalletAddress || !embeddedWallet?.id) return
+    const identityToken = await getIdentityToken()
     logDelegatedWalletEventClient({
       ownerWalletAddress,
       embeddedAddress: embeddedWallet.address,
@@ -273,7 +276,7 @@ function InstantSwapsSection() {
                   signerId: SESSION_SIGNER_ID,
                   policyId: SESSION_POLICY_ID,
                   eventType: 'created',
-                  identityToken,
+                  identityToken: await getIdentityToken(),
                 })
               }
             })
@@ -309,7 +312,7 @@ function InstantSwapsSection() {
                   onClick={() =>
                     run(async () => {
                       await removeSigners({ address: embeddedWallet.address })
-                      logEvent('disabled')
+                      await logEvent('disabled')
                     })
                   }
                   className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
@@ -327,7 +330,7 @@ function InstantSwapsSection() {
                       address: embeddedWallet.address,
                       signers: [{ signerId: SESSION_SIGNER_ID, policyIds: [SESSION_POLICY_ID] }],
                     })
-                    logEvent('enabled')
+                    await logEvent('enabled')
                   })
                 }
                 className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
@@ -342,7 +345,7 @@ function InstantSwapsSection() {
             onClick={() =>
               run(async () => {
                 await exportWallet({ address: embeddedWallet.address })
-                logEvent('export_initiated')
+                await logEvent('export_initiated')
               })
             }
             className="mt-2.5 flex w-full items-center justify-center rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"

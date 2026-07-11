@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useWallets, usePrivy, useIdentityToken } from '@privy-io/react-auth'
+import { useWallets, usePrivy, getIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits, createWalletClient, custom } from 'viem'
 import { Menu, X } from 'lucide-react'
@@ -48,10 +48,6 @@ export function NockApp() {
 
   const { wallets } = useWallets()
   const { user: privyUser, ready: privyReady } = usePrivy()
-  // Sent as a header on every request that reads/writes data scoped to a wallet, so the
-  // server can verify the caller actually controls the address it claims (see
-  // lib/auth-server.ts) — previously every route just trusted a client-supplied address.
-  const { identityToken } = useIdentityToken()
   const publicClient = usePublicClient()
 
   // Privy's own wallet.chainId (CAIP-2, e.g. "eip155:4663") is the authoritative source
@@ -283,6 +279,13 @@ export function NockApp() {
 
         console.log('[Nock] Sending to API - wallet address:', walletAddress)
 
+        // Fetched fresh right here rather than read from a cached hook value — the
+        // reactive useIdentityToken() hook was confirmed live to not reliably reflect a
+        // usable token for an already-connected session, causing every authenticated
+        // request to fail with "missing identity token" even right after a hard refresh.
+        // getIdentityToken() is Privy's own async getter for exactly this use case.
+        const identityToken = await getIdentityToken()
+
         const res = await fetch('/api/robin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
@@ -329,7 +332,7 @@ export function NockApp() {
     // could keep using a stale (undefined) walletAddress captured before the wallet
     // connected, until some unrelated state change happened to force a new closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages, privyReady, walletAddress, identityToken],
+    [messages, privyReady, walletAddress],
   )
 
   const handleDraw = useCallback((actionId: string) => {
@@ -366,6 +369,11 @@ export function NockApp() {
     // REAL SWAP EXECUTION - NO MOCK DATA
     if (action.agent === 'swap' && (activeWallet || delegatedWallet)) {
       try {
+        // Fetched fresh (not from the reactive useIdentityToken() hook, confirmed live
+        // to not reliably reflect a usable token for an already-connected session) and
+        // reused for both requests below.
+        const identityToken = await getIdentityToken()
+
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
         const txData = (action as any).transactionData
@@ -647,7 +655,7 @@ export function NockApp() {
         })
       }, 1200)
     }
-  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress, identityToken])
+  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress])
 
   const handleNewChat = useCallback(() => {
     setMessages([])
