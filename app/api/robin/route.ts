@@ -6,7 +6,7 @@ import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
-import { getYieldOptions } from '@/lib/get-yield-data'
+import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -97,7 +97,12 @@ When the user wants to swap, trade, buy, or sell any token:
 When the user asks a general, browsing-style question about what's available — "what vaults are there," "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options, get_perps_info, or check_vault_limits) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
 
-When the user asks to actually deposit into the yield vault: call get_yield_options to show them the real current data, then tell them plainly that depositing isn't built into this app yet — this is real, live vault data for informational purposes only right now. Never call propose_action for the yield agent under any circumstances yet, even if they explicitly ask to deposit — there is no real deposit transaction behind it, and building a preview card with real TVL/APY numbers but no real transaction would be worse than not showing one at all.
+When the user asks to actually deposit into the yield vault:
+1. If you haven't already shown them get_yield_options data this conversation, call it first so the conversation is grounded in the real current vault.
+2. If they haven't given a specific USDG amount, ask for one before doing anything else. Never guess or default an amount.
+3. Call get_yield_deposit_quote with that amount. This checks live on-chain whether the vault is actually accepting a deposit of this size for this wallet right now.
+4. If it returns an error, that means deposits are currently closed for this wallet — relay its message to the user plainly and honestly, and do NOT call propose_action. This is a real, current on-chain condition, not a bug or a missing feature — say so rather than implying something is broken.
+5. If it returns a real transaction, call propose_action for the yield agent using the real numbers from the quote (amount, sharesPreview, vaultSymbol) — never invented ones.
 
 When the user asks you to actually do something with their money or assets for perps or vaults (open a position, deposit):
 1. Call the relevant tool to get current data. Choose from get_perps_info or check_vault_limits.
@@ -187,11 +192,25 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_yield_options',
-      description: 'Returns real, live on-chain data for the Steakhouse USDG vault on Morpho (part of Robinhood Earn) — real name, TVL read directly from the vault contract, and a real APY derived from recorded share-price history (null if not enough history has been collected yet — never a guessed number). Depositing through this app is not built yet — say so plainly if the user asks to actually deposit. Call this whenever the user asks what yield options exist, without necessarily proposing an action.',
+      description: 'Returns real, live on-chain data for the Steakhouse USDG vault on Morpho (part of Robinhood Earn) — real name, TVL read directly from the vault contract, and a real APY derived from recorded share-price history (null if not enough history has been collected yet — never a guessed number). Call this whenever the user asks what yield options exist, without necessarily proposing an action. If the user wants to actually deposit, follow up with get_yield_deposit_quote once you have an amount.',
       parameters: {
         type: 'object',
         properties: {},
         required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_yield_deposit_quote',
+      description: 'Checks live on-chain whether the Steakhouse USDG vault is currently accepting a deposit of this size for the connected wallet, and if so, builds the real deposit transaction (with a real shares-received preview). Deposits may currently be closed to direct wallet interaction — if so this returns a clear error explaining that, and you must not call propose_action. Only call this once the user has given you a specific USDG amount to deposit; never guess or default one.',
+      parameters: {
+        type: 'object',
+        properties: {
+          amount: { type: 'string', description: 'Human-readable USDG amount to deposit, e.g. "100"' },
+        },
+        required: ['amount'],
       },
     },
   },
@@ -370,6 +389,7 @@ export async function POST(request: Request) {
     let action: ActionPreview | undefined
     let responseText = ''
     let lastSwapQuote: any = null
+    let lastYieldQuote: Awaited<ReturnType<typeof buildYieldDeposit>> | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
     // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
@@ -404,19 +424,6 @@ export async function POST(request: Request) {
         if (functionName === 'propose_action') {
           const input = functionArgs as ProposeActionInput
 
-          // Hard backstop, not just a prompt instruction — this session found repeatedly
-          // that a prompt-only rule isn't reliable enough on its own for anything this
-          // consequential. Yield now returns real vault data (TVL, APY), but there is no
-          // real deposit transaction wired up yet — a preview card built from real numbers
-          // with nothing real behind it would be worse than the old fully-fake stub data.
-          if (input.agent === 'yield') {
-            result = {
-              error: 'Yield deposits are not built into this app yet — do not propose an action for this. Present the real vault data from get_yield_options directly and tell the user depositing is informational-only for now.',
-            }
-            openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
-            continue
-          }
-
           // A swap preview is only real if it's backed by a transaction from a quote
           // fetched in THIS turn — otherwise the model can (and did, in testing) build a
           // preview card from numbers it just remembered/recomputed from earlier chat
@@ -446,6 +453,16 @@ export async function POST(request: Request) {
             result = {
               error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
             }
+          } else if (input.agent === 'yield' && !(lastYieldQuote && 'transaction' in lastYieldQuote)) {
+            // Same hard backstop as swap above — a preview card must be backed by a real,
+            // just-fetched transaction, never invented or reused numbers. If
+            // get_yield_deposit_quote already ran this turn and came back with an error
+            // (deposits closed), relay that instead of this generic message.
+            result = {
+              error: lastYieldQuote && 'error' in lastYieldQuote
+                ? lastYieldQuote.error
+                : 'No live deposit quote available. Call get_yield_deposit_quote with a specific USDG amount first, then call propose_action again with its real numbers.',
+            }
           } else if (mismatchedTokenWord) {
             result = {
               error: `The user's message mentions "${mismatchedTokenWord}", which doesn't match either side of this quote (${lastSwapQuote.fromSymbol} -> ${lastSwapQuote.toSymbol}). Do not propose this swap. Either "${mismatchedTokenWord}" is a token that needs to be looked up (call get_trending_tokens for it) and confirmed with the user first, or you misread which token the user meant — ask them to clarify exactly which token before calling get_swap_quote or propose_action again. Never substitute a different token than what the user actually named without their explicit confirmation.`,
@@ -466,6 +483,11 @@ export async function POST(request: Request) {
               outcomeValue = fromPrice !== undefined && !isNaN(fromAmountNum)
                 ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
                 : 'Value unavailable'
+            } else if (input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote) {
+              const prices = await getReferencePrices()
+              const usdgPrice = prices.USDG ?? 1
+              const amountNum = parseFloat(lastYieldQuote.amount)
+              outcomeValue = !isNaN(amountNum) ? `$${(amountNum * usdgPrice).toFixed(2)}` : 'Value unavailable'
             }
 
             action = {
@@ -484,6 +506,15 @@ export async function POST(request: Request) {
                 verified: lastSwapQuote.verified !== false,
                 sellTokenAddress: lastSwapQuote.sellTokenAddress,
                 sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
+              } : {}),
+              ...(input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote ? {
+                transactionData: lastYieldQuote.transaction,
+                fromToken: 'USDG',
+                toToken: lastYieldQuote.vaultSymbol,
+                amount: lastYieldQuote.amount,
+                verified: true,
+                sellTokenAddress: lastYieldQuote.assetAddress,
+                sellTokenDecimals: lastYieldQuote.assetDecimals,
               } : {}),
             } as any
             result = { status: 'preview_ready' }
@@ -605,11 +636,39 @@ export async function POST(request: Request) {
             const vaults = await getYieldOptions()
             result = {
               vaults,
-              note: 'Real on-chain vault data (TVL from live totalAssets(), APY derived from real recorded share-price history — null if not enough history has been collected yet, never a guessed number). Deposits are not yet supported through this app — do not propose_action for this agent yet, tell the user this is informational only for now.',
+              note: 'Real on-chain vault data (TVL from live totalAssets(), APY derived from real recorded share-price history — null if not enough history has been collected yet, never a guessed number). If the user wants to actually deposit, get a specific USDG amount from them and call get_yield_deposit_quote next — deposits may or may not currently be open, that tool checks live on-chain.',
             }
           } catch (err) {
             console.error('[robin] get_yield_options error:', err)
             result = { error: 'Could not read live vault data from the chain. Try again in a moment.' }
+          }
+
+        } else if (functionName === 'get_yield_deposit_quote') {
+          const { amount } = functionArgs as { amount?: string }
+
+          // Same hard backstop as get_swap_quote above — never let the model default or
+          // guess a deposit amount, this is real money.
+          const hasUserSpecifiedAmount = messages.some(
+            (m) => m.role === 'user' && /\d/.test(m.text.replace(/0x[a-fA-F0-9]{40}/g, '')),
+          )
+
+          if (!hasUserSpecifiedAmount) {
+            result = {
+              error: 'The user has not specified a deposit amount anywhere in this conversation. Do not guess or default to any amount — ask the user exactly how much USDG they want to deposit, then call this tool again once they answer with a specific number.',
+            }
+          } else if (!amount) {
+            result = { error: 'amount is required.' }
+          } else if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else {
+            try {
+              const quote = await buildYieldDeposit(walletAddress, amount)
+              lastYieldQuote = quote
+              result = quote
+            } catch (err) {
+              console.error('[robin] get_yield_deposit_quote error:', err)
+              result = { error: 'Could not read live deposit availability from the chain. Try again in a moment.' }
+            }
           }
 
         } else {

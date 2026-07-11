@@ -1,4 +1,4 @@
-import { createPublicClient, http, formatUnits } from 'viem'
+import { createPublicClient, http, formatUnits, parseUnits, encodeFunctionData } from 'viem'
 import { nockChain } from './chain'
 import { getReferencePrices } from './get-prices'
 import { recordSnapshot, computeApy } from './db/vault-snapshots'
@@ -18,6 +18,9 @@ const ERC4626_ABI = [
   { type: 'function', name: 'asset', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'totalAssets', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'totalSupply', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'maxDeposit', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'previewDeposit', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'deposit', stateMutability: 'nonpayable', inputs: [{ type: 'uint256', name: 'assets' }, { type: 'address', name: 'receiver' }], outputs: [{ type: 'uint256' }] },
 ] as const
 
 const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
@@ -73,4 +76,77 @@ export async function getYieldOptions(): Promise<YieldVault[]> {
       protocol: 'Morpho (Steakhouse Financial curated)',
     },
   ]
+}
+
+export type YieldDepositQuote = {
+  transaction: { to: string; data: string; value: string; gas: string; gasPrice: string }
+  assetAddress: string
+  assetDecimals: number
+  vaultSymbol: string
+  sharesPreview: string
+  amount: string
+}
+
+// A live estimateGas() call would revert here since no token approval exists yet at
+// quote time (approval only happens right before the actual deposit tx, same order
+// as the swap flow) — so this uses a fixed conservative limit instead, matching the
+// existing '300000' fallback already used for delegated execution in
+// app/api/execute-delegated-swap/route.ts.
+const DEPOSIT_GAS_LIMIT = '300000'
+
+// Checks live on-chain whether this vault is actually accepting a deposit of this
+// size for this receiver (maxDeposit) before building anything — confirmed live that
+// maxDeposit() currently returns 0 for every address tested, meaning Robinhood's real
+// Earn product likely gates deposits through its own app rather than the raw vault
+// contract. Returns an honest error in that case rather than a transaction that would
+// revert; starts working automatically the moment (if ever) that changes, with no
+// code change needed.
+export async function buildYieldDeposit(
+  receiver: string,
+  amount: string,
+): Promise<{ error: string } | YieldDepositQuote> {
+  const cleanAmount = amount.replace(/,/g, '')
+  const assets = parseUnits(cleanAmount, USDG_DECIMALS)
+
+  const [assetAddress, vaultSymbol, maxDepositRaw] = await Promise.all([
+    rpcClient.readContract({ address: STEAKHOUSE_USDG_VAULT, abi: ERC4626_ABI, functionName: 'asset' }),
+    rpcClient.readContract({ address: STEAKHOUSE_USDG_VAULT, abi: ERC4626_ABI, functionName: 'symbol' }),
+    rpcClient.readContract({ address: STEAKHOUSE_USDG_VAULT, abi: ERC4626_ABI, functionName: 'maxDeposit', args: [receiver as `0x${string}`] }),
+  ])
+
+  if (assets > maxDepositRaw) {
+    return {
+      error: `Deposits into this vault aren't open for this wallet right now (the vault currently reports a max deposit of ${formatUnits(maxDepositRaw, USDG_DECIMALS)} USDG for this address). Robinhood's Earn product appears to gate deposits through its own app rather than allowing any wallet to deposit directly into the vault contract. This may open up later — there's nothing wrong with the request itself.`,
+    }
+  }
+
+  const sharesPreviewRaw = await rpcClient.readContract({
+    address: STEAKHOUSE_USDG_VAULT,
+    abi: ERC4626_ABI,
+    functionName: 'previewDeposit',
+    args: [assets],
+  })
+
+  const data = encodeFunctionData({
+    abi: ERC4626_ABI,
+    functionName: 'deposit',
+    args: [assets, receiver as `0x${string}`],
+  })
+
+  const gasPrice = await rpcClient.getGasPrice()
+
+  return {
+    transaction: {
+      to: STEAKHOUSE_USDG_VAULT,
+      data,
+      value: '0',
+      gas: DEPOSIT_GAS_LIMIT,
+      gasPrice: gasPrice.toString(),
+    },
+    assetAddress,
+    assetDecimals: USDG_DECIMALS,
+    vaultSymbol,
+    sharesPreview: formatUnits(sharesPreviewRaw, USDG_DECIMALS),
+    amount: cleanAmount,
+  }
 }

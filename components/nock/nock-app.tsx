@@ -366,8 +366,9 @@ export function NockApp() {
       return
     }
 
-    // REAL SWAP EXECUTION - NO MOCK DATA
-    if (action.agent === 'swap' && (activeWallet || delegatedWallet)) {
+    // REAL SWAP/YIELD-DEPOSIT EXECUTION - NO MOCK DATA
+    const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield'
+    if (isRealExecutionAgent && (activeWallet || delegatedWallet)) {
       try {
         // Fetched fresh (not from the reactive useIdentityToken() hook, confirmed live
         // to not reliably reflect a usable token for an already-connected session) and
@@ -442,7 +443,7 @@ export function NockApp() {
           throw new Error('Not connected to Robinhood Chain — refresh and try again.')
         }
 
-        console.log('Executing real swap transaction...')
+        console.log(action.agent === 'yield' ? 'Executing real deposit transaction...' : 'Executing real swap transaction...')
         const result = isUsingDelegatedWallet
           ? await (async () => {
               const res = await fetch('/api/execute-delegated-swap', {
@@ -549,7 +550,7 @@ export function NockApp() {
           throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}) — nothing was swapped, only gas was spent.`)
         }
 
-        console.log('Swap executed! TX Hash:', result.txHash)
+        console.log(action.agent === 'yield' ? 'Deposit executed! TX Hash:' : 'Swap executed! TX Hash:', result.txHash)
 
         // Update UI with success
         setMessages((prev) => {
@@ -563,7 +564,7 @@ export function NockApp() {
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Done! Swap executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
+            text: `Done! ${action.agent === 'yield' ? 'Deposit' : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
           const newPosition: Position = {
@@ -592,12 +593,13 @@ export function NockApp() {
         // ask the chain for the real number.
         fetchPortfolioValue()
       } catch (error) {
-        console.error('Swap execution failed:', error)
+        const actionNoun = action.agent === 'yield' ? 'Deposit' : 'Swap'
+        console.error(`${actionNoun} execution failed:`, error)
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
         const isTimeout = /timeout/i.test(rawMessage)
         const friendlyMessage = isTimeout
-          ? "Your wallet didn't respond in time. This usually means a connected mobile wallet (like the Robinhood app over WalletConnect) either missed the approval notification or the session went stale. Check your phone for a pending approval, or try disconnecting and reconnecting your wallet, then attempt the swap again."
-          : `Swap failed: ${rawMessage}. Please try again.`
+          ? `Your wallet didn't respond in time. This usually means a connected mobile wallet (like the Robinhood app over WalletConnect) either missed the approval notification or the session went stale. Check your phone for a pending approval, or try disconnecting and reconnecting your wallet, then attempt the ${actionNoun.toLowerCase()} again.`
+          : `${actionNoun} failed: ${rawMessage}. Please try again.`
         setMessages((prev) => [
           ...prev.map((m) =>
             m.role === 'robin' && m.action && m.action.id === actionId
