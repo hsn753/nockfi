@@ -510,13 +510,17 @@ export function NockApp() {
             a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
           )
           setAttention((att) => att.filter((x) => x.agent !== action.agent))
-          setAddedValue(
-            (v) =>
-              v + parseFloat(action.outcome.value.replace(/[^0-9.]/g, '') || '0'),
-          )
 
           return [...updated, confirm]
         })
+
+        // Refetch the real on-chain total instead of estimating it by adding the
+        // preview's outcome value on top of the last-known total. That estimate approach
+        // was the exact mechanism behind an earlier bug (a swap into an unpriced token
+        // added its raw token quantity as if it were a dollar figure) — a real swap now
+        // always has a verified transaction behind it, so there's no reason not to just
+        // ask the chain for the real number.
+        fetchPortfolioValue()
       } catch (error) {
         console.error('Swap execution failed:', error)
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -601,7 +605,7 @@ export function NockApp() {
         })
       }, 1200)
     }
-  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet])
+  }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

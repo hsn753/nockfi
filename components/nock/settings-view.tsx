@@ -1,10 +1,46 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet } from '@privy-io/react-auth'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { user } from './data'
+
+// There's no wallet extension UI for the embedded instant-swap wallet the way there is
+// for a connected MetaMask/Phantom, so without this it's genuinely invisible — the only
+// way to check its balance was asking Robin for its address by name every time.
+function useEmbeddedBalance(address: string | undefined) {
+  const [totalUsd, setTotalUsd] = useState<number | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!address) {
+      setTotalUsd(null)
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    fetch(`/api/balances?address=${address}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return
+        const total = (data.balances || []).reduce(
+          (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
+          0,
+        )
+        setTotalUsd(total)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [address])
+
+  return { totalUsd, loading }
+}
 
 function Toggle({
   label,
@@ -177,6 +213,8 @@ function InstantSwapsSection() {
       a.type === 'wallet' && (a as any).walletClientType === 'privy' && (a as any).chainType === 'ethereum',
   ) as { address: string; delegated: boolean } | undefined
 
+  const { totalUsd: embeddedBalanceUsd, loading: balanceLoading } = useEmbeddedBalance(embeddedWallet?.address)
+
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
     setError('')
@@ -217,6 +255,13 @@ function InstantSwapsSection() {
             <div>
               <p className="text-xs text-muted-foreground">Instant-swap wallet</p>
               <p className="font-mono text-sm text-foreground">{embeddedWallet.address}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {balanceLoading
+                  ? 'Loading balance...'
+                  : embeddedBalanceUsd !== null
+                    ? `$${embeddedBalanceUsd.toFixed(2)} on Robinhood Chain`
+                    : 'Balance unavailable'}
+              </p>
             </div>
             {embeddedWallet.delegated ? (
               <div className="flex items-center gap-3">
