@@ -1,8 +1,14 @@
 // Live reference prices, no API key required.
-// ETH: CoinGecko spot price. Stock tokens: the real underlying equity's market price
+// ETH: CoinGecko spot price. Stock/ETF tokens: the real underlying security's market price
 // via Yahoo Finance's public chart endpoint — that IS the correct reference price for a
 // tokenized stock (price exposure to the real security, not a separate onchain market).
-const STOCK_TICKERS = ['TSLA', 'AMD', 'AMZN', 'AAPL', 'PLTR'] as const
+// A ticker with no real public market (e.g. a tokenized private company) will just come
+// back null here and get_reference_prices already handles that gracefully.
+const STOCK_TICKERS = [
+  'TSLA', 'AMD', 'AMZN', 'AAPL', 'PLTR', 'BABA', 'BE', 'COIN', 'CRCL', 'CRWV',
+  'GOOGL', 'INTC', 'META', 'MSFT', 'MU', 'NVDA', 'ORCL', 'SNDK', 'SPCX', 'USAR',
+  'QQQ', 'SGOV', 'SLV', 'SPY', 'CUSO',
+] as const
 
 async function getEthPriceUsd(): Promise<number | null> {
   try {
@@ -38,7 +44,10 @@ export async function getReferencePrices(): Promise<Record<string, number>> {
   ])
 
   const prices: Record<string, number> = { USDG: 1 }
-  if (ethPrice !== null) prices.ETH = ethPrice
+  if (ethPrice !== null) {
+    prices.ETH = ethPrice
+    prices.WETH = ethPrice
+  }
   STOCK_TICKERS.forEach((ticker, i) => {
     const price = stockPrices[i]
     if (price !== null) prices[ticker] = price

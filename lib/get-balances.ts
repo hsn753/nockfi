@@ -1,6 +1,7 @@
 import { createPublicClient, http, erc20Abi, formatUnits } from 'viem'
 import { nockChain } from './chain'
 import { getReferencePrices } from './get-prices'
+import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from './get-swap-quote'
 
 export type BalanceEntry = {
   symbol: string
@@ -9,17 +10,24 @@ export type BalanceEntry = {
   usdValue: number | null
 }
 
-// Verified against https://docs.robinhood.com/chain/contracts/ (Robinhood Chain MAINNET, id 4663).
-// The previous addresses here were Robinhood Chain testnet addresses with no code on mainnet,
-// which is why every balance/quote call for these tokens was reverting.
-const TOKENS = [
-  { symbol: 'USDG', name: 'USDG',                 address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as `0x${string}` },
-  { symbol: 'TSLA', name: 'Tesla stock token',    address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d' as `0x${string}` },
-  { symbol: 'AMD',  name: 'AMD stock token',      address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC' as `0x${string}` },
-  { symbol: 'AMZN', name: 'Amazon stock token',   address: '0x12f190a9F9d7D37a250758b26824B97CE941bF54' as `0x${string}` },
-  { symbol: 'AAPL', name: 'Apple stock token',    address: '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9' as `0x${string}` },
-  { symbol: 'PLTR', name: 'Palantir stock token', address: '0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A' as `0x${string}` },
-] as const
+const TOKEN_NAMES: Record<string, string> = {
+  WETH: 'Wrapped Ether', USDG: 'USDG',
+  TSLA: 'Tesla stock token', AMD: 'AMD stock token', AMZN: 'Amazon stock token',
+  AAPL: 'Apple stock token', PLTR: 'Palantir stock token', BABA: 'Alibaba stock token',
+  BE: 'Bloom Energy stock token', COIN: 'Coinbase stock token', CRCL: 'Circle stock token',
+  CRWV: 'CoreWeave stock token', GOOGL: 'Alphabet stock token', INTC: 'Intel stock token',
+  META: 'Meta stock token', MSFT: 'Microsoft stock token', MU: 'Micron stock token',
+  NVDA: 'Nvidia stock token', ORCL: 'Oracle stock token', SNDK: 'SanDisk stock token',
+  SPCX: 'SpaceX stock token', USAR: 'USA Rare Earth stock token', QQQ: 'Nasdaq-100 ETF token',
+  SGOV: 'Short Treasury ETF token', SLV: 'Silver ETF token', SPY: 'S&P 500 ETF token',
+  CUSO: 'CUSO ETF token',
+}
+
+// Same verified mainnet token set the swap agent uses (see get-swap-quote.ts), minus native ETH
+// which is tracked separately via getBalance rather than an ERC-20 read.
+const TOKENS = Object.entries(SWAP_TOKENS)
+  .filter(([symbol, t]) => symbol !== 'ETH' && t.address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase())
+  .map(([symbol, t]) => ({ symbol, name: TOKEN_NAMES[symbol] || symbol, address: t.address as `0x${string}` }))
 
 function fmtBalance(raw: bigint, decimals: number): string {
   const n = parseFloat(formatUnits(raw, decimals))

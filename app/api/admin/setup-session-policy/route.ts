@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,17 +13,13 @@ export const dynamic = 'force-dynamic'
 // Rule 1 caps what can be sent to the 0x swap router (matches the router address our
 // own quotes already return) at 0.05 ETH per transaction.
 // Rule 2 allows zero-value approve() calls to the known swap tokens, needed to sell
-// anything that isn't native ETH.
+// anything that isn't native ETH. Derived from the same SWAP_TOKENS the swap agent
+// uses so this can't drift out of sync with what's actually swappable.
 const ZEROX_ROUTER = '0x0000000000001fF3684f28c67538d4D072C22734'
 const MAX_TX_VALUE_WEI = '50000000000000000' // 0.05 ETH
-const SWAP_TOKEN_ADDRESSES = [
-  '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', // USDG
-  '0x322F0929c4625eD5bAd873c95208D54E1c003b2d', // TSLA
-  '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC', // AMD
-  '0x12f190a9F9d7D37a250758b26824B97CE941bF54', // AMZN
-  '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9', // AAPL
-  '0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A', // PLTR
-]
+const SWAP_TOKEN_ADDRESSES = Object.values(SWAP_TOKENS)
+  .map((t) => t.address)
+  .filter((address) => address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase())
 
 export async function POST() {
   const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
