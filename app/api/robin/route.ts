@@ -4,6 +4,7 @@ import { isAddress } from 'viem'
 import { fetchWalletBalances } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
+import { getTrendingTokens, findTokensBySymbol } from '@/lib/get-trending-tokens'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -43,10 +44,15 @@ When the user asks what they hold, their portfolio, their balances, or anything 
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
 
 When the user wants to swap, trade, buy, or sell any token:
-- Call get_swap_quote with fromToken, toToken, and amount. Supported tokens are ${SUPPORTED_TOKENS_LIST}. Everything except USDG trades against USDG (e.g. ETH -> USDG, USDG -> TSLA, or TSLA -> USDG). If the user says USDC or dollars, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user names a stock or ETF not in that list, tell them plainly it isn't supported yet rather than guessing a symbol. If the user doesn't specify an amount, ask for one before calling the tool.
-- This exact token list is authoritative right now, even if earlier messages in this same conversation (from you or the user) mentioned a different or shorter list. The set of supported tokens can grow over time — always answer "what's supported" questions from the list above, never from something said earlier in the conversation.
+- If it's one of the verified tokens (${SUPPORTED_TOKENS_LIST}), call get_swap_quote directly with the symbol. Everything except USDG trades against USDG (e.g. ETH -> USDG, USDG -> TSLA, or TSLA -> USDG). If the user says USDC or dollars, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user doesn't specify an amount, ask for one before calling the tool.
+- If the user names a memecoin or community token NOT in that verified list, call get_trending_tokens with that symbol first to look it up. This list is completely unverified — Robinhood Chain is permissionless, anyone can deploy a token with any name, and real impersonator tokens already exist (multiple different contracts all called "ROBINHOOD" or "HOOD" at different addresses, none of them official). Never silently pick one:
+  - If get_trending_tokens finds exactly one match, tell the user this is an unverified community token (not vetted by Robinhood, real scam/rug risk), state its exact contract address, and ask them to confirm it's the one they mean before quoting.
+  - If it finds multiple matches for the same symbol, explicitly list all of them with their addresses and volume/liquidity, warn that duplicate-name tokens are a common scam pattern, and ask the user which specific address they mean. Do not default to the highest-volume one without asking — high volume does not mean legitimate.
+  - If it finds none, say so and ask if they have the exact contract address.
+  - Once the user confirms a specific address, call get_swap_quote using that contract address as fromToken/toToken (not the symbol).
+- This exact verified-token list is authoritative right now, even if earlier messages in this same conversation (from you or the user) mentioned a different or shorter list. It can grow over time — always answer "what's supported" questions from the list above, never from something said earlier in the conversation.
 - If the quote comes back with an error field, tell the user what it actually says. Do not guess prices, and never say a token is "not supported" just because one quote attempt failed — check the real error first. If the error mentions the buy token is not authorized for trade, that specific token IS supported by this app, but this specific wallet isn't authorized to trade regulated stock tokens (a compliance restriction on the wallet, not a temporary bug or a missing feature) — explain it that way, don't call the token unsupported.
-- If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers.
+- If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers. If the quote's verified field is false, the outcome/detail text in propose_action MUST include an explicit unverified-token warning — this is not optional.
 
 When the user asks to do something else with their money or assets:
 1. Call the relevant tool to get current data. Choose from get_yield_options, get_perps_info, get_stock_token_info, or check_vault_limits.
@@ -152,8 +158,22 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_trending_tokens',
+      description: "Looks up memecoins/community tokens on Robinhood Chain that are NOT in the verified token list, using live DEX data. Completely unverified — anyone can deploy a token, and real impersonator tokens already exist (multiple different contracts named 'ROBINHOOD' or 'HOOD'). Pass a symbol to search for a specific one (returns every distinct address matching that symbol, which may be more than one), or omit it to get the current top tokens by trading volume. Always call this before quoting a swap for any token not in the verified list — never guess a memecoin's address.",
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Token symbol to search for, e.g. CASHCAT. Omit to get general top-trending tokens.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_swap_quote',
-      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. Supported tokens: ${SUPPORTED_TOKENS_LIST}. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.`,
+      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. fromToken/toToken can be a verified symbol (${SUPPORTED_TOKENS_LIST}) or, for a memecoin confirmed via get_trending_tokens, its exact contract address. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.`,
       parameters: {
         type: 'object',
         properties: {
@@ -302,6 +322,7 @@ export async function POST(request: Request) {
                 fromToken: lastSwapQuote.fromSymbol,
                 toToken: lastSwapQuote.toSymbol,
                 amount: lastSwapQuote.fromAmount,
+                verified: lastSwapQuote.verified !== false,
               } : {}),
             } as any
             result = { status: 'preview_ready' }
@@ -335,6 +356,18 @@ export async function POST(request: Request) {
           result = {
             ...bridgeInfo,
             instructions: 'This is the official Arbitrum bridge (Robinhood Chain is an Arbitrum Orbit L2). Bridge into the same wallet address already connected — funds show up automatically once confirmed.',
+          }
+
+        } else if (functionName === 'get_trending_tokens') {
+          const { symbol } = functionArgs as { symbol?: string }
+          try {
+            const tokens = symbol ? await findTokensBySymbol(symbol) : await getTrendingTokens()
+            result = {
+              tokens,
+              warning: 'These are unverified community/memecoin tokens on Robinhood Chain, not vetted by Robinhood. Anyone can deploy a token with any name — real impersonator tokens exist. Confirm the exact contract address with the user before quoting.',
+            }
+          } catch (err) {
+            result = { error: 'Could not reach token lookup service. Try again in a moment.' }
           }
 
         } else if (functionName === 'get_swap_quote') {

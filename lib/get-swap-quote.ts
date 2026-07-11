@@ -1,4 +1,5 @@
-import { parseUnits, formatUnits } from 'viem'
+import { parseUnits, formatUnits, createPublicClient, http, erc20Abi, isAddress } from 'viem'
+import { nockChain } from './chain'
 
 const ZEROX_BASE = 'https://api.0x.org'
 const CHAIN_ID = 4663
@@ -56,6 +57,30 @@ export type SwapQuoteResult = {
     value: string
   } | null
   error?: string
+  // False when either side of the trade is a raw contract address rather than one of
+  // Robinhood's own verified tokens — i.e. any memecoin/community token. The caller
+  // must treat this as "not vetted, real scam risk" and say so to the user.
+  verified?: boolean
+}
+
+const decimalsCache = new Map<string, number>()
+const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
+
+async function resolveToken(input: string): Promise<{ address: string; decimals: number; verified: boolean } | null> {
+  const known = SWAP_TOKENS[input.toUpperCase()]
+  if (known) return { ...known, verified: true }
+
+  if (!isAddress(input)) return null
+  const cached = decimalsCache.get(input.toLowerCase())
+  if (cached !== undefined) return { address: input, decimals: cached, verified: false }
+
+  try {
+    const decimals = await rpcClient.readContract({ address: input as `0x${string}`, abi: erc20Abi, functionName: 'decimals' })
+    decimalsCache.set(input.toLowerCase(), decimals)
+    return { address: input, decimals, verified: false }
+  } catch {
+    return null
+  }
 }
 
 type ZeroXQuoteResponse = {
@@ -99,11 +124,13 @@ export async function fetchSwapQuote({
   const apiKey = process.env.ZEROX_API_KEY
   if (!apiKey) throw new Error('ZEROX_API_KEY not configured')
 
-  const sell = SWAP_TOKENS[fromToken.toUpperCase()]
-  const buy = SWAP_TOKENS[toToken.toUpperCase()]
+  const sell = await resolveToken(fromToken)
+  const buy = await resolveToken(toToken)
 
-  if (!sell) return { ...baseResult(fromToken, toToken, amount), error: `Token not supported: ${fromToken}` }
-  if (!buy)  return { ...baseResult(fromToken, toToken, amount), error: `Token not supported: ${toToken}` }
+  if (!sell) return { ...baseResult(fromToken, toToken, amount), error: `Could not resolve token: ${fromToken}. Use a known symbol or a valid contract address.` }
+  if (!buy)  return { ...baseResult(fromToken, toToken, amount), error: `Could not resolve token: ${toToken}. Use a known symbol or a valid contract address.` }
+
+  const bothVerified = sell.verified && buy.verified
 
   let sellAmountWei: string
   try {
@@ -158,12 +185,13 @@ export async function fetchSwapQuote({
   const rateStr = rate.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 4 })
 
   return {
-    fromSymbol: fromToken.toUpperCase(),
-    toSymbol: toToken.toUpperCase(),
+    fromSymbol: sell.verified ? fromToken.toUpperCase() : sell.address,
+    toSymbol: buy.verified ? toToken.toUpperCase() : buy.address,
     fromAmount: fromAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
     toAmount: toAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
     exchangeRate: `1 ${fromToken.toUpperCase()} = ${rateStr} ${toToken.toUpperCase()}`,
     liquidityAvailable: true,
     transaction: data.transaction ?? null,
+    verified: bothVerified,
   }
 }

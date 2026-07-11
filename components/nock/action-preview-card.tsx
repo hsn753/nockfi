@@ -1,6 +1,6 @@
 'use client'
 
-import { Check, Loader2, ShieldCheck } from 'lucide-react'
+import { Check, Loader2, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getAgent, type ActionPreview } from './data'
 import { AgentIcon } from './agent-icon'
@@ -16,9 +16,10 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
   const executed = action.status === 'executed'
   const confirming = action.status === 'confirming'
   const reviewing = action.status === 'reviewing'
+  const isUnverifiedToken = (action as any).verified === false
 
   return (
-    <div className="mt-4 overflow-hidden rounded-2xl border border-border/70 bg-card">
+    <div className={cn('mt-4 overflow-hidden rounded-2xl border bg-card', isUnverifiedToken ? 'border-destructive/50' : 'border-border/70')}>
       {/* Agent chip */}
       <div className="flex items-center gap-2 px-5 pt-5">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
@@ -35,6 +36,15 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
 
       {/* Action body */}
       <div className="px-5 pb-5 pt-3">
+        {isUnverifiedToken && (
+          <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" strokeWidth={1.75} />
+            <p className="leading-relaxed">
+              Unverified token. This is not one of Robinhood's official assets — anyone can deploy a
+              token with any name on Robinhood Chain. Double-check the contract address yourself before confirming.
+            </p>
+          </div>
+        )}
         <p className="text-[15px] font-semibold leading-snug text-foreground">
           {action.action}
         </p>
