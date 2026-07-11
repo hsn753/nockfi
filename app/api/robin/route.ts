@@ -7,6 +7,7 @@ import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
+import { getPerpsMarkets } from '@/lib/get-perps-data'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -104,8 +105,10 @@ When the user asks to actually deposit into the yield vault:
 4. If it returns an error, that means deposits are currently closed for this wallet — relay its message to the user plainly and honestly, and do NOT call propose_action. This is a real, current on-chain condition, not a bug or a missing feature — say so rather than implying something is broken.
 5. If it returns a real transaction, call propose_action for the yield agent using the real numbers from the quote (amount, sharesPreview, vaultSymbol) — never invented ones.
 
-When the user asks you to actually do something with their money or assets for perps or vaults (open a position, deposit):
-1. Call the relevant tool to get current data. Choose from get_perps_info or check_vault_limits.
+When the user asks to actually open a perps position: call get_perps_info to show them the real current market data (mark price, funding, open interest, max leverage), then tell them plainly that opening a position isn't executable through Nock yet — this is real, live market data from Lighter for informational purposes only right now. Never call propose_action for the perps agent under any circumstances yet, even if they explicitly ask to open a position — there is no real order-placement flow behind it yet.
+
+When the user asks you to actually do something with their money or assets for vaults (deposit):
+1. Call check_vault_limits to get current data.
 2. Based on the data returned, call propose_action with a fully structured preview of the action you recommend.
 3. After propose_action returns, write one or two sentences in plain language explaining what you found and what you are proposing. Invite the user to use the Draw button to review it.
 
@@ -127,14 +130,6 @@ Rules:
 
 function callStubTool(name: string, _input: unknown): unknown {
   switch (name) {
-    case 'get_perps_info':
-      return {
-        markets: [
-          { asset: 'ETH', markPrice: '$3,327.10', fundingRate: '0.01%/8h', openInterest: '$142M', maxLeverage: '10x' },
-          { asset: 'BTC', markPrice: '$107,440.00', fundingRate: '0.008%/8h', openInterest: '$280M', maxLeverage: '10x' },
-        ],
-        userCollateral: '$0', note: 'Deposit collateral to open a position.',
-      }
     case 'check_vault_limits':
       return {
         vaults: [
@@ -218,10 +213,12 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_perps_info',
-      description: 'Returns available perpetual futures markets (asset, mark price, funding rate, open interest, max leverage). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually open a position right now. Call this whenever the user asks what perps markets exist, without necessarily proposing an action unless they ask you to.',
+      description: 'Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter\'s own live margin requirement). Scoped to crypto/memecoin markets only. Opening a position through this app is not built yet — say so plainly if the user asks to actually open one. Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          symbol: { type: 'string', description: 'Market symbol to look up, e.g. BTC. Omit to get the current top markets by volume.' },
+        },
         required: [],
       },
     },
@@ -423,6 +420,22 @@ export async function POST(request: Request) {
 
         if (functionName === 'propose_action') {
           const input = functionArgs as ProposeActionInput
+
+          // Hard backstop, not just a prompt instruction — get_perps_info now returns
+          // real market data (mark price, funding, OI), but there is no real order-
+          // placement flow wired up yet (Lighter uses off-chain order matching with its
+          // own sub-account/API-key signing scheme, not a plain on-chain tx). Without
+          // this, the model could build a preview card from real numbers that
+          // handleLoose's still-fully-mocked fallback would then fake-execute with a
+          // checkmark — real data plus a fake execution path is worse than the old fake
+          // stub data it replaced.
+          if (input.agent === 'perps') {
+            result = {
+              error: 'Perps positions are not executable through Nock yet — do not propose an action for this. Present the real market data from get_perps_info directly and tell the user opening a position is informational-only for now.',
+            }
+            openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
+            continue
+          }
 
           // A swap preview is only real if it's backed by a transaction from a quote
           // fetched in THIS turn — otherwise the model can (and did, in testing) build a
@@ -669,6 +682,15 @@ export async function POST(request: Request) {
               console.error('[robin] get_yield_deposit_quote error:', err)
               result = { error: 'Could not read live deposit availability from the chain. Try again in a moment.' }
             }
+          }
+
+        } else if (functionName === 'get_perps_info') {
+          const { symbol } = functionArgs as { symbol?: string }
+          try {
+            result = await getPerpsMarkets(symbol)
+          } catch (err) {
+            console.error('[robin] get_perps_info error:', err)
+            result = { error: 'Could not reach the Lighter market data API. Try again in a moment.' }
           }
 
         } else {
