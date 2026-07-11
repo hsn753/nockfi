@@ -318,8 +318,14 @@ export function NockApp() {
         setIsRobinLoading(false)
       }
     },
+    // walletAddress must be a real dependency here, not swallowed by the broader
+    // suppression below — confirmed live this was the actual root cause of "sidebar
+    // clearly shows a connected wallet, but Robin says none is connected": this
+    // callback's closure only got recreated when messages/privyReady changed, so it
+    // could keep using a stale (undefined) walletAddress captured before the wallet
+    // connected, until some unrelated state change happened to force a new closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages, privyReady],
+    [messages, privyReady, walletAddress],
   )
 
   const handleDraw = useCallback((actionId: string) => {
