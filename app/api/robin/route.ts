@@ -28,6 +28,13 @@ const NON_TOKEN_WORDS = new Set([
   'proceed', 'go', 'ahead', 'now', 'right', 'again', 'also', 'too', 'usd', 'dollars', 'dollar',
   'all', 'entire', 'balance', 'amount', 'worth', 'much', 'how', 'what', 'when', 'first', 'then',
   'next', 'thanks', 'thank', 'hi', 'hey', 'hello', 'about', 'if', 'not', 'no',
+  'wait', 'actually', 'just', 'still', 'yeah', 'yep', 'nope', 'cool', 'great', 'nice', 'good',
+  'fine', 'alright', 'so', 'but', 'as', 'be', 'was', 'were', 'been', 'being', 'have', 'has',
+  'had', 'may', 'might', 'must', 'them', 'they', 'he', 'she', 'him', 'her', 'one', 'two',
+  'instead', 'same', 'other', 'other', 'change', 'update', 'redo', 'retry', 'try', 'checking',
+  'check', 'looks', 'look', 'looking', 'sounds', 'sound', 'perfect', 'awesome', 'cancel',
+  'stop', 'wrong', 'correct', 'incorrect', 'mistake', 'oops', 'sorry', 'hold', 'on', 'off',
+  'up', 'down', 'here', 'there', 'why', 'because', 'yet', 'already', 'really', 'sure',
 ])
 
 // Extracts words from the user's message that plausibly reference a token symbol (not
