@@ -46,7 +46,7 @@ export async function POST() {
         ],
       },
       {
-        name: 'Allow zero-value approve() calls to known swap tokens',
+        name: 'Allow zero-value approve() to swap tokens',
         method: 'eth_sendTransaction',
         action: 'ALLOW',
         conditions: [
