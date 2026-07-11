@@ -1,11 +1,12 @@
-import { type Hash, type WalletClient, type PublicClient } from 'viem'
+import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits, encodeFunctionData } from 'viem'
+import { NATIVE_ETH_ADDRESS } from './get-swap-quote'
 
 export type ExecuteSwapParams = {
   walletClient: WalletClient
   publicClient: PublicClient
-  fromToken: string
-  toToken: string
   amount: string
+  sellTokenAddress: string
+  sellTokenDecimals: number
   transaction: {
     to: string
     data: string
@@ -18,6 +19,9 @@ export type ExecuteSwapParams = {
 export async function executeSwap({
   walletClient,
   publicClient,
+  amount,
+  sellTokenAddress,
+  sellTokenDecimals,
   transaction,
 }: ExecuteSwapParams): Promise<{ txHash: Hash; error?: string }> {
   try {
@@ -25,6 +29,42 @@ export async function executeSwap({
 
     if (!account) {
       return { txHash: '0x' as Hash, error: 'No wallet connected' }
+    }
+
+    // Selling an ERC-20 through the 0x AllowanceHolder router requires the router to
+    // already be approved to pull the sell token — unlike native ETH, which is wrapped
+    // inline and needs no approval. Without this, the swap transaction reverts on-chain,
+    // or a wallet's own pre-flight simulation refuses to let the user sign it at all
+    // (confirmed in production: a NOCK sale with plenty of ETH for gas showed a disabled
+    // "Deposit ETH" button, because the wallet couldn't simulate a transferFrom with zero
+    // allowance). Only approve the exact amount being sold, not unlimited, matching the
+    // least-privilege approach used everywhere else in this app.
+    if (sellTokenAddress.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase()) {
+      const sellAmountWei = parseUnits(amount.replace(/,/g, ''), sellTokenDecimals)
+      const currentAllowance = await publicClient.readContract({
+        address: sellTokenAddress as `0x${string}`,
+        abi: erc20Abi,
+        functionName: 'allowance',
+        args: [account, transaction.to as `0x${string}`],
+      })
+
+      if (currentAllowance < sellAmountWei) {
+        const approveData = encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [transaction.to as `0x${string}`, sellAmountWei],
+        })
+        const approveHash = await walletClient.sendTransaction({
+          account,
+          chain: walletClient.chain,
+          to: sellTokenAddress as `0x${string}`,
+          data: approveData,
+        })
+        const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
+        if (approveReceipt.status !== 'success') {
+          return { txHash: approveHash, error: 'Approval transaction failed on-chain — the swap was not attempted.' }
+        }
+      }
     }
 
     const txHash = await walletClient.sendTransaction({

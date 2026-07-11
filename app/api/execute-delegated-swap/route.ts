@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { isAddress } from 'viem'
+import { isAddress, parseUnits } from 'viem'
 import { executeDelegatedTransaction } from '@/lib/privy-server'
 
 export const dynamic = 'force-dynamic'
@@ -10,10 +10,11 @@ export const dynamic = 'force-dynamic'
 // is what actually constrains what this can do, same as any other signer.
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null)
-  const { walletId, address, transaction } = (body ?? {}) as {
+  const { walletId, address, transaction, sellToken } = (body ?? {}) as {
     walletId?: string
     address?: string
     transaction?: { to: string; data: string; value: string; gas: string }
+    sellToken?: { address: string; decimals: number; amount: string }
   }
 
   if (!walletId || !address || !isAddress(address) || !transaction) {
@@ -22,14 +23,28 @@ export async function POST(req: NextRequest) {
   if (!isAddress(transaction.to)) {
     return NextResponse.json({ error: 'Invalid transaction.to address' }, { status: 400 })
   }
+  if (sellToken && !isAddress(sellToken.address)) {
+    return NextResponse.json({ error: 'Invalid sellToken.address' }, { status: 400 })
+  }
 
   try {
-    const result = await executeDelegatedTransaction(walletId, address as `0x${string}`, {
-      to: transaction.to as `0x${string}`,
-      data: transaction.data as `0x${string}`,
-      value: BigInt(transaction.value || '0'),
-      gas: BigInt(transaction.gas || '300000'),
-    })
+    const result = await executeDelegatedTransaction(
+      walletId,
+      address as `0x${string}`,
+      {
+        to: transaction.to as `0x${string}`,
+        data: transaction.data as `0x${string}`,
+        value: BigInt(transaction.value || '0'),
+        gas: BigInt(transaction.gas || '300000'),
+      },
+      sellToken
+        ? {
+            address: sellToken.address as `0x${string}`,
+            decimals: sellToken.decimals,
+            amountWei: parseUnits(sellToken.amount.replace(/,/g, ''), sellToken.decimals),
+          }
+        : undefined,
+    )
 
     if (result.error) {
       return NextResponse.json({ error: result.error, txHash: result.txHash }, { status: 422 })

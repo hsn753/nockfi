@@ -1,7 +1,8 @@
 import { PrivyClient } from '@privy-io/node'
 import { createViemAccount } from '@privy-io/node/viem'
-import { createWalletClient, http, type Hash } from 'viem'
+import { createWalletClient, createPublicClient, http, erc20Abi, encodeFunctionData, type Hash } from 'viem'
 import { nockChain } from './chain'
+import { NATIVE_ETH_ADDRESS } from './get-swap-quote'
 
 let client: PrivyClient | null = null
 
@@ -30,6 +31,12 @@ export type DelegatedTxParams = {
   gas: bigint
 }
 
+export type DelegatedSellToken = {
+  address: `0x${string}`
+  decimals: number
+  amountWei: bigint
+}
+
 // Executes a transaction on a wallet the user has delegated to this app via Privy
 // session signers — no wallet popup, no mobile approval round trip. Requires
 // "Server-side access" to be enabled for this app in the Privy dashboard, and the
@@ -39,6 +46,7 @@ export async function executeDelegatedTransaction(
   walletId: string,
   address: `0x${string}`,
   transaction: DelegatedTxParams,
+  sellToken?: DelegatedSellToken,
 ): Promise<{ txHash: Hash; error?: string }> {
   const privy = getPrivyClient()
   const account = createViemAccount(privy, {
@@ -52,8 +60,45 @@ export async function executeDelegatedTransaction(
     chain: nockChain,
     transport: http(process.env.RPC_URL),
   })
+  const publicClient = createPublicClient({
+    chain: nockChain,
+    transport: http(process.env.RPC_URL),
+  })
 
   try {
+    // Same requirement as the external-wallet path (lib/execute-swap.ts): selling an
+    // ERC-20 through the 0x AllowanceHolder router needs an approval first. The session
+    // signer's policy already scopes which tokens this is allowed to approve — Privy
+    // rejects the call server-side if the token isn't covered, which is the intended
+    // backstop for a signer that acts without per-transaction human review.
+    if (sellToken && sellToken.address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase()) {
+      const currentAllowance = await publicClient.readContract({
+        address: sellToken.address,
+        abi: erc20Abi,
+        functionName: 'allowance',
+        args: [address, transaction.to],
+      })
+
+      if (currentAllowance < sellToken.amountWei) {
+        const approveData = encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [transaction.to, sellToken.amountWei],
+        })
+        const approveHash = await walletClient.sendTransaction({
+          account,
+          chain: nockChain,
+          to: sellToken.address,
+          data: approveData,
+          value: BigInt(0),
+        })
+        const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
+        if (approveReceipt.status !== 'success') {
+          return { txHash: approveHash, error: 'Approval transaction failed on-chain — the swap was not attempted.' }
+        }
+      }
+    }
+
     const txHash = await walletClient.sendTransaction({
       account,
       chain: nockChain,
@@ -63,10 +108,6 @@ export async function executeDelegatedTransaction(
       gas: transaction.gas,
     })
 
-    const publicClient = (await import('viem')).createPublicClient({
-      chain: nockChain,
-      transport: http(process.env.RPC_URL),
-    })
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
     if (receipt.status !== 'success') {
       return {

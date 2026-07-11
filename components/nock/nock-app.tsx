@@ -11,7 +11,7 @@ import {
   type ConversationSummary,
 } from '@/lib/chat-storage'
 import { executeSwap } from '@/lib/execute-swap'
-import { SWAP_TOKENS } from '@/lib/get-swap-quote'
+import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import {
   getAgent,
@@ -306,19 +306,28 @@ export function NockApp() {
         // The transaction data is stored in the action from the swap quote
         const txData = (action as any).transactionData
         const fromToken = ((action as any).fromToken || 'USDG') as string
-        const fromAmount = (action as any).amount || '0'
+        // fromAmount is a display-formatted string with thousands separators
+        // (toLocaleString), which parseUnits cannot parse — strip them before any
+        // numeric use. Confirmed this broke silently for any sell amount >= 1000.
+        const fromAmount = ((action as any).amount || '0').replace(/,/g, '')
+        const sellTokenAddress = (action as any).sellTokenAddress as string | undefined
+        const sellTokenDecimals = (action as any).sellTokenDecimals as number | undefined
 
         if (!txData) {
           throw new Error('No transaction data in action')
         }
+        if (!sellTokenAddress || sellTokenDecimals === undefined) {
+          throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
+        }
 
-        // Pre-flight balance check — without this, a wallet that can't cover the
-        // transaction tends to hang and time out instead of failing cleanly, which
-        // reads as a broken app rather than "you don't have enough funds."
+        // Pre-flight balance check — works for ANY sell token (verified or not) since it
+        // uses the address/decimals the quote actually resolved, not a symbol lookup that
+        // only covered the verified list (which silently skipped this whole check for any
+        // memecoin/unverified token). Without this, a wallet that can't cover the
+        // transaction tends to hang and time out instead of failing cleanly.
         if (publicClient && walletAddress) {
-          const tokenInfo = SWAP_TOKENS[fromToken.toUpperCase()]
-          const isNativeEth = fromToken.toUpperCase() === 'ETH'
-          const requiredAmount = tokenInfo ? parseUnits(fromAmount, tokenInfo.decimals) : BigInt(0)
+          const isNativeEth = sellTokenAddress.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()
+          const requiredAmount = parseUnits(fromAmount, sellTokenDecimals)
           const ethBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` })
           const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
 
@@ -329,16 +338,16 @@ export function NockApp() {
                 `Not enough ETH. You need about ${formatUnits(totalNeeded, 18)} ETH (swap amount + gas) but this wallet has ${formatUnits(ethBalance, 18)} ETH on Robinhood Chain. Bridge more ETH in first.`,
               )
             }
-          } else if (tokenInfo) {
+          } else {
             const tokenBalance = await publicClient.readContract({
-              address: tokenInfo.address as `0x${string}`,
+              address: sellTokenAddress as `0x${string}`,
               abi: erc20Abi,
               functionName: 'balanceOf',
               args: [walletAddress as `0x${string}`],
             })
             if (tokenBalance < requiredAmount) {
               throw new Error(
-                `Not enough ${fromToken}. You need ${fromAmount} ${fromToken} but this wallet has ${formatUnits(tokenBalance, tokenInfo.decimals)} ${fromToken} on Robinhood Chain.`,
+                `Not enough ${fromToken}. You need ${fromAmount} ${fromToken} but this wallet has ${formatUnits(tokenBalance, sellTokenDecimals)} ${fromToken} on Robinhood Chain.`,
               )
             }
             if (ethBalance < gasCost) {
@@ -359,7 +368,12 @@ export function NockApp() {
               const res = await fetch('/api/execute-delegated-swap', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ walletId: (delegatedWallet as any).id, address: delegatedWallet.address, transaction: txData }),
+                body: JSON.stringify({
+                  walletId: (delegatedWallet as any).id,
+                  address: delegatedWallet.address,
+                  transaction: txData,
+                  sellToken: { address: sellTokenAddress, decimals: sellTokenDecimals, amount: fromAmount },
+                }),
               })
               const data = await res.json()
               return { txHash: data.txHash as `0x${string}` | undefined, error: data.error as string | undefined }
@@ -367,9 +381,9 @@ export function NockApp() {
           : await executeSwap({
               walletClient: walletClient!,
               publicClient,
-              fromToken: (action as any).fromToken || 'USDG',
-              toToken: (action as any).toToken || 'TSLA',
-              amount: (action as any).amount || '0',
+              amount: fromAmount,
+              sellTokenAddress,
+              sellTokenDecimals,
               transaction: txData,
             })
 
