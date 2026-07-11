@@ -489,30 +489,39 @@ export function NockApp() {
 
         // Phase 1 of the transaction audit trail — log this attempt regardless of
         // outcome, before verify-tx (below) fills in the real, independently-checked
-        // result. Fire-and-forget: logging must never block or break the actual swap
-        // flow the user is waiting on.
-        fetch('/api/transactions/log-submission', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
-          body: JSON.stringify({
-            txHash: result.txHash,
-            walletAddress,
-            signerAddress,
-            signerType: isUsingDelegatedWallet ? 'delegated' : 'external',
-            privyWalletId: isUsingDelegatedWallet ? (delegatedWallet as any)?.id : undefined,
-            agent: action.agent,
-            actionId: action.id,
-            fromTokenSymbol: fromToken,
-            fromTokenAddress: sellTokenAddress,
-            fromAmount,
-            toTokenSymbol: (action as any).toToken,
-            quoteJson: action,
-            broadcastStatus: !result.txHash || result.txHash === '0x'
-              ? 'no_hash_returned'
-              : result.error ? 'client_error' : 'submitted',
-            errorMessage: result.error,
-          }),
-        }).catch((err) => console.error('[Nock] Could not log transaction submission:', err))
+        // result. Awaited (not fire-and-forget) deliberately: confirmed live this was a
+        // genuine race when unawaited — verify-tx's UPDATE could reach the database and
+        // find no matching row yet (log-submission's INSERT hadn't landed), silently
+        // updating zero rows and leaving verify_status permanently null even though the
+        // check itself succeeded. Doesn't add real wait time from the user's perspective
+        // either way, since verify-tx below is already awaited before any success/failure
+        // message shows.
+        try {
+          await fetch('/api/transactions/log-submission', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+            body: JSON.stringify({
+              txHash: result.txHash,
+              walletAddress,
+              signerAddress,
+              signerType: isUsingDelegatedWallet ? 'delegated' : 'external',
+              privyWalletId: isUsingDelegatedWallet ? (delegatedWallet as any)?.id : undefined,
+              agent: action.agent,
+              actionId: action.id,
+              fromTokenSymbol: fromToken,
+              fromTokenAddress: sellTokenAddress,
+              fromAmount,
+              toTokenSymbol: (action as any).toToken,
+              quoteJson: action,
+              broadcastStatus: !result.txHash || result.txHash === '0x'
+                ? 'no_hash_returned'
+                : result.error ? 'client_error' : 'submitted',
+              errorMessage: result.error,
+            }),
+          })
+        } catch (err) {
+          console.error('[Nock] Could not log transaction submission:', err)
+        }
 
         // Independent server-side confirmation is the ONLY thing allowed to decide
         // success/revert/didn't-happen — never result.error or result.txHash's own
