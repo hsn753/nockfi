@@ -187,6 +187,42 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_yield_options',
+      description: 'Returns available lending/yield options for stablecoins (protocol, asset, APY, TVL, risk, lockup). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually deposit right now. Call this whenever the user asks what yield options exist, without necessarily proposing an action unless they ask you to.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_perps_info',
+      description: 'Returns available perpetual futures markets (asset, mark price, funding rate, open interest, max leverage). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually open a position right now. Call this whenever the user asks what perps markets exist, without necessarily proposing an action unless they ask you to.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_vault_limits',
+      description: 'Returns available multi-strategy vaults (name, target APY, risk, TVL, min deposit). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually deposit right now. Call this whenever the user asks what vaults exist, without necessarily proposing an action unless they ask you to.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_trending_tokens',
       description: "Looks up memecoins/community tokens on Robinhood Chain that are NOT in the verified token list, using live DEX data. Completely unverified — anyone can deploy a token, and real impersonator tokens already exist (multiple different contracts named 'ROBINHOOD' or 'HOOD'). Pass a symbol to search for a specific one (returns every distinct address matching that symbol, which may be more than one), or omit it to get the current top tokens by trading volume. Always call this before quoting a swap for any token not in the verified list — never guess a memecoin's address.",
       parameters: {
