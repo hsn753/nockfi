@@ -450,19 +450,18 @@ export function NockApp() {
               })
             })()
 
-        if (result.error) {
-          const hashSuffix = result.txHash && result.txHash !== '0x' ? ` (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)})` : ''
-          throw new Error(`${result.error}${hashSuffix}`)
-        }
-
-        // Independent server-side confirmation before ever telling the user their swap
-        // executed. Confirmed in production: a delegated-wallet swap reported success
-        // with a txHash locally, but neither the wallet's nonce nor any independent RPC/
-        // explorer check showed that transaction ever existing on Robinhood Chain. The
-        // browser-side wallet client's own receipt wait cannot be the only thing standing
-        // between "nothing happened" and telling someone their trade went through.
+        // Independent server-side confirmation is the ONLY thing allowed to decide
+        // success/revert/didn't-happen — never result.error or result.txHash's own
+        // internal receipt check alone. Confirmed live, twice: a wallet client's own
+        // receipt wait produced a false "reverted on-chain" conclusion (with a real-
+        // looking hash) for a transaction that our own trusted RPC_URL-backed check, and
+        // an independent public RPC, both say never existed at all — not reverted, not
+        // found, period. Trusting result.error's own conclusion before this check (the
+        // original bug here) meant a claimed revert could short-circuit past verification
+        // entirely. If there's no hash at all, sendTransaction itself never got that far —
+        // that's a real, different failure with nothing on-chain to check.
         if (!result.txHash || result.txHash === '0x') {
-          throw new Error('No transaction hash was returned — the swap may not have been broadcast. Check your holdings before retrying.')
+          throw new Error(result.error || 'No transaction hash was returned — the swap may not have been broadcast. Check your holdings before retrying.')
         }
         const verifyRes = await fetch('/api/verify-tx', {
           method: 'POST',
@@ -471,7 +470,7 @@ export function NockApp() {
         })
         const verifyData = await verifyRes.json()
         if (!verifyData.found) {
-          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may not have actually broadcast — check your holdings before retrying rather than assuming it went through.`)
+          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may never have actually broadcast, regardless of what the wallet reported — check your real holdings before assuming anything happened, rather than trusting a success or failure message alone.`)
         }
         if (verifyData.status !== 'success') {
           throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}) — nothing was swapped, only gas was spent.`)
