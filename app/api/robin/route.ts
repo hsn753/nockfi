@@ -336,6 +336,8 @@ export async function POST(request: Request) {
       walletAddress?: string
     }
 
+    console.log('[robin] Wallet address received:', walletAddress, 'has identity token:', !!request.headers.get('x-privy-identity-token'))
+
     // Confirmed real gap before this check existed: walletAddress was accepted as a
     // plain, unverified client-supplied value — anyone could ask for holdings/quotes
     // under any address. Only enforced when a walletAddress is actually claimed; a
@@ -345,6 +347,7 @@ export async function POST(request: Request) {
         await requireAuthenticatedWallet(request, walletAddress)
       } catch (err) {
         if (err instanceof AuthError) {
+          console.error('[robin] Auth check failed:', err.message)
           return NextResponse.json({ text: err.message }, { status: err.status })
         }
         throw err
@@ -360,8 +363,6 @@ export async function POST(request: Request) {
     // delegated execution when the connected wallet IS the delegated one (see
     // isUsingDelegatedWallet in nock-app.tsx), so the taker here must match that exactly.
     const swapTaker = walletAddress
-
-    console.log('[robin] Wallet address received:', walletAddress)
 
     const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: buildSystemPrompt(walletAddress) },
