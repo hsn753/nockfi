@@ -6,6 +6,7 @@ import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
+import { getYieldOptions } from '@/lib/get-yield-data'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -96,8 +97,10 @@ When the user wants to swap, trade, buy, or sell any token:
 When the user asks a general, browsing-style question about what's available — "what vaults are there," "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options, get_perps_info, or check_vault_limits) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
 
-When the user asks you to actually do something with their money or assets (lend, deposit, open a position):
-1. Call the relevant tool to get current data. Choose from get_yield_options, get_perps_info, or check_vault_limits.
+When the user asks to actually deposit into the yield vault: call get_yield_options to show them the real current data, then tell them plainly that depositing isn't built into this app yet — this is real, live vault data for informational purposes only right now. Never call propose_action for the yield agent under any circumstances yet, even if they explicitly ask to deposit — there is no real deposit transaction behind it, and building a preview card with real TVL/APY numbers but no real transaction would be worse than not showing one at all.
+
+When the user asks you to actually do something with their money or assets for perps or vaults (open a position, deposit):
+1. Call the relevant tool to get current data. Choose from get_perps_info or check_vault_limits.
 2. Based on the data returned, call propose_action with a fully structured preview of the action you recommend.
 3. After propose_action returns, write one or two sentences in plain language explaining what you found and what you are proposing. Invite the user to use the Draw button to review it.
 
@@ -119,14 +122,6 @@ Rules:
 
 function callStubTool(name: string, _input: unknown): unknown {
   switch (name) {
-    case 'get_yield_options':
-      return {
-        options: [
-          { protocol: 'Marlin', asset: 'USDC', apy: 7.02, tvl: '$42M', risk: 'Low', lockup: 'None' },
-          { protocol: 'Fluid', asset: 'USDC', apy: 5.8, tvl: '$88M', risk: 'Low', lockup: 'None' },
-          { protocol: 'Morpho', asset: 'USDC', apy: 6.4, tvl: '$61M', risk: 'Low', lockup: 'None' },
-        ],
-      }
     case 'get_perps_info':
       return {
         markets: [
@@ -192,7 +187,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_yield_options',
-      description: 'Returns available lending/yield options for stablecoins (protocol, asset, APY, TVL, risk, lockup). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually deposit right now. Call this whenever the user asks what yield options exist, without necessarily proposing an action unless they ask you to.',
+      description: 'Returns real, live on-chain data for the Steakhouse USDG vault on Morpho (part of Robinhood Earn) — real name, TVL read directly from the vault contract, and a real APY derived from recorded share-price history (null if not enough history has been collected yet — never a guessed number). Depositing through this app is not built yet — say so plainly if the user asks to actually deposit. Call this whenever the user asks what yield options exist, without necessarily proposing an action.',
       parameters: {
         type: 'object',
         properties: {},
@@ -409,6 +404,19 @@ export async function POST(request: Request) {
         if (functionName === 'propose_action') {
           const input = functionArgs as ProposeActionInput
 
+          // Hard backstop, not just a prompt instruction — this session found repeatedly
+          // that a prompt-only rule isn't reliable enough on its own for anything this
+          // consequential. Yield now returns real vault data (TVL, APY), but there is no
+          // real deposit transaction wired up yet — a preview card built from real numbers
+          // with nothing real behind it would be worse than the old fully-fake stub data.
+          if (input.agent === 'yield') {
+            result = {
+              error: 'Yield deposits are not built into this app yet — do not propose an action for this. Present the real vault data from get_yield_options directly and tell the user depositing is informational-only for now.',
+            }
+            openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
+            continue
+          }
+
           // A swap preview is only real if it's backed by a transaction from a quote
           // fetched in THIS turn — otherwise the model can (and did, in testing) build a
           // preview card from numbers it just remembered/recomputed from earlier chat
@@ -590,6 +598,18 @@ export async function POST(request: Request) {
             } catch {
               result = { error: 'Failed to reach the 0x swap API. Try again in a moment.', supportedTokens: supportedSymbols }
             }
+          }
+
+        } else if (functionName === 'get_yield_options') {
+          try {
+            const vaults = await getYieldOptions()
+            result = {
+              vaults,
+              note: 'Real on-chain vault data (TVL from live totalAssets(), APY derived from real recorded share-price history — null if not enough history has been collected yet, never a guessed number). Deposits are not yet supported through this app — do not propose_action for this agent yet, tell the user this is informational only for now.',
+            }
+          } catch (err) {
+            console.error('[robin] get_yield_options error:', err)
+            result = { error: 'Could not read live vault data from the chain. Try again in a moment.' }
           }
 
         } else {

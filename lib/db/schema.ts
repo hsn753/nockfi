@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, integer, jsonb, uuid, uniqueIndex, index } from 'drizzle-orm/pg-core'
+import { pgTable, text, timestamp, integer, jsonb, uuid, uniqueIndex, index, numeric } from 'drizzle-orm/pg-core'
 
 // Every table anchors on wallet_address (lowercased) — that's the identity every
 // existing code path (nock-app.tsx, app/api/robin/route.ts, app/api/activity/route.ts)
@@ -74,6 +74,23 @@ export const transactions = pgTable('transactions', {
 }, (t) => [
   index('transactions_wallet_created_idx').on(t.walletId, t.createdAt),
   uniqueIndex('transactions_tx_hash_idx').on(t.txHash),
+])
+
+// Recorded opportunistically every time get_yield_options is called (see
+// lib/db/vault-snapshots.ts) — no separate cron needed, real usage builds the history
+// this needs. totalAssets/totalSupply stored as numeric (not integer/text) since they're
+// raw on-chain uint256-scale values that need precise arithmetic for share-price growth
+// calculations, not just display. APY is deliberately never stored directly here — it's
+// always derived fresh from these snapshots, so there's one source of truth for how it's
+// computed rather than a cached number that can drift from the real history.
+export const vaultSnapshots = pgTable('vault_snapshots', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  vaultAddress: text('vault_address').notNull(),
+  totalAssets: numeric('total_assets').notNull(),
+  totalSupply: numeric('total_supply').notNull(),
+  recordedAt: timestamp('recorded_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('vault_snapshots_address_recorded_idx').on(t.vaultAddress, t.recordedAt),
 ])
 
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
