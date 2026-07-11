@@ -16,12 +16,10 @@ import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import {
   getAgent,
-  initialActivity,
   initialAttention,
   initialMessages,
   initialPositions,
   type ActionPreview,
-  type ActivityItem,
   type AgentId,
   type AttentionItem,
   type ChatMessage,
@@ -103,7 +101,6 @@ export function NockApp() {
   const [isRobinLoading, setIsRobinLoading] = useState(false)
   const [attention, setAttention] = useState<AttentionItem[]>([])
   const [positions, setPositions] = useState<Position[]>([])
-  const [activity, setActivity] = useState<ActivityItem[]>([])
   const [addedValue, setAddedValue] = useState(0)
   const [realPortfolioValue, setRealPortfolioValue] = useState(0)
   const [pendingBridge, setPendingBridge] = useState<PendingBridge | null>(null)
@@ -494,20 +491,9 @@ export function NockApp() {
             meta: action.outcome.meta,
             metaPositive: true,
           }
-          const newActivity: ActivityItem = {
-            id: `act-log-${actionId}`,
-            agent: action.agent,
-            title: action.outcome.activityTitle,
-            detail: action.detail,
-            time: 'Just now',
-            amount: action.outcome.activityAmount,
-          }
 
           setPositions((p) =>
             p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
-          )
-          setActivity((a) =>
-            a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
           )
           setAttention((att) => att.filter((x) => x.agent !== action.agent))
 
@@ -580,20 +566,9 @@ export function NockApp() {
             meta: action.outcome.meta,
             metaPositive: true,
           }
-          const newActivity: ActivityItem = {
-            id: `act-log-${actionId}`,
-            agent: action.agent,
-            title: action.outcome.activityTitle,
-            detail: action.detail,
-            time: 'Just now',
-            amount: action.outcome.activityAmount,
-          }
 
           setPositions((p) =>
             p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
-          )
-          setActivity((a) =>
-            a.some((x) => x.id === newActivity.id) ? a : [newActivity, ...a],
           )
           setAttention((att) => att.filter((x) => x.agent !== action.agent))
           setAddedValue(
@@ -643,7 +618,7 @@ export function NockApp() {
       )
     }
     if (activeView === 'activity') {
-      return <ActivityView activity={activity} />
+      return <ActivityView />
     }
     if (activeView === 'settings') {
       return <SettingsView />
@@ -667,7 +642,6 @@ export function NockApp() {
             onTabChange={setDashboardTab}
             attention={attention}
             positions={positions}
-            activity={activity}
             portfolioValue={portfolioValue}
           />
         </div>
@@ -685,7 +659,7 @@ export function NockApp() {
           />
         )
       case 'activity':
-        return <ActivityView activity={activity} />
+        return <ActivityView />
       case 'settings':
         return <SettingsView />
       case 'dashboard':
@@ -696,7 +670,6 @@ export function NockApp() {
             onTabChange={setDashboardTab}
             attention={attention}
             positions={positions}
-            activity={activity}
             portfolioValue={portfolioValue}
           />
         )

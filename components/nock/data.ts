@@ -127,15 +127,6 @@ export type AttentionItem = {
   meta: string
 }
 
-export type ActivityItem = {
-  id: string
-  agent: AgentId
-  title: string
-  detail: string
-  time: string
-  amount?: string
-}
-
 export const initialMessages: ChatMessage[] = []
 
 export const initialAttention: AttentionItem[] = [
@@ -169,23 +160,6 @@ export const initialPositions: Position[] = [
   },
 ]
 
-export const initialActivity: ActivityItem[] = [
-  {
-    id: 'ac-1',
-    agent: 'swap',
-    title: 'Swapped USDG for ETH',
-    detail: 'Best route across 3 pools · 0.04% price impact',
-    time: '2h ago',
-    amount: '3,000 USDG',
-  },
-  {
-    id: 'ac-2',
-    agent: 'vault',
-    title: 'Balanced vault rebalanced',
-    detail: 'Shifted 4% from ETH into stablecoin sleeve',
-    time: 'Yesterday',
-  },
-]
 
 export const user = {
   address: '0x815A...1cB5',

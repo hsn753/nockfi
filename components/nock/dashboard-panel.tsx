@@ -1,10 +1,11 @@
 'use client'
 
-import { ArrowUpRight, Bell, Sparkles } from 'lucide-react'
+import { Bell, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { type ActivityItem, type AttentionItem, type Position } from './data'
+import { type AttentionItem, type Position } from './data'
 import { AgentIcon } from './agent-icon'
 import { LiveBalances } from './live-balances'
+import { LiveActivity } from './live-activity'
 
 type DashTab = 'overview' | 'balances' | 'activity'
 
@@ -13,7 +14,6 @@ type Props = {
   onTabChange: (t: DashTab) => void
   attention: AttentionItem[]
   positions: Position[]
-  activity: ActivityItem[]
   portfolioValue: string
 }
 
@@ -28,7 +28,6 @@ export function DashboardPanel({
   onTabChange,
   attention,
   positions,
-  activity,
   portfolioValue,
 }: Props) {
   return (
@@ -141,46 +140,8 @@ export function DashboardPanel({
 
         {tab === 'balances' && <LiveBalances />}
 
-        {tab === 'activity' && (
-          <div className="p-4">
-            <ActivityList activity={activity} />
-          </div>
-        )}
+        {tab === 'activity' && <LiveActivity />}
       </div>
     </div>
-  )
-}
-
-export function ActivityList({ activity }: { activity: ActivityItem[] }) {
-  return (
-    <ul className="flex flex-col">
-      {activity.map((a, i) => (
-        <li
-          key={a.id}
-          className={cn(
-            'flex items-start gap-3 py-4',
-            i !== activity.length - 1 && 'border-b border-border/60',
-          )}
-        >
-          <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
-            <AgentIcon agent={a.agent} className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-start justify-between gap-3">
-              <p className="text-sm font-medium text-foreground">{a.title}</p>
-              {a.amount && (
-                <span className="shrink-0 text-sm font-semibold tabular-nums text-foreground">
-                  {a.amount}
-                </span>
-              )}
-            </div>
-            <div className="mt-0.5 flex items-center justify-between gap-2">
-              <p className="truncate text-xs text-muted-foreground">{a.detail}</p>
-              <span className="shrink-0 text-xs text-muted-foreground">{a.time}</span>
-            </div>
-          </div>
-        </li>
-      ))}
-    </ul>
   )
 }
