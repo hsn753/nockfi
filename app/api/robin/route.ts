@@ -17,6 +17,26 @@ function getOpenAI(): OpenAI {
 
 const SUPPORTED_TOKENS_LIST = Object.keys(SWAP_TOKENS).join(', ')
 
+// Common words that show up in swap requests but are never token symbols, so they don't
+// trip the mismatched-token guard below.
+const NON_TOKEN_WORDS = new Set([
+  'a', 'an', 'the', 'to', 'for', 'of', 'in', 'on', 'at', 'by', 'with', 'from', 'into', 'and',
+  'or', 'is', 'are', 'can', 'could', 'would', 'should', 'will', 'shall', 'do', 'does', 'did',
+  'let', 'lets', 'please', 'you', 'your', 'my', 'me', 'i', 'we', 'us', 'it', 'its', 'this',
+  'that', 'these', 'those', 'some', 'any', 'swap', 'trade', 'exchange', 'buy', 'sell', 'send',
+  'get', 'want', 'like', 'need', 'robinhood', 'chain', 'yes', 'ok', 'okay', 'sure', 'confirm',
+  'proceed', 'go', 'ahead', 'now', 'right', 'again', 'also', 'too', 'usd', 'dollars', 'dollar',
+  'all', 'entire', 'balance', 'amount', 'worth', 'much', 'how', 'what', 'when', 'first', 'then',
+  'next', 'thanks', 'thank', 'hi', 'hey', 'hello', 'about', 'if', 'not', 'no',
+])
+
+// Extracts words from the user's message that plausibly reference a token symbol (not
+// common English words), for cross-checking against what a swap quote actually resolved to.
+function extractCandidateTokenWords(text: string): string[] {
+  const words = (text.match(/\b[A-Za-z]{2,10}\b/g) || []).map((w) => w.toUpperCase())
+  return [...new Set(words)].filter((w) => !NON_TOKEN_WORDS.has(w.toLowerCase()))
+}
+
 function buildSystemPrompt(walletAddress?: string): string {
   const walletLine = walletAddress
     ? `The user's connected wallet address on Robinhood Chain is ${walletAddress}.`
@@ -305,9 +325,34 @@ export async function POST(request: Request) {
           // fetched in THIS turn — otherwise the model can (and did, in testing) build a
           // preview card from numbers it just remembered/recomputed from earlier chat
           // history, which looks identical but has no transaction to actually execute.
+          const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')
+
+          // Confirmed in production: the model can silently substitute a different token
+          // than what the user asked for (user said "swap to NOCK", model quietly built a
+          // preview for USDG instead, since it had suggested USDG as a fallback earlier in
+          // the conversation) — with no error, no confirmation, nothing to catch in a
+          // prompt-only fix. This is a hard backstop: if the user's own latest message
+          // contains a word that looks like a token symbol but doesn't match either side of
+          // the quote actually being proposed, refuse and force the model to check with the
+          // user instead of guessing. A false positive here just costs an extra clarifying
+          // question — an acceptable price for never silently executing the wrong trade.
+          let mismatchedTokenWord: string | undefined
+          if (input.agent === 'swap' && lastSwapQuote?.transaction && lastUserMessage) {
+            const quoteSymbols = new Set(
+              [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol]
+                .filter((s): s is string => typeof s === 'string')
+                .map((s) => s.toUpperCase()),
+            )
+            mismatchedTokenWord = extractCandidateTokenWords(lastUserMessage.text).find((w) => !quoteSymbols.has(w))
+          }
+
           if (input.agent === 'swap' && !lastSwapQuote?.transaction) {
             result = {
               error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
+            }
+          } else if (mismatchedTokenWord) {
+            result = {
+              error: `The user's message mentions "${mismatchedTokenWord}", which doesn't match either side of this quote (${lastSwapQuote.fromSymbol} -> ${lastSwapQuote.toSymbol}). Do not propose this swap. Either "${mismatchedTokenWord}" is a token that needs to be looked up (call get_trending_tokens for it) and confirmed with the user first, or you misread which token the user meant — ask them to clarify exactly which token before calling get_swap_quote or propose_action again. Never substitute a different token than what the user actually named without their explicit confirmation.`,
             }
           } else {
             action = {
