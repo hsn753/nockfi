@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'Nock — your AI agent concierge',
   description:
-    'Nock is an AI agent concierge for crypto. Chat with Robin to put your assets to work across yield, perps, swaps, stock tokens, and vaults.',
+    'Nock is an AI agent concierge for crypto. Chat with Robin to put your assets to work across yield, perps, swaps, and vaults.',
   generator: 'v0.app',
 }
 

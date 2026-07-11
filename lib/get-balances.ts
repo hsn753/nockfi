@@ -12,15 +12,6 @@ export type BalanceEntry = {
 
 const TOKEN_NAMES: Record<string, string> = {
   WETH: 'Wrapped Ether', USDG: 'USDG',
-  TSLA: 'Tesla stock token', AMD: 'AMD stock token', AMZN: 'Amazon stock token',
-  AAPL: 'Apple stock token', PLTR: 'Palantir stock token', BABA: 'Alibaba stock token',
-  BE: 'Bloom Energy stock token', COIN: 'Coinbase stock token', CRCL: 'Circle stock token',
-  CRWV: 'CoreWeave stock token', GOOGL: 'Alphabet stock token', INTC: 'Intel stock token',
-  META: 'Meta stock token', MSFT: 'Microsoft stock token', MU: 'Micron stock token',
-  NVDA: 'Nvidia stock token', ORCL: 'Oracle stock token', SNDK: 'SanDisk stock token',
-  SPCX: 'SpaceX stock token', USAR: 'USA Rare Earth stock token', QQQ: 'Nasdaq-100 ETF token',
-  SGOV: 'Short Treasury ETF token', SLV: 'Silver ETF token', SPY: 'S&P 500 ETF token',
-  CUSO: 'CUSO ETF token',
 }
 
 // Same verified mainnet token set the swap agent uses (see get-swap-quote.ts), minus native ETH

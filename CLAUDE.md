@@ -51,7 +51,7 @@ This function is the simulated AI. It pattern-matches on keywords in the user's 
 
 | Type | Purpose |
 |---|---|
-| `AgentId` | Union of `'yield' \| 'perps' \| 'swap' \| 'stock' \| 'vault'` |
+| `AgentId` | Union of `'yield' \| 'perps' \| 'swap' \| 'vault'` |
 | `ActionPreview` | Proposed action card with status state machine |
 | `ChatMessage` | Discriminated union on `role: 'user' \| 'robin'` |
 | `Position` / `AttentionItem` / `ActivityItem` | Dashboard data shapes |
