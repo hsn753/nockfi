@@ -99,7 +99,12 @@ export async function getTrendingTokens(limit = 10): Promise<TrendingToken[]> {
 // volume. Returns every distinct address found — including likely impersonators — so
 // the caller can present the ambiguity rather than silently guessing.
 export async function findTokensBySymbol(symbol: string): Promise<TrendingToken[]> {
-  const pairs = await searchDexScreener(`${symbol} robinhood`)
+  // Deliberately just the symbol, not "SYMBOL robinhood" — confirmed live that appending
+  // "robinhood" makes DexScreener's fuzzy search return dozens of unrelated results and
+  // bury the actual exact match (a real NOCK token search returned 24 irrelevant pairs
+  // with the suffix, and exactly the 1 real match without it). Already filtered to
+  // chainId === 'robinhood' in searchDexScreener regardless.
+  const pairs = await searchDexScreener(symbol)
   return dedupeByAddress(
     pairs
       .filter((p) => p.baseToken.symbol.toLowerCase() === symbol.toLowerCase())
