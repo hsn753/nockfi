@@ -484,7 +484,22 @@ export async function POST(request: Request) {
 
         } else if (functionName === 'get_swap_quote') {
           const { fromToken, toToken, amount } = functionArgs
-          if (!fromToken || !toToken || !amount) {
+
+          // Confirmed in production: despite the prompt explicitly saying to ask for an
+          // amount before calling this tool, the model sometimes calls it anyway with a
+          // fabricated amount (e.g. defaulting to "100 USDG") when the user never gave
+          // one — occasionally producing a real 0x API error, and always a quote for a
+          // size the user never asked for. A prompt instruction alone wasn't reliable
+          // enough to prevent this. Hard backstop: if no user message anywhere in this
+          // conversation contains a digit, the model cannot possibly have a real amount
+          // to work with, so refuse and force it to actually ask.
+          const hasUserSpecifiedAmount = messages.some((m) => m.role === 'user' && /\d/.test(m.text))
+
+          if (!hasUserSpecifiedAmount) {
+            result = {
+              error: "The user has not specified a swap amount anywhere in this conversation. Do not guess or default to any amount (e.g. 100, 1, 0.01) — ask the user exactly how much they want to swap, then call this tool again once they answer with a specific number.",
+            }
+          } else if (!fromToken || !toToken || !amount) {
             result = { error: 'fromToken, toToken, and amount are all required.' }
           } else {
             const supportedSymbols = Object.keys(SWAP_TOKENS).join(', ')
