@@ -58,7 +58,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const res = await fetch(`${BLOCKSCOUT_BASE}/api/v2/addresses/${address}/transactions?filter=to%20%7C%20from`, {
+    const res = await fetch(`${BLOCKSCOUT_BASE}/api/v2/addresses/${address}/transactions`, {
       headers: { Accept: 'application/json' },
       next: { revalidate: 15 },
     })
