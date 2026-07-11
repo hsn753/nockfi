@@ -446,6 +446,28 @@ export function NockApp() {
           throw new Error(`${result.error}${hashSuffix}`)
         }
 
+        // Independent server-side confirmation before ever telling the user their swap
+        // executed. Confirmed in production: a delegated-wallet swap reported success
+        // with a txHash locally, but neither the wallet's nonce nor any independent RPC/
+        // explorer check showed that transaction ever existing on Robinhood Chain. The
+        // browser-side wallet client's own receipt wait cannot be the only thing standing
+        // between "nothing happened" and telling someone their trade went through.
+        if (!result.txHash || result.txHash === '0x') {
+          throw new Error('No transaction hash was returned — the swap may not have been broadcast. Check your holdings before retrying.')
+        }
+        const verifyRes = await fetch('/api/verify-tx', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ txHash: result.txHash }),
+        })
+        const verifyData = await verifyRes.json()
+        if (!verifyData.found) {
+          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may not have actually broadcast — check your holdings before retrying rather than assuming it went through.`)
+        }
+        if (verifyData.status !== 'success') {
+          throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}) — nothing was swapped, only gas was spent.`)
+        }
+
         console.log('Swap executed! TX Hash:', result.txHash)
 
         // Update UI with success

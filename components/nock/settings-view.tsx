@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { usePrivy, useWallets, useCreateWallet, useSigners } from '@privy-io/react-auth'
+import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet } from '@privy-io/react-auth'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { user } from './data'
@@ -168,6 +168,7 @@ function InstantSwapsSection() {
   const { user: privyUser } = usePrivy()
   const { createWallet } = useCreateWallet()
   const { addSigners, removeSigners } = useSigners()
+  const { exportWallet } = useExportWallet()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -211,44 +212,57 @@ function InstantSwapsSection() {
           Create instant-swap wallet
         </button>
       ) : (
-        <div className="mt-3 flex items-center justify-between gap-4 rounded-lg border border-border bg-background/40 px-3 py-2.5">
-          <div>
-            <p className="text-xs text-muted-foreground">Instant-swap wallet</p>
-            <p className="font-mono text-sm text-foreground">{embeddedWallet.address}</p>
-          </div>
-          {embeddedWallet.delegated ? (
-            <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className="size-1.5 rounded-full bg-primary" />
-                Enabled
-              </span>
+        <div className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs text-muted-foreground">Instant-swap wallet</p>
+              <p className="font-mono text-sm text-foreground">{embeddedWallet.address}</p>
+            </div>
+            {embeddedWallet.delegated ? (
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <span className="size-1.5 rounded-full bg-primary" />
+                  Enabled
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => run(() => removeSigners({ address: embeddedWallet.address }))}
+                  className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  Disable
+                </button>
+              </div>
+            ) : (
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => run(() => removeSigners({ address: embeddedWallet.address }))}
-                className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                onClick={() =>
+                  run(() =>
+                    addSigners({
+                      address: embeddedWallet.address,
+                      signers: [{ signerId: SESSION_SIGNER_ID, policyIds: [SESSION_POLICY_ID] }],
+                    }),
+                  )
+                }
+                className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
-                Disable
+                {busy && <Loader2 className="size-3 animate-spin" />}
+                Enable
               </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() =>
-                run(() =>
-                  addSigners({
-                    address: embeddedWallet.address,
-                    signers: [{ signerId: SESSION_SIGNER_ID, policyIds: [SESSION_POLICY_ID] }],
-                  }),
-                )
-              }
-              className="flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-            >
-              {busy && <Loader2 className="size-3 animate-spin" />}
-              Enable
-            </button>
-          )}
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => run(() => exportWallet({ address: embeddedWallet.address }))}
+            className="mt-2.5 flex w-full items-center justify-center rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          >
+            Export private key
+          </button>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            Opens a Privy-hosted screen to reveal this wallet's key so you can move funds
+            out yourself (e.g. import into MetaMask). Nock never sees or stores it.
+          </p>
         </div>
       )}
 
