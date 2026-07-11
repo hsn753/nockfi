@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
 import { isAddress } from 'viem'
-import { fetchWalletBalances } from '@/lib/get-balances'
+import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
-import { getTrendingTokens, findTokensBySymbol } from '@/lib/get-trending-tokens'
+import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -62,6 +62,7 @@ When the user asks what they hold, their portfolio, their balances, or anything 
 - Do not ask if they have a wallet connected - just call the tool, it will tell you if no wallet is connected.
 - Each holding includes a real usdValue (ETH from CoinGecko, stock tokens from live market price). usdValue is a number — including 0 for a zero balance, which just means $0, not "unavailable." It is only null if a price feed failed for that specific asset; only then say its dollar value isn't available right now. Present both the token amount and its $ value, and total everything with a usdValue into a portfolio $ figure.
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
+- get_wallet_holdings ONLY checks the verified token list (${SUPPORTED_TOKENS_LIST}). It cannot see memecoins or any other token, even one the user swapped into through this app. If the user asks specifically about a memecoin/community token they hold (by name or address), you MUST call get_token_balance with that token's address (look it up via get_trending_tokens first if you only have a symbol) — this is a real, separate on-chain balance check. NEVER say a user holds "0" of a specific token, or that a token isn't in their wallet, without having actually called get_token_balance for it. Saying a specific number with no tool call behind it is exactly the kind of invented data you must never produce.
 
 When the user wants to swap, trade, buy, or sell any token:
 - If it's one of the verified tokens (${SUPPORTED_TOKENS_LIST}), call get_swap_quote directly with the symbol. Everything except USDG trades against USDG (e.g. ETH -> USDG, USDG -> TSLA, or TSLA -> USDG). If the user says USDC or dollars, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user doesn't specify an amount, ask for one before calling the tool.
@@ -187,6 +188,20 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           symbol: { type: 'string', description: 'Token symbol to search for, e.g. CASHCAT. Omit to get general top-trending tokens.' },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_token_balance',
+      description: "Checks the user's real on-chain balance of a SPECIFIC token by contract address — including memecoins and any token get_wallet_holdings doesn't track. Requires the exact contract address (look it up via get_trending_tokens first if you only have a symbol). Also returns a usdValue when a live price is available. Always call this for a specific-token holdings question instead of assuming an amount or saying 0.",
+      parameters: {
+        type: 'object',
+        properties: {
+          address: { type: 'string', description: 'The exact ERC-20 contract address to check, e.g. 0x1b27fF6e68A2fd6490543b17C996c109E64eb432' },
+        },
+        required: ['address'],
       },
     },
   },
@@ -431,6 +446,32 @@ export async function POST(request: Request) {
             }
           } catch (err) {
             result = { error: 'Could not reach token lookup service. Try again in a moment.' }
+          }
+
+        } else if (functionName === 'get_token_balance') {
+          const { address } = functionArgs as { address?: string }
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else if (!address || !isAddress(address)) {
+            result = { error: 'A valid contract address is required. Look it up via get_trending_tokens first if you only have a symbol.' }
+          } else {
+            try {
+              const [balance, priceInfo] = await Promise.all([
+                fetchArbitraryTokenBalance(walletAddress as `0x${string}`, address as `0x${string}`),
+                getTokenPriceByAddress(address).catch(() => null),
+              ])
+              const amountNum = parseFloat(balance.amount.replace(/,/g, ''))
+              const usdValue = priceInfo?.priceUsd != null && !isNaN(amountNum) ? amountNum * priceInfo.priceUsd : null
+              result = {
+                symbol: balance.symbol,
+                amount: balance.amount,
+                usdValue,
+                note: 'Real on-chain balance for this specific contract address. usdValue is null if no live price was available — say so plainly rather than guessing a value.',
+              }
+            } catch (err) {
+              console.error('[robin] get_token_balance error:', err)
+              result = { error: 'Could not read balance for that address from the chain. Double-check the address is correct.' }
+            }
           }
 
         } else if (functionName === 'get_swap_quote') {

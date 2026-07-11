@@ -112,3 +112,15 @@ export async function findTokensBySymbol(symbol: string): Promise<TrendingToken[
       .map(toTrendingToken),
   )
 }
+
+// Direct address lookup instead of fuzzy symbol search — used when we already know the
+// exact contract (e.g. checking the USD value of a balance we just read on-chain).
+export async function getTokenPriceByAddress(address: string): Promise<TrendingToken | null> {
+  const res = await fetch(`https://api.dexscreener.com/tokens/v1/robinhood/${address}`)
+  if (!res.ok) return null
+  const pairs = (await res.json()) as DexScreenerPair[]
+  if (!Array.isArray(pairs) || pairs.length === 0) return null
+  // A token can have multiple pools; use the most liquid one for the most reliable price.
+  const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+  return toTrendingToken(best)
+}

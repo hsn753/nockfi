@@ -93,3 +93,26 @@ function buildBalanceResults(ethRaw: any, erc20Results: any[], prices: Record<st
     ...tokenBalances,
   ]
 }
+
+// For any token NOT in the fixed verified/tracked list above — memecoins, community tokens,
+// anything the user holds that this app doesn't otherwise watch. get_wallet_holdings only
+// ever checks the fixed list, so a real balance of an unlisted token (including one the user
+// swapped into through this app) would otherwise never show up, and the model would have no
+// real data to answer with — confirmed in production this led to the model just asserting
+// "0" with no tool call behind it, for a token the user's own wallet history proved they held.
+export async function fetchArbitraryTokenBalance(
+  walletAddress: `0x${string}`,
+  tokenAddress: `0x${string}`,
+): Promise<{ amount: string; symbol: string; decimals: number }> {
+  const rpcUrl = process.env.RPC_URL
+  if (!rpcUrl) throw new Error('RPC_URL not configured')
+
+  const client = createPublicClient({ chain: nockChain, transport: http(rpcUrl) })
+  const [raw, decimals, symbol] = await Promise.all([
+    client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress] }),
+    client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'decimals' }),
+    client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'symbol' }).catch(() => 'UNKNOWN'),
+  ])
+
+  return { amount: fmtBalance(raw, decimals), symbol, decimals }
+}
