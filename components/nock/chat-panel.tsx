@@ -42,14 +42,28 @@ function renderMessageText(text: string) {
   )
 }
 
+const MAX_INPUT_ROWS = 8
+
 export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoading }: Props) {
   const [value, setValue] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, isLoading])
+
+  // Auto-grow the textarea with content, capped at MAX_INPUT_ROWS so a long paste
+  // doesn't push the message list off screen.
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    const lineHeight = parseFloat(getComputedStyle(el).lineHeight || '20')
+    const maxHeight = lineHeight * MAX_INPUT_ROWS
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`
+  }, [value])
 
   function submit() {
     const text = value.trim()
@@ -141,17 +155,19 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
         <div className="mx-auto flex max-w-2xl items-end gap-2.5">
           <div
             className={cn(
-              'flex flex-1 items-center rounded-2xl border bg-card px-4 py-1 transition-colors',
+              'flex flex-1 items-center rounded-2xl border bg-card px-4 py-2.5 transition-colors',
               isLoading
                 ? 'border-border opacity-50'
                 : 'border-border focus-within:border-primary/50',
             )}
           >
-            <input
+            <textarea
+              ref={textareaRef}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                // Shift+Enter (or Cmd/Ctrl+Enter) inserts a newline; plain Enter sends.
+                if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault()
                   submit()
                 }
@@ -159,7 +175,8 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
               disabled={isLoading}
               placeholder={isLoading ? 'Robin is thinking...' : 'Ask Robin to do something'}
               aria-label="Message Robin"
-              className="h-11 flex-1 bg-transparent text-[15px] text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed"
+              rows={1}
+              className="max-h-40 min-h-[1.375rem] flex-1 resize-none bg-transparent text-[15px] leading-[1.375rem] text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed"
             />
           </div>
           <button

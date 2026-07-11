@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useWallets, usePrivy } from '@privy-io/react-auth'
-import { useWalletClient, usePublicClient } from 'wagmi'
+import { useWalletClient, usePublicClient, useChainId, useSwitchChain } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits } from 'viem'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-storage'
 import { executeSwap } from '@/lib/execute-swap'
 import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
+import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import {
   getAgent,
@@ -49,8 +50,29 @@ export function NockApp() {
 
   const { wallets } = useWallets()
   const { user: privyUser } = usePrivy()
-  const { data: walletClient } = useWalletClient()
+  // Scoped to Robinhood Chain explicitly — without a chainId, wagmi resolves this
+  // against whatever network the wallet currently reports as active. Confirmed in
+  // production: a wallet connected but sitting on a different active network (e.g. still
+  // on Ethereum mainnet after adding Robinhood Chain as a custom network, rather than
+  // actually switching to it) made this silently come back undefined, which read to the
+  // user as "please connect your wallet" even though it plainly was connected.
+  const { data: walletClient } = useWalletClient({ chainId: nockChain.id })
   const publicClient = usePublicClient()
+  const currentChainId = useChainId()
+  const { switchChainAsync } = useSwitchChain()
+
+  // Proactively switch a connected wallet onto Robinhood Chain instead of waiting for a
+  // swap attempt to fail. Some wallets (MetaMask included) don't auto-activate a network
+  // just because it was added — the user can add it as a custom network and still be
+  // sitting on mainnet.
+  useEffect(() => {
+    if (wallets.length > 0 && currentChainId !== nockChain.id) {
+      switchChainAsync({ chainId: nockChain.id }).catch(() => {
+        // User declined or wallet doesn't support programmatic switching — handleLoose
+        // below still catches this at execution time with a clear message.
+      })
+    }
+  }, [wallets.length, currentChainId, switchChainAsync])
 
   // The delegated embedded "instant swap" wallet (see Settings) is a separate address
   // used only when actually EXECUTING a swap without a mobile prompt — see handleLoose
@@ -472,7 +494,12 @@ export function NockApp() {
         ])
       }
     } else if (!walletClient) {
-      // No wallet connected
+      // A wallet being connected (wallets.length > 0) but walletClient still being
+      // undefined means it's sitting on the wrong network, not actually disconnected —
+      // the auto-switch effect above already tried and failed or was declined.
+      const message = wallets.length > 0
+        ? "Your wallet isn't on Robinhood Chain. Switch networks in your wallet (chain ID 4663) and try again."
+        : 'Please connect your wallet first to execute this action.'
       setMessages((prev) => [
         ...prev.map((m) =>
           m.role === 'robin' && m.action && m.action.id === actionId
@@ -482,7 +509,7 @@ export function NockApp() {
         {
           id: `${Date.now()}-error`,
           role: 'robin',
-          text: 'Please connect your wallet first to execute this action.',
+          text: message,
         },
       ])
     } else {
