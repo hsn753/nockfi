@@ -327,20 +327,22 @@ export async function POST(request: Request) {
       )
     }
 
-    const { messages, walletAddress, delegatedWalletAddress } = (await request.json()) as {
+    const { messages, walletAddress } = (await request.json()) as {
       messages: ChatMessage[]
       walletAddress?: string
-      delegatedWalletAddress?: string
     }
 
-    // Holdings/balances always read from the connected external wallet — that's the
-    // user's primary identity (see privy-wallet-how-it-should-work.md). Swap quotes are
-    // different: if instant swaps are enabled, the delegated embedded wallet is the one
-    // that will actually sign, so the quote's taker must match it, or the transaction
-    // 0x builds won't be valid for whoever actually executes it.
-    const swapTaker = delegatedWalletAddress || walletAddress
+    // Always the connected wallet — the same one every balance check and the pre-flight/
+    // execution check on the client use. Confirmed live: quoting against a delegated
+    // wallet just because one existed on the account (independent of whether that's
+    // actually the wallet the user is using) produced a quote for a wallet with a
+    // completely different balance than the one just shown in holdings — "swap your
+    // 8.85 USDG" followed by "this wallet has 0 USDG." The client only treats a swap as
+    // delegated execution when the connected wallet IS the delegated one (see
+    // isUsingDelegatedWallet in nock-app.tsx), so the taker here must match that exactly.
+    const swapTaker = walletAddress
 
-    console.log('[robin] Wallet address received:', walletAddress, 'delegated:', delegatedWalletAddress)
+    console.log('[robin] Wallet address received:', walletAddress)
 
     const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: buildSystemPrompt(walletAddress) },

@@ -91,6 +91,16 @@ export function NockApp() {
 
   const walletAddress = wallets[0]?.address
 
+  // Only actually true instant-swap usage when the CONNECTED wallet is itself the
+  // delegated one (e.g. an embedded-wallet-only login) — not just "a delegated wallet
+  // exists somewhere on this account." Confirmed live: a user with both a funded
+  // external wallet and a separate, unfunded delegated wallet got "not enough USDG"
+  // on a swap their connected wallet's balance plainly covered, because execution
+  // silently preferred the delegated wallet as signer just because one existed,
+  // completely independent of which wallet the quote/balance check actually used.
+  const isUsingDelegatedWallet =
+    !!delegatedWallet && !!walletAddress && delegatedWallet.address.toLowerCase() === walletAddress.toLowerCase()
+
   // Debug logging
   useEffect(() => {
     console.log('[Nock] Wallets detected:', wallets)
@@ -253,7 +263,7 @@ export function NockApp() {
         const res = await fetch('/api/robin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: history, walletAddress, delegatedWalletAddress: delegatedWallet?.address }),
+          body: JSON.stringify({ messages: history, walletAddress }),
         })
 
         const { text: replyText, action, bridgeInfo } = (await res.json()) as {
@@ -345,11 +355,13 @@ export function NockApp() {
           throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
         }
 
-        // The wallet that will actually sign — the delegated instant-swap wallet if one
-        // exists (it's what handleLoose routes execution to below), otherwise the
-        // connected external wallet. The quote's taker (see app/api/robin/route.ts) is
-        // built to match this same address, so balance/allowance checks here must too.
-        const signerAddress = delegatedWallet?.address || walletAddress
+        // The wallet that will actually sign is always the connected wallet — the same
+        // one get_wallet_holdings and the quote's taker (see app/api/robin/route.ts) use.
+        // Only when that connected wallet IS ITSELF the delegated one (see
+        // isUsingDelegatedWallet above) does execution route through the server-side
+        // signer below instead of a mobile/extension prompt — never based on a delegated
+        // wallet merely existing elsewhere on the account.
+        const signerAddress = walletAddress
 
         // Pre-flight balance check — works for ANY sell token (verified or not) since it
         // uses the address/decimals the quote actually resolved, not a symbol lookup that
@@ -394,7 +406,7 @@ export function NockApp() {
         }
 
         console.log('Executing real swap transaction...')
-        const result = delegatedWallet
+        const result = isUsingDelegatedWallet
           ? await (async () => {
               const res = await fetch('/api/execute-delegated-swap', {
                 method: 'POST',
