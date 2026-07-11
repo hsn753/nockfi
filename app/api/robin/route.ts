@@ -282,12 +282,20 @@ export async function POST(request: Request) {
       )
     }
 
-    const { messages, walletAddress } = (await request.json()) as {
+    const { messages, walletAddress, delegatedWalletAddress } = (await request.json()) as {
       messages: ChatMessage[]
       walletAddress?: string
+      delegatedWalletAddress?: string
     }
 
-    console.log('[robin] Wallet address received:', walletAddress)
+    // Holdings/balances always read from the connected external wallet — that's the
+    // user's primary identity (see privy-wallet-how-it-should-work.md). Swap quotes are
+    // different: if instant swaps are enabled, the delegated embedded wallet is the one
+    // that will actually sign, so the quote's taker must match it, or the transaction
+    // 0x builds won't be valid for whoever actually executes it.
+    const swapTaker = delegatedWalletAddress || walletAddress
+
+    console.log('[robin] Wallet address received:', walletAddress, 'delegated:', delegatedWalletAddress)
 
     const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: buildSystemPrompt(walletAddress) },
@@ -485,7 +493,7 @@ export async function POST(request: Request) {
                 fromToken,
                 toToken,
                 amount,
-                taker: walletAddress,
+                taker: swapTaker,
               })
               if (!quote.error) {
                 lastSwapQuote = quote

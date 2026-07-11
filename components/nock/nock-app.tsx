@@ -52,10 +52,14 @@ export function NockApp() {
   const { data: walletClient } = useWalletClient()
   const publicClient = usePublicClient()
 
-  // Once a user delegates an embedded "instant swap" wallet (see Settings), that
-  // wallet becomes the one Nock reads balances from and executes swaps against —
-  // it's the wallet that will actually hold funds and sign without a mobile prompt.
-  // Otherwise, fall back to whatever external wallet is connected.
+  // The delegated embedded "instant swap" wallet (see Settings) is a separate address
+  // used only when actually EXECUTING a swap without a mobile prompt — see handleLoose
+  // below. It must never become the app's general wallet identity: per
+  // privy-wallet-how-it-should-work.md, the connected external wallet stays the default
+  // for everything else (holdings, portfolio, quotes). Getting this backwards previously
+  // meant a user who'd ever enabled instant swaps had Nock silently reading balances from
+  // the unfunded embedded wallet instead of whatever wallet they'd actually connected —
+  // showing $0 even when the connected wallet plainly held funds.
   const delegatedWallet = useMemo(() => {
     const match = privyUser?.linkedAccounts?.find(
       (a: any) => a.type === 'wallet' && a.walletClientType === 'privy' && a.chainType === 'ethereum' && a.delegated,
@@ -63,7 +67,7 @@ export function NockApp() {
     return match
   }, [privyUser])
 
-  const walletAddress = delegatedWallet?.address || wallets[0]?.address
+  const walletAddress = wallets[0]?.address
 
   // Debug logging
   useEffect(() => {
@@ -228,7 +232,7 @@ export function NockApp() {
         const res = await fetch('/api/robin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: history, walletAddress }),
+          body: JSON.stringify({ messages: history, walletAddress, delegatedWalletAddress: delegatedWallet?.address }),
         })
 
         const { text: replyText, action, bridgeInfo } = (await res.json()) as {
@@ -320,15 +324,21 @@ export function NockApp() {
           throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
         }
 
+        // The wallet that will actually sign — the delegated instant-swap wallet if one
+        // exists (it's what handleLoose routes execution to below), otherwise the
+        // connected external wallet. The quote's taker (see app/api/robin/route.ts) is
+        // built to match this same address, so balance/allowance checks here must too.
+        const signerAddress = delegatedWallet?.address || walletAddress
+
         // Pre-flight balance check — works for ANY sell token (verified or not) since it
         // uses the address/decimals the quote actually resolved, not a symbol lookup that
         // only covered the verified list (which silently skipped this whole check for any
         // memecoin/unverified token). Without this, a wallet that can't cover the
         // transaction tends to hang and time out instead of failing cleanly.
-        if (publicClient && walletAddress) {
+        if (publicClient && signerAddress) {
           const isNativeEth = sellTokenAddress.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()
           const requiredAmount = parseUnits(fromAmount, sellTokenDecimals)
-          const ethBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` })
+          const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
           const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
 
           if (isNativeEth) {
@@ -343,7 +353,7 @@ export function NockApp() {
               address: sellTokenAddress as `0x${string}`,
               abi: erc20Abi,
               functionName: 'balanceOf',
-              args: [walletAddress as `0x${string}`],
+              args: [signerAddress as `0x${string}`],
             })
             if (tokenBalance < requiredAmount) {
               throw new Error(
