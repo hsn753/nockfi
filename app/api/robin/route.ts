@@ -491,9 +491,13 @@ export async function POST(request: Request) {
           // one — occasionally producing a real 0x API error, and always a quote for a
           // size the user never asked for. A prompt instruction alone wasn't reliable
           // enough to prevent this. Hard backstop: if no user message anywhere in this
-          // conversation contains a digit, the model cannot possibly have a real amount
-          // to work with, so refuse and force it to actually ask.
-          const hasUserSpecifiedAmount = messages.some((m) => m.role === 'user' && /\d/.test(m.text))
+          // conversation contains a digit OUTSIDE of a contract address, the model cannot
+          // possibly have a real amount to work with, so refuse and force it to actually
+          // ask. Contract addresses (0x + 40 hex chars) are stripped first — confirmed
+          // this guard originally false-positived because an address is full of digits.
+          const hasUserSpecifiedAmount = messages.some(
+            (m) => m.role === 'user' && /\d/.test(m.text.replace(/0x[a-fA-F0-9]{40}/g, '')),
+          )
 
           if (!hasUserSpecifiedAmount) {
             result = {
