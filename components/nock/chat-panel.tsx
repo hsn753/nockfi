@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, Fragment } from 'react'
+import { useEffect, useRef, useState, Fragment, type ReactNode } from 'react'
 import { Send, SquarePen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from './data'
@@ -18,17 +18,20 @@ type Props = {
 }
 
 const URL_PATTERN = /(https?:\/\/[^\s]+)/g
+const BOLD_PATTERN = /\*\*([^*]+)\*\*/g
 
-// Message text is plain (no markdown), but URLs Robin sends — e.g. a bridge or
-// block explorer link — need to actually be tappable rather than inert text.
-// split() with a capturing group always puts matches at odd indices, so index
-// parity tells us which parts are URLs without re-testing a stateful global regex.
-function renderMessageText(text: string) {
+// Robin's replies use a deliberately tiny formatting subset (enforced by the
+// formatting rules in the system prompt): line breaks, "- " bullets, "1. " numbered
+// items, and **bold**. Rendering that subset directly keeps chat bubbles readable
+// without pulling a full markdown pipeline into the bundle — anything outside the
+// subset just displays as typed. split() with a capturing group always puts matches
+// at odd indices, so index parity separates matches without a stateful global regex.
+function linkify(text: string, keyPrefix: string) {
   const parts = text.split(URL_PATTERN)
   return parts.map((part, i) =>
     i % 2 === 1 ? (
       <a
-        key={i}
+        key={`${keyPrefix}-${i}`}
         href={part}
         target="_blank"
         rel="noreferrer"
@@ -37,9 +40,63 @@ function renderMessageText(text: string) {
         {part}
       </a>
     ) : (
-      <Fragment key={i}>{part}</Fragment>
+      <Fragment key={`${keyPrefix}-${i}`}>{part}</Fragment>
     ),
   )
+}
+
+function renderInline(line: string, keyPrefix: string) {
+  const parts = line.split(BOLD_PATTERN)
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <strong key={`${keyPrefix}-b${i}`} className="font-semibold">{linkify(part, `${keyPrefix}-b${i}`)}</strong>
+    ) : (
+      <Fragment key={`${keyPrefix}-b${i}`}>{linkify(part, `${keyPrefix}-b${i}`)}</Fragment>
+    ),
+  )
+}
+
+function renderMessageText(text: string) {
+  const lines = text.split('\n')
+  const blocks: ReactNode[] = []
+  let list: { ordered: boolean; start: number; items: string[] } | null = null
+
+  const flushList = () => {
+    if (!list) return
+    const key = `list-${blocks.length}`
+    const items = list.items.map((item, i) => (
+      <li key={`${key}-${i}`}>{renderInline(item, `${key}-${i}`)}</li>
+    ))
+    blocks.push(
+      list.ordered ? (
+        <ol key={key} start={list.start} className="list-decimal space-y-1 pl-5">{items}</ol>
+      ) : (
+        <ul key={key} className="list-disc space-y-1 pl-5">{items}</ul>
+      ),
+    )
+    list = null
+  }
+
+  for (const raw of lines) {
+    const line = raw.trim()
+    const bullet = /^[-•*]\s+(.+)/.exec(line)
+    const numbered = /^(\d+)[.)]\s+(.+)/.exec(line)
+    if (bullet) {
+      if (!list || list.ordered) { flushList(); list = { ordered: false, start: 1, items: [] } }
+      list.items.push(bullet[1])
+    } else if (numbered) {
+      if (!list || !list.ordered) { flushList(); list = { ordered: true, start: parseInt(numbered[1], 10) || 1, items: [] } }
+      list.items.push(numbered[2])
+    } else if (line === '') {
+      flushList()
+    } else {
+      flushList()
+      blocks.push(<p key={`p-${blocks.length}`}>{renderInline(line, `p-${blocks.length}`)}</p>)
+    }
+  }
+  flushList()
+
+  return <div className="space-y-2">{blocks}</div>
 }
 
 const MAX_INPUT_ROWS = 8
