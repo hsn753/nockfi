@@ -53,6 +53,90 @@ function extractCandidateTokenWords(text: string): string[] {
   return [...new Set(words)].filter((w) => !NON_TOKEN_WORDS.has(w.toLowerCase()))
 }
 
+// The three hard backstops every quoted swap/stock card must pass, whether the card
+// comes from the model calling propose_action or from the server-side synthesis
+// fallback — shared so the two paths can never drift apart. Each was added after a
+// real incident: silent token substitution, a same-ticker impersonator trade, and a
+// buy proposed with a transaction that sold.
+async function validateQuotedTrade(lastSwapQuote: any, lastUserMessageText: string | undefined): Promise<{
+  mismatchedTokenWord?: string
+  stockImpersonatorWord?: string
+  directionMismatch?: string
+}> {
+  if (!lastSwapQuote?.transaction || !lastUserMessageText) return {}
+
+  const quoteSymbols = new Set(
+    [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol]
+      .filter((s): s is string => typeof s === 'string')
+      .map((s) => s.toUpperCase()),
+  )
+  const quoteAddresses = new Set(
+    [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol, lastSwapQuote.sellTokenAddress]
+      .filter((s): s is string => typeof s === 'string')
+      .map((s) => s.toLowerCase()),
+  )
+  const candidates = extractCandidateTokenWords(lastUserMessageText)
+
+  let stockImpersonatorWord: string | undefined
+  const matchedViaRegistry = new Set<string>()
+  for (const w of candidates) {
+    const official = await findStockToken(w).catch(() => null)
+    if (!official) continue
+    if (quoteAddresses.has(official.address.toLowerCase()) || quoteSymbols.has(w)) {
+      matchedViaRegistry.add(w)
+    } else {
+      stockImpersonatorWord = w
+    }
+  }
+
+  let mismatchedTokenWord = candidates.find((w) => !quoteSymbols.has(w) && !matchedViaRegistry.has(w))
+  if (stockImpersonatorWord) mismatchedTokenWord = undefined
+
+  let directionMismatch: string | undefined
+  const text = lastUserMessageText.toLowerCase()
+  const saysBuy = /\bbuy\b/.test(text)
+  const saysSell = /\bsell\b/.test(text)
+  if (saysBuy !== saysSell && lastSwapQuote.routeVia === 'uniswap-v4') {
+    const quoteSellsStock = String(lastSwapQuote.fromSymbol).toUpperCase() !== 'USDG'
+    if ((saysBuy && quoteSellsStock) || (saysSell && !quoteSellsStock)) {
+      directionMismatch = saysBuy
+        ? 'The user asked to BUY this stock, but the quote SELLS it (fromToken was the stock). Call get_swap_quote again with fromToken="USDG" and toToken set to the stock address. fromToken is always what the user pays with.'
+        : 'The user asked to SELL this stock, but the quote BUYS it. Call get_swap_quote again with fromToken set to the stock address and toToken="USDG".'
+    }
+  }
+
+  return { mismatchedTokenWord, stockImpersonatorWord, directionMismatch }
+}
+
+// USD value of a quoted trade's sell side, computed here from verified prices — never
+// from the model's own arithmetic (it once presented 4,672 tokens as $4,672).
+async function computeQuotedTradeValue(lastSwapQuote: any): Promise<string> {
+  const prices = await getReferencePrices()
+  let fromPrice = prices[(lastSwapQuote.fromSymbol || '').toUpperCase()]
+  if (fromPrice === undefined && typeof lastSwapQuote.sellTokenAddress === 'string') {
+    const stocks = await getStockTokens().catch(() => [])
+    const match = stocks.find((s) => s.address.toLowerCase() === lastSwapQuote.sellTokenAddress.toLowerCase())
+    if (match?.priceUsd != null) fromPrice = match.priceUsd
+  }
+  const fromAmountNum = parseFloat(String(lastSwapQuote.fromAmount).replace(/,/g, ''))
+  return fromPrice !== undefined && !isNaN(fromAmountNum)
+    ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
+    : 'Value unavailable'
+}
+
+// Vault Agent spend-limit check for money leaving the wallet. Returns the limit that
+// was exceeded, or null if the action is allowed.
+async function getExceededSpendLimit(walletAddress: string | undefined, outcomeValue: string): Promise<number | null> {
+  if (!walletAddress) return null
+  const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
+  if (isNaN(outcomeValueNum)) return null
+  const wallet = await getWalletByAddress(walletAddress)
+  const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
+  return guardrails.maxUsdPerTransaction !== null && outcomeValueNum > guardrails.maxUsdPerTransaction
+    ? guardrails.maxUsdPerTransaction
+    : null
+}
+
 function buildSystemPrompt(walletAddress?: string): string {
   const walletLine = walletAddress
     ? `The user's connected wallet address on Robinhood Chain is ${walletAddress}.`
@@ -529,63 +613,10 @@ export async function POST(request: Request) {
           // the quote actually being proposed, refuse and force the model to check with the
           // user instead of guessing. A false positive here just costs an extra clarifying
           // question — an acceptable price for never silently executing the wrong trade.
-          let mismatchedTokenWord: string | undefined
-          let stockImpersonatorWord: string | undefined
-          let directionMismatch: string | undefined
-          if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction && lastUserMessage) {
-            const quoteSymbols = new Set(
-              [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol]
-                .filter((s): s is string => typeof s === 'string')
-                .map((s) => s.toUpperCase()),
-            )
-            const quoteAddresses = new Set(
-              [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol, lastSwapQuote.sellTokenAddress]
-                .filter((s): s is string => typeof s === 'string')
-                .map((s) => s.toLowerCase()),
-            )
-            const candidates = extractCandidateTokenWords(lastUserMessage.text)
-
-            // Stock symbols resolve through the verified registry only. If the user
-            // named a symbol Robinhood officially issues, the quote must involve that
-            // exact contract — a same-ticker impersonator (four fake TSLAs exist) must
-            // never be tradeable through a stock request. When the official address IS
-            // on the quote, the symbol counts as matched for the mismatch guard below
-            // (the quote sides show raw addresses for non-SWAP_TOKENS assets, so the
-            // symbol never literally appears there).
-            const matchedViaRegistry = new Set<string>()
-            for (const w of candidates) {
-              const official = await findStockToken(w).catch(() => null)
-              if (!official) continue
-              // A stock symbol is satisfied when the quote involves either the official
-              // contract address (0x-shaped quotes expose raw addresses) or the symbol
-              // itself (Uniswap-routed stock quotes resolve the symbol server-side from
-              // the registry, so the symbol appearing there is already authenticated).
-              if (quoteAddresses.has(official.address.toLowerCase()) || quoteSymbols.has(w)) {
-                matchedViaRegistry.add(w)
-              } else {
-                stockImpersonatorWord = w
-              }
-            }
-
-            mismatchedTokenWord = candidates.find((w) => !quoteSymbols.has(w) && !matchedViaRegistry.has(w))
-            if (stockImpersonatorWord) mismatchedTokenWord = undefined
-
-            // Direction guard: caught live, the model passed fromToken/toToken
-            // backwards ("buy TSLA" quoted as SELL TSLA), then described the card as a
-            // buy while the attached transaction sold. When the user's own message
-            // names exactly one direction, the quote must match it.
-            const text = lastUserMessage.text.toLowerCase()
-            const saysBuy = /\bbuy\b/.test(text)
-            const saysSell = /\bsell\b/.test(text)
-            if (saysBuy !== saysSell && lastSwapQuote.routeVia === 'uniswap-v4') {
-              const quoteSellsStock = String(lastSwapQuote.fromSymbol).toUpperCase() !== 'USDG'
-              if ((saysBuy && quoteSellsStock) || (saysSell && !quoteSellsStock)) {
-                directionMismatch = saysBuy
-                  ? 'The user asked to BUY this stock, but the quote SELLS it (fromToken was the stock). Call get_swap_quote again with fromToken="USDG" and toToken set to the stock address. fromToken is always what the user pays with.'
-                  : 'The user asked to SELL this stock, but the quote BUYS it. Call get_swap_quote again with fromToken set to the stock address and toToken="USDG".'
-              }
-            }
-          }
+          const { mismatchedTokenWord, stockImpersonatorWord, directionMismatch } =
+            (input.agent === 'swap' || input.agent === 'stock')
+              ? await validateQuotedTrade(lastSwapQuote, lastUserMessage?.text)
+              : {}
 
           if ((input.agent === 'swap' || input.agent === 'stock') && !lastSwapQuote?.transaction) {
             result = {
@@ -621,19 +652,7 @@ export async function POST(request: Request) {
             // selling an unverified memecoin), say so plainly instead of guessing.
             let outcomeValue = input.outcome.value
             if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction) {
-              const prices = await getReferencePrices()
-              let fromPrice = prices[(lastSwapQuote.fromSymbol || '').toUpperCase()]
-              // Selling a stock token: the sell side is a raw address with no reference
-              // price — use the registry's live pool price instead of giving up.
-              if (fromPrice === undefined && typeof lastSwapQuote.sellTokenAddress === 'string') {
-                const stocks = await getStockTokens().catch(() => [])
-                const match = stocks.find((s) => s.address.toLowerCase() === lastSwapQuote.sellTokenAddress.toLowerCase())
-                if (match?.priceUsd != null) fromPrice = match.priceUsd
-              }
-              const fromAmountNum = parseFloat(String(lastSwapQuote.fromAmount).replace(/,/g, ''))
-              outcomeValue = fromPrice !== undefined && !isNaN(fromAmountNum)
-                ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
-                : 'Value unavailable'
+              outcomeValue = await computeQuotedTradeValue(lastSwapQuote)
             } else if (input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote) {
               const prices = await getReferencePrices()
               const usdgPrice = prices.USDG ?? 1
@@ -652,14 +671,10 @@ export async function POST(request: Request) {
             const isWithdrawal =
               input.agent === 'yield' && lastYieldQuote && 'direction' in lastYieldQuote && lastYieldQuote.direction === 'withdraw'
             let guardrailViolation: string | undefined
-            if ((input.agent === 'swap' || input.agent === 'stock' || input.agent === 'yield') && !isWithdrawal && walletAddress) {
-              const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
-              if (!isNaN(outcomeValueNum)) {
-                const wallet = await getWalletByAddress(walletAddress)
-                const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
-                if (guardrails.maxUsdPerTransaction !== null && outcomeValueNum > guardrails.maxUsdPerTransaction) {
-                  guardrailViolation = `This action is worth about ${outcomeValue}, which is over the user's set spend limit of $${guardrails.maxUsdPerTransaction} per transaction. Do not propose this action. Tell the user plainly it was blocked by their own spend limit, and that they can raise it from Settings if they want to allow it.`
-                }
+            if ((input.agent === 'swap' || input.agent === 'stock' || input.agent === 'yield') && !isWithdrawal) {
+              const exceededLimit = await getExceededSpendLimit(walletAddress, outcomeValue)
+              if (exceededLimit !== null) {
+                guardrailViolation = `This action is worth about ${outcomeValue}, which is over the user's set spend limit of $${exceededLimit} per transaction. Do not propose this action. Tell the user plainly it was blocked by their own spend limit, and that they can raise it from Settings if they want to allow it.`
               }
             }
 
@@ -1195,6 +1210,64 @@ export async function POST(request: Request) {
       }
     }
 
+    // Same failure mode as the yield synthesis above, seen live for stock buys: a
+    // real Uniswap quote existed, the reply told the user to "press the Confirm
+    // button on the action card" — but propose_action was never called, so no card
+    // existed and the user was stuck until they started a fresh chat. When the model
+    // leaves a fresh quoted trade cardless, build the card server-side from the
+    // quote's own verified numbers, under exactly the same guards propose_action
+    // enforces (shared helpers — the two paths cannot drift).
+    if (!action && lastSwapQuote?.transaction) {
+      const lastUserMessage = [...messages].reverse().find((m: any) => m.role === 'user')
+      const guards = await validateQuotedTrade(lastSwapQuote, lastUserMessage?.text)
+      if (!guards.mismatchedTokenWord && !guards.stockImpersonatorWord && !guards.directionMismatch) {
+        const outcomeValue = await computeQuotedTradeValue(lastSwapQuote)
+        const exceededLimit = await getExceededSpendLimit(walletAddress, outcomeValue)
+        if (exceededLimit !== null) {
+          responseText = `That trade is worth about ${outcomeValue}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
+        } else {
+          const isStock = lastSwapQuote.routeVia === 'uniswap-v4'
+          const isBuy = isStock && String(lastSwapQuote.fromSymbol).toUpperCase() === 'USDG'
+          const headline = isStock
+            ? (isBuy
+                ? `Buy ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol} with ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}`
+                : `Sell ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`)
+            : `Swap ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`
+          action = {
+            id: `act-${Date.now()}`,
+            agent: isStock ? 'stock' : 'swap',
+            action: headline,
+            detail: isStock
+              ? `This trades at the live Uniswap pool price. A stock token is price exposure only, not share ownership.`
+              : `This swaps at the live quoted rate.${lastSwapQuote.verified === false ? ' The token is UNVERIFIED — anyone can deploy a token with any name; scam/rug risk is real.' : ''}`,
+            metrics: [
+              { label: 'You pay', value: `${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}` },
+              { label: 'You receive', value: `${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}` },
+              { label: 'Rate', value: String(lastSwapQuote.exchangeRate) },
+            ],
+            status: 'pending',
+            outcome: {
+              title: `${lastSwapQuote.toSymbol} position`,
+              value: outcomeValue,
+              meta: `${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`,
+              activityTitle: headline,
+            },
+            ...( {
+              transactionData: lastSwapQuote.transaction,
+              fromToken: lastSwapQuote.fromSymbol,
+              toToken: lastSwapQuote.toSymbol,
+              amount: lastSwapQuote.fromAmount,
+              verified: lastSwapQuote.verified !== false,
+              sellTokenAddress: lastSwapQuote.sellTokenAddress,
+              sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
+              ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
+            } as object),
+          } as any
+          responseText = `Here's the trade preview, built from the live quote. Press Confirm on the card to execute it, or Review to check the details first.`
+        }
+      }
+    }
+
     // Hard backstop, not a prompt instruction — Seen twice in prod: the prompt
     // rule alone doesn't hold: the model claimed "the withdrawal has been executed
     // successfully" for an execution that never happened on-chain (once after the user
@@ -1209,10 +1282,20 @@ export async function POST(request: Request) {
       /has been (executed|withdrawn|completed|processed)|executed successfully|withdrawn successfully|(withdrawal|swap|deposit|transaction) (was|is now) (successful|complete)|funds have been (withdrawn|moved|transferred)/i.test(
         responseText,
       )
+    // "Press Confirm on the card" is legitimate when a pending card from an earlier
+    // turn is still on screen (the client history carries each message's action), so
+    // only treat the claim as false when no card exists anywhere — this turn or prior.
+    const priorPendingCard = Array.isArray(messages) && (messages as any[]).some(
+      (m) => m?.role === 'robin' && m?.action?.status === 'pending',
+    )
     const claimsCardExists =
       !action &&
-      /(action|withdrawal|swap|deposit|lending).{0,60}ready (for|to)/i.test(responseText) &&
-      /\b(draw|loose|review|confirm)\b/i.test(responseText)
+      !priorPendingCard &&
+      (
+        /(action|withdrawal|swap|deposit|lending|trade).{0,60}ready (for|to)/i.test(responseText) ||
+        /\b(press|click|tap|hit)\b.{0,50}\b(confirm|review|draw|loose)\b/i.test(responseText) ||
+        /\baction card\b/i.test(responseText)
+      )
 
     if (claimsExecution) {
       responseText =
