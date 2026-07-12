@@ -64,13 +64,13 @@ export const agents: Agent[] = [
   {
     id: 'stock',
     name: 'Stock token agent',
-    tagline: 'Live tokenized stock prices, verified against the official issuer.',
+    tagline: 'Trade tokenized stocks, live around the clock.',
     description:
-      "The stock token agent tracks Robinhood's official tokenized equities (AAPL, TSLA, NVDA, SPY and more) with live on-chain prices, 24/7. Every token is verified against Robinhood's official deployer, so impersonator contracts can't reach you. A stock token gives you price exposure, not share ownership — no dividends, no voting rights. Trading through Nock is paused while the swap routing provider restricts tokenized equities.",
+      "The stock token agent trades Robinhood's official tokenized equities (AAPL, TSLA, NVDA, SPY and more) on-chain, 24/7, routed directly through Uniswap. Every token is verified against Robinhood's official deployer before it's ever quoted, so impersonator contracts can't reach you. A stock token gives you price exposure, not share ownership — no dividends, no voting rights.",
     capabilities: [
-      'Live 24/7 prices for official tokenized stocks, never estimates',
-      'Verify every contract against the official issuer',
-      'Check your stock token holdings by exact contract',
+      'Buy and sell official tokenized stocks around the clock',
+      'Verify every contract against the official issuer before quoting',
+      'Live on-chain prices from real trading, never estimates',
     ],
     gated: false,
     status: 'active',

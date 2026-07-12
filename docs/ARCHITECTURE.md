@@ -34,6 +34,11 @@ and would be expensive to rediscover.
 | Steakhouse USDG vault (Robinhood Earn) | `0xBeEff033F34C046626B8D0A041844C5d1A5409dd` — ERC4626, **closed**: `maxDeposit()` returns 0 for every address |
 | Vault's adapter (how we found Morpho core) | `MorphoMarketV1AdapterV2` at `0x44abc1d6ccff2696d98890b92e2157af242179c2` |
 | Morpho IRM (all three markets) | `0x2bd3d5965b26b51814ac95127b2b80dd6ccc0fa1` (`borrowRateView` selector `0x8c00bf6b`) |
+| Uniswap v4 PoolManager | `0x8366a39cc670b4001a1121b8f6a443a643e40951` (official; cross-confirmed via Positions NFT) |
+| Uniswap Universal Router | `0x8876789976decbfcbbbe364623c63652db8c0904` (from Uniswap's own deployments page — Blockscout name-search surfaces THREE UniversalRouters and the busiest is NOT official) |
+| Uniswap V4Quoter | `0x8dc178efb8111bb0973dd9d722ebeff267c98f94` |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` (canonical) |
+| Official stock-token deployer | `0x4783C67b63dE2B358Ac5951a7D41F47A38F3C046` (authenticity anchor for the stock registry) |
 
 ### Morpho markets we lend into (the same three the Robinhood Earn vault uses)
 
@@ -175,11 +180,14 @@ Client (`components/nock/nock-app.tsx`):
   can produce. Official SDKs are Python/Go only; community TS SDKs are unaudited.
   Revisit if Lighter ships an official TS SDK (`elliottech/lighter-python` issue #49)
   or publishes deposit-contract docs.
-- **Stock token trading blocked by 0x**: the 0x quote API returns
-  `BUY_TOKEN_NOT_AUTHORIZED_FOR_TRADE` ("not authorized for trade due to legal
-  restrictions") for Robinhood's tokenized equities. Registry, prices, and holdings all
-  work; trading needs a different route (direct Uniswap integration is the candidate —
-  the pools are permissionless and liquid).
+- **0x refuses tokenized equities** (`BUY_TOKEN_NOT_AUTHORIZED_FOR_TRADE`, a legal
+  policy at their API layer). Stock trades therefore bypass 0x entirely: quoted and
+  encoded in-house against Uniswap v4 (`lib/get-uniswap-quote.ts`), executed through
+  the Universal Router with Permit2 settlement (`lib/execute-uniswap-swap.ts`) — up to
+  three wallet confirmations on a first trade (ERC20→Permit2 approval, Permit2→router
+  allowance, swap). USDG pairs only, single hop, best-output across the standard fee
+  tiers (500/3000/10000 — same-pair pools at predatory 85-95% fees exist and always
+  lose the comparison).
 - **Morpho's GraphQL API doesn't index Robinhood Chain** — all Morpho data must come
   from direct RPC reads (which is what we do).
 

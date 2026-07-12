@@ -10,6 +10,7 @@ import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
+import { fetchUniswapStockQuote } from '@/lib/get-uniswap-quote'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
@@ -102,7 +103,7 @@ When the user wants to swap, trade, buy, or sell any token:
 When the user asks about stocks or tokenized equities (prices, what's available, buying, selling):
 - Call get_stock_tokens — it returns ONLY Robinhood's official stock tokens, verified on-chain against the official issuer. Never use get_trending_tokens for a stock symbol; that tool surfaces impersonator contracts with the same ticker.
 - At least once per conversation, make the framing clear: a stock token tracks the stock's price but is NOT share ownership — no dividends, no voting rights. It trades on-chain 24/7, including when the real market is closed, so its price can drift from the official close.
-- Buying and selling stock tokens is NOT currently possible through Nock: the swap routing provider (0x) blocks tokenized equities at its API level for legal/regulatory reasons. If the user asks to buy or sell one, say that plainly — prices and holdings are fully viewable, trading is the only part unavailable, and it's a restriction on the routing provider's side, not a bug or a balance issue. Do not attempt get_swap_quote for a stock token address, and never call propose_action with agent "stock".
+- To buy or sell: resolve the OFFICIAL contract address via get_stock_tokens (pass the symbol), then call get_swap_quote using that exact address as toToken (buying with USDG) or fromToken (selling), then propose_action with agent "stock" and the real quote numbers. Stock trades route through Uniswap directly and trade against USDG only. The first trade can take up to three wallet confirmations (two approvals, then the trade) — mention that when proposing. Same rules as swaps: never guess amounts, always quote fresh.
 - If a symbol isn't in the registry, say Robinhood doesn't issue that stock token — do not go looking for it among unverified tokens.
 
 When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
@@ -533,7 +534,11 @@ export async function POST(request: Request) {
             for (const w of candidates) {
               const official = await findStockToken(w).catch(() => null)
               if (!official) continue
-              if (quoteAddresses.has(official.address.toLowerCase())) {
+              // A stock symbol is satisfied when the quote involves either the official
+              // contract address (0x-shaped quotes expose raw addresses) or the symbol
+              // itself (Uniswap-routed stock quotes resolve the symbol server-side from
+              // the registry, so the symbol appearing there is already authenticated).
+              if (quoteAddresses.has(official.address.toLowerCase()) || quoteSymbols.has(w)) {
                 matchedViaRegistry.add(w)
               } else {
                 stockImpersonatorWord = w
@@ -640,6 +645,9 @@ export async function POST(request: Request) {
                 verified: lastSwapQuote.verified !== false,
                 sellTokenAddress: lastSwapQuote.sellTokenAddress,
                 sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
+                // Stock trades execute through the Uniswap Universal Router (Permit2
+                // settlement), not the 0x router — the client picks its executor off this.
+                ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
               } : {}),
               ...(input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote ? {
                 transactionData: lastYieldQuote.transaction,
@@ -791,12 +799,36 @@ export async function POST(request: Request) {
           } else {
             const supportedSymbols = Object.keys(SWAP_TOKENS).join(', ')
             try {
-              const quote = await fetchSwapQuote({
-                fromToken,
-                toToken,
-                amount,
-                taker: swapTaker,
-              })
+              // Verified stock tokens route through Uniswap v4 directly — 0x refuses
+              // tokenized equities at its API layer (BUY_TOKEN_NOT_AUTHORIZED_FOR_TRADE),
+              // but the underlying pools are public and liquid. Address-match against
+              // the registry only: a stock is only ever a stock when it's the OFFICIAL
+              // contract, so impersonators still go down the normal unverified-token path.
+              const stocks = await getStockTokens().catch(() => [])
+              const stockOnBuySide = isAddress(toToken) ? stocks.find((s) => s.address.toLowerCase() === toToken.toLowerCase()) : undefined
+              const stockOnSellSide = isAddress(fromToken) ? stocks.find((s) => s.address.toLowerCase() === fromToken.toLowerCase()) : undefined
+
+              let quote
+              if (stockOnBuySide || stockOnSellSide) {
+                const counterSide = stockOnBuySide ? fromToken : toToken
+                if (String(counterSide).toUpperCase() !== 'USDG') {
+                  quote = { error: 'Stock tokens currently trade against USDG only. Quote the other side as USDG (the user can swap into USDG first if needed).' } as any
+                } else {
+                  quote = await fetchUniswapStockQuote({
+                    stockAddress: (stockOnBuySide ?? stockOnSellSide)!.address,
+                    stockSymbol: (stockOnBuySide ?? stockOnSellSide)!.symbol,
+                    direction: stockOnBuySide ? 'buy' : 'sell',
+                    amount,
+                  })
+                }
+              } else {
+                quote = await fetchSwapQuote({
+                  fromToken,
+                  toToken,
+                  amount,
+                  taker: swapTaker,
+                })
+              }
               if (!quote.error) {
                 lastSwapQuote = quote
               }
@@ -804,7 +836,7 @@ export async function POST(request: Request) {
                 ? { error: quote.error, supportedTokens: supportedSymbols }
                 : { ...quote, supportedTokens: supportedSymbols }
             } catch {
-              result = { error: 'Failed to reach the 0x swap API. Try again in a moment.', supportedTokens: supportedSymbols }
+              result = { error: 'Failed to reach the swap quoting services. Try again in a moment.', supportedTokens: supportedSymbols }
             }
           }
 
@@ -911,7 +943,7 @@ export async function POST(request: Request) {
               result = token
                 ? {
                     token,
-                    note: 'Official Robinhood stock token, verified on-chain against the official issuer. priceUsd is the live on-chain trading price (24/7 — it can drift from the official market close). Price exposure only, not share ownership. Trading it through Nock is not currently possible — the 0x routing API blocks tokenized equities for legal reasons — so present data only, never propose a trade.',
+                    note: 'Official Robinhood stock token, verified on-chain against the official issuer. priceUsd is the live on-chain trading price (24/7 — it can drift from the official market close). Price exposure only, not share ownership. To trade it, call get_swap_quote with this exact address (trades against USDG, routed through Uniswap directly).',
                   }
                 : { error: `Robinhood doesn't issue an official stock token with the symbol "${symbol}". Do not look for it among unverified tokens — tell the user it isn't available as an official stock token.` }
             } else {
@@ -919,7 +951,7 @@ export async function POST(request: Request) {
               result = {
                 tokens: tokens.slice(0, 25),
                 totalCount: tokens.length,
-                note: 'Official Robinhood stock tokens only, each verified on-chain against the official issuer, sorted by 24h volume. Prices are live on-chain trading prices (24/7). Price exposure, not share ownership — no dividends or voting rights. Trading through Nock is not currently possible (the 0x routing API blocks tokenized equities for legal reasons) — this is informational data.',
+                note: 'Official Robinhood stock tokens only, each verified on-chain against the official issuer, sorted by 24h volume. Prices are live on-chain trading prices (24/7). Price exposure, not share ownership — no dividends or voting rights. Tradeable against USDG via get_swap_quote with the exact address.',
               }
             }
           } catch (err) {
