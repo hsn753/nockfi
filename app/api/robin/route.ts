@@ -315,7 +315,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_swap_quote',
-      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. fromToken/toToken can be a verified symbol (${SUPPORTED_TOKENS_LIST}) or, for a memecoin confirmed via get_trending_tokens or a stock token from get_stock_tokens, its exact contract address. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. Pass EITHER amount (token units to sell, e.g. "0.5" ETH) OR amountUsd (dollar value to sell, e.g. "2" for $2 worth — the server converts at the live price; NEVER convert dollars to token units yourself, and NEVER read "$2 of ETH" as 2 ETH). Never invent prices — always call this tool.`,
+      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. fromToken/toToken can be a verified symbol (${SUPPORTED_TOKENS_LIST}) or, for a memecoin confirmed via get_trending_tokens or a stock token from get_stock_tokens, its exact contract address. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. fromToken is ALWAYS what the user pays/gives up; toToken is what they receive (buying TSLA with USDG means fromToken USDG, toToken the TSLA address). Pass EITHER amount (token units of fromToken, e.g. "0.5" ETH) OR amountUsd (dollar value of the fromToken side, e.g. "2" for $2 worth — the server converts at the live price; NEVER convert dollars to token units yourself, and NEVER read "$2 of ETH" as 2 ETH). Never invent prices — always call this tool.`,
       parameters: {
         type: 'object',
         properties: {
@@ -510,6 +510,7 @@ export async function POST(request: Request) {
           // question — an acceptable price for never silently executing the wrong trade.
           let mismatchedTokenWord: string | undefined
           let stockImpersonatorWord: string | undefined
+          let directionMismatch: string | undefined
           if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction && lastUserMessage) {
             const quoteSymbols = new Set(
               [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol]
@@ -547,12 +548,30 @@ export async function POST(request: Request) {
 
             mismatchedTokenWord = candidates.find((w) => !quoteSymbols.has(w) && !matchedViaRegistry.has(w))
             if (stockImpersonatorWord) mismatchedTokenWord = undefined
+
+            // Direction guard: caught live, the model passed fromToken/toToken
+            // backwards ("buy TSLA" quoted as SELL TSLA), then described the card as a
+            // buy while the attached transaction sold. When the user's own message
+            // names exactly one direction, the quote must match it.
+            const text = lastUserMessage.text.toLowerCase()
+            const saysBuy = /\bbuy\b/.test(text)
+            const saysSell = /\bsell\b/.test(text)
+            if (saysBuy !== saysSell && lastSwapQuote.routeVia === 'uniswap-v4') {
+              const quoteSellsStock = String(lastSwapQuote.fromSymbol).toUpperCase() !== 'USDG'
+              if ((saysBuy && quoteSellsStock) || (saysSell && !quoteSellsStock)) {
+                directionMismatch = saysBuy
+                  ? 'The user asked to BUY this stock, but the quote SELLS it (fromToken was the stock). Call get_swap_quote again with fromToken="USDG" and toToken set to the stock address. fromToken is always what the user pays with.'
+                  : 'The user asked to SELL this stock, but the quote BUYS it. Call get_swap_quote again with fromToken set to the stock address and toToken="USDG".'
+              }
+            }
           }
 
           if ((input.agent === 'swap' || input.agent === 'stock') && !lastSwapQuote?.transaction) {
             result = {
               error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
             }
+          } else if (directionMismatch) {
+            result = { error: directionMismatch }
           } else if (stockImpersonatorWord) {
             result = {
               error: `The user asked about ${stockImpersonatorWord}, which is an official Robinhood stock token, but this quote does not involve that symbol's official contract address. Do not propose this trade. Call get_stock_tokens with symbol "${stockImpersonatorWord}" to get the official address, quote against that exact address, and try again. Never trade a same-ticker lookalike contract for a stock request.`,
@@ -629,12 +648,35 @@ export async function POST(request: Request) {
               continue
             }
 
+            // The card headline and metrics come from the SAME quote the transaction
+            // is built from. Caught live: the model framed a sell as a buy while the
+            // attached transaction did the opposite. Display and execution can no
+            // longer diverge for quoted trades.
+            const isQuotedTrade = (input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction
+            const tradeVerb = input.agent === 'stock'
+              ? (String(lastSwapQuote?.fromSymbol).toUpperCase() === 'USDG' ? 'Buy' : 'Sell')
+              : 'Swap'
+            const boundAction = isQuotedTrade
+              ? (tradeVerb === 'Buy'
+                  ? `Buy ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol} with ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}`
+                  : tradeVerb === 'Sell'
+                    ? `Sell ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`
+                    : `Swap ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`)
+              : input.action
+            const boundMetrics = isQuotedTrade
+              ? [
+                  { label: 'You pay', value: `${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}` },
+                  { label: 'You receive', value: `${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}` },
+                  { label: 'Rate', value: String(lastSwapQuote.exchangeRate) },
+                ]
+              : input.metrics
+
             action = {
               id: `act-${Date.now()}`,
               agent: input.agent,
-              action: input.action,
+              action: boundAction,
               detail: input.detail,
-              metrics: input.metrics,
+              metrics: boundMetrics,
               status: 'pending',
               outcome: { ...input.outcome, value: outcomeValue },
               ...((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction ? {
