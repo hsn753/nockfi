@@ -86,7 +86,7 @@ When the user asks what's trending, hot, popular, pumping, or moving on Robinhoo
 - Present the list with a clear unverified/scam-risk warning (same as any memecoin), and offer to quote a swap for one of them if the user's interested.
 
 When the user wants to swap, trade, buy, or sell any token:
-- If it's one of the verified tokens (${SUPPORTED_TOKENS_LIST}), call get_swap_quote directly with the symbol. ETH and WETH trade against USDG (e.g. ETH -> USDG or USDG -> ETH). If the user says USDC or dollars, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user doesn't specify an amount, ask for one before calling the tool.
+- If it's one of the verified tokens (${SUPPORTED_TOKENS_LIST}), call get_swap_quote directly with the symbol. ETH and WETH trade against USDG (e.g. ETH -> USDG or USDG -> ETH). If the user says USDC or dollars as the asset, treat that as USDG — there is no separate USDC on Robinhood Chain here. If the user doesn't specify an amount, ask for one before calling the tool.\n- When the user states the amount in DOLLARS of a non-stablecoin ("$2 worth of ETH", "sell 5 dollars of NVDA"), pass amountUsd to get_swap_quote and omit amount — the server converts at the live price. NEVER treat $X as X tokens, and NEVER do the dollar-to-token conversion yourself.
 - If the user gives you an exact contract address (starts with 0x, 42 characters) directly, for either side of the trade, do NOT call get_trending_tokens — that tool only searches by symbol/name and will find nothing for a raw address, which is a dead end. Call get_swap_quote directly using that address as fromToken/toToken. You can and should still warn this is an unverified token before proposing the action, but there's no lookup step needed when the user already gave you the exact identifier.
 - If the user names a memecoin or community token by SYMBOL/NAME (not an address) that's NOT in the verified list, call get_trending_tokens with that symbol first to look it up. This list is completely unverified — Robinhood Chain is permissionless, anyone can deploy a token with any name, and real impersonator tokens already exist (multiple different contracts all called "ROBINHOOD" or "HOOD" at different addresses, none of them official). Never silently pick one:
   - If get_trending_tokens finds exactly one match, tell the user this is an unverified community token (not vetted by Robinhood, real scam/rug risk), state its exact contract address, and ask them to confirm it's the one they mean before quoting.
@@ -314,15 +314,16 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_swap_quote',
-      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. fromToken/toToken can be a verified symbol (${SUPPORTED_TOKENS_LIST}) or, for a memecoin confirmed via get_trending_tokens, its exact contract address. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. amount is the human-readable sell amount (e.g. "100" for 100 USDG). Never invent prices — always call this tool.`,
+      description: `Fetches a real live swap quote from the 0x API for trading on Robinhood Chain. fromToken/toToken can be a verified symbol (${SUPPORTED_TOKENS_LIST}) or, for a memecoin confirmed via get_trending_tokens or a stock token from get_stock_tokens, its exact contract address. Everything except USDG trades against USDG. Call this whenever the user wants to swap, trade, buy, or sell any of these tokens. Pass EITHER amount (token units to sell, e.g. "0.5" ETH) OR amountUsd (dollar value to sell, e.g. "2" for $2 worth — the server converts at the live price; NEVER convert dollars to token units yourself, and NEVER read "$2 of ETH" as 2 ETH). Never invent prices — always call this tool.`,
       parameters: {
         type: 'object',
         properties: {
           fromToken: { type: 'string', description: 'Token symbol or contract address to sell, e.g. USDG or ETH' },
           toToken:   { type: 'string', description: 'Token symbol or contract address to buy, e.g. ETH or USDG' },
-          amount:    { type: 'string', description: 'Human-readable amount to sell, e.g. "100" or "0.5"' },
+          amount:    { type: 'string', description: 'Human-readable token amount to sell, e.g. "100" or "0.5". Omit if using amountUsd.' },
+          amountUsd: { type: 'string', description: 'Dollar value of the sell side, e.g. "2" when the user says "$2 worth of ETH". The server converts to token units at the live price. Omit if using amount.' },
         },
-        required: ['fromToken', 'toToken', 'amount'],
+        required: ['fromToken', 'toToken'],
       },
     },
   },
@@ -727,7 +728,39 @@ export async function POST(request: Request) {
           }
 
         } else if (functionName === 'get_swap_quote') {
-          const { fromToken, toToken, amount } = functionArgs
+          const { fromToken, toToken, amount: amountArg, amountUsd } = functionArgs as {
+            fromToken?: string; toToken?: string; amount?: string; amountUsd?: string
+          }
+
+          // Dollar-denominated sells are converted here, deterministically, at the
+          // live price — the model reading "$2 worth of ETH" as 2 ETH (a ~$7,000
+          // misread caught in testing) is exactly the class of arithmetic it must
+          // never do itself.
+          let amount = amountArg
+          let usdConversionError: string | undefined
+          if (!amount && amountUsd && fromToken) {
+            const usd = parseFloat(String(amountUsd).replace(/[$,]/g, ''))
+            if (isNaN(usd) || usd <= 0) {
+              usdConversionError = 'amountUsd must be a positive dollar number.'
+            } else {
+              const prices = await getReferencePrices()
+              let unitPrice = prices[fromToken.toUpperCase()]
+              if (unitPrice === undefined && isAddress(fromToken)) {
+                const stocks = await getStockTokens().catch(() => [])
+                const stockMatch = stocks.find((s) => s.address.toLowerCase() === fromToken.toLowerCase())
+                if (stockMatch?.priceUsd != null) unitPrice = stockMatch.priceUsd
+                if (unitPrice === undefined) {
+                  const dex = await getTokenPriceByAddress(fromToken).catch(() => null)
+                  if (dex?.priceUsd != null) unitPrice = dex.priceUsd
+                }
+              }
+              if (unitPrice === undefined || unitPrice <= 0) {
+                usdConversionError = `No live price available for ${fromToken} to convert a dollar amount — ask the user for the amount in token units instead.`
+              } else {
+                amount = (usd / unitPrice).toPrecision(6)
+              }
+            }
+          }
 
           // Seen in prod: despite the prompt explicitly saying to ask for an
           // amount before calling this tool, the model sometimes calls it anyway with a
@@ -747,8 +780,10 @@ export async function POST(request: Request) {
             result = {
               error: "The user has not specified a swap amount anywhere in this conversation. Do not guess or default to any amount (e.g. 100, 1, 0.01) — ask the user exactly how much they want to swap, then call this tool again once they answer with a specific number.",
             }
+          } else if (usdConversionError) {
+            result = { error: usdConversionError }
           } else if (!fromToken || !toToken || !amount) {
-            result = { error: 'fromToken, toToken, and amount are all required.' }
+            result = { error: 'fromToken, toToken, and either amount or amountUsd are required.' }
           } else if (!walletAddress || !isAddress(walletAddress)) {
             // 0x requires a taker address, which is the connected wallet — without one
             // the quote 400s with a cryptic validation error the model then misreads.
