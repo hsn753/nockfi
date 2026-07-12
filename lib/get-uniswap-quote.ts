@@ -191,6 +191,13 @@ export async function fetchUniswapStockQuote(params: {
     ['uint8', 'uint8', 'uint8'],
     [ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE_ALL, ACTION_TAKE_ALL],
   )
+  // Robinhood Chain's Universal Router is a verified FORK of Uniswap's: its
+  // IV4Router.ExactInputSingleParams carries an extra `minHopPriceX36` field between
+  // amountOutMinimum and hookData (per-hop price floor; 0 disables the check — see the
+  // verified source on Blockscout at the router address). Encoding the standard
+  // five-field struct makes the router's calldata decoder revert instantly inside
+  // unlockCallback with no data — every stock trade failed this way until the field
+  // was added. amountOutMinimum already enforces slippage, so 0 is correct here.
   const swapParams = encodeAbiParameters(
     [{
       type: 'tuple',
@@ -199,10 +206,11 @@ export async function fetchUniswapStockQuote(params: {
         { type: 'bool', name: 'zeroForOne' },
         { type: 'uint128', name: 'amountIn' },
         { type: 'uint128', name: 'amountOutMinimum' },
+        { type: 'uint256', name: 'minHopPriceX36' },
         { type: 'bytes', name: 'hookData' },
       ],
     }],
-    [{ poolKey: best.key, zeroForOne: best.zeroForOne, amountIn, amountOutMinimum: minOut, hookData: '0x' }],
+    [{ poolKey: best.key, zeroForOne: best.zeroForOne, amountIn, amountOutMinimum: minOut, minHopPriceX36: BigInt(0), hookData: '0x' }],
   )
   const settleParams = encodeAbiParameters(
     [{ type: 'address' }, { type: 'uint256' }],
