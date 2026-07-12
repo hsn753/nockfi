@@ -10,6 +10,7 @@ import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
+import { getStockCollateralMarketData, getStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { fetchUniswapStockQuote } from '@/lib/get-uniswap-quote'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
@@ -105,6 +106,7 @@ When the user asks about stocks or tokenized equities (prices, what's available,
 - At least once per conversation, make the framing clear: a stock token tracks the stock's price but is NOT share ownership — no dividends, no voting rights. It trades on-chain 24/7, including when the real market is closed, so its price can drift from the official close.
 - To buy or sell: resolve the OFFICIAL contract address via get_stock_tokens (pass the symbol), then call get_swap_quote using that exact address as toToken (buying with USDG) or fromToken (selling), then propose_action with agent "stock" and the real quote numbers. Stock trades route through Uniswap directly and trade against USDG only. The first trade can take up to three wallet confirmations (two approvals, then the trade) — mention that when proposing. Same rules as swaps: never guess amounts, always quote fresh.
 - If a symbol isn't in the registry, say Robinhood doesn't issue that stock token — do not go looking for it among unverified tokens.
+- If the user asks about borrowing against a stock position, using stock as collateral, or a loan on their stocks: call get_stock_collateral_info and present the real markets (LLTV, live borrow APY, oracle price, available USDG) and their current position health if any. Be explicit about liquidation risk: if the stock's oracle price falls enough that debt exceeds collateralValue × LLTV, the collateral gets liquidated. Executing the borrow through Nock is not built yet — say so plainly; never call propose_action for a borrow.
 
 When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options or get_perps_info) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
@@ -253,6 +255,18 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         properties: {
           symbol: { type: 'string', description: 'Stock ticker to look up, e.g. TSLA. Omit for the full verified list.' },
         },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_collateral_info',
+      description: "Returns live Morpho lending markets on Robinhood Chain where an OFFICIAL stock token can be posted as collateral to borrow USDG — the market's max loan-to-value (LLTV), live borrow APY, the oracle price liquidations use, and available USDG liquidity. If a wallet is connected, also returns the user's current borrow positions with collateral value, debt, LTV utilization, and liquidation price. Markets are discovered on-chain and gated to the verified stock registry, so impersonator-token markets never appear. Call this when the user asks about borrowing against a stock position, using stock as collateral, margin/loans on their stocks, or their existing borrow position health. Borrowing execution is not wired yet — present the data and say proposing the borrow itself is coming; never call propose_action for a borrow.",
+      parameters: {
+        type: 'object',
+        properties: {},
         required: [],
       },
     },
@@ -1011,6 +1025,26 @@ export async function POST(request: Request) {
           } catch (err) {
             console.error('[robin] get_stock_tokens error:', err)
             result = { error: 'Could not load the verified stock token registry. Try again in a moment.' }
+          }
+
+        } else if (functionName === 'get_stock_collateral_info') {
+          try {
+            const [markets, positions] = await Promise.all([
+              getStockCollateralMarketData(),
+              walletAddress && isAddress(walletAddress)
+                ? getStockBorrowPositions(walletAddress).catch(() => [])
+                : Promise.resolve([]),
+            ])
+            result = markets.length === 0
+              ? { markets: [], note: 'No Morpho market currently accepts an official stock token as collateral. Say so plainly — do not invent borrowing options.' }
+              : {
+                  markets,
+                  userPositions: positions,
+                  note: 'Live on-chain Morpho markets where an OFFICIAL stock token is the collateral and USDG is borrowed. oraclePriceUsd is the price liquidations use (can differ slightly from the DEX trading price). lltvPct is the hard ceiling: debt above collateralValue × LLTV is liquidatable. Executing a borrow through Nock is not wired yet — present the data honestly and say the borrow action itself is coming soon; never call propose_action for a borrow.',
+                }
+          } catch (err) {
+            console.error('[robin] get_stock_collateral_info error:', err)
+            result = { error: 'Could not load stock collateral markets from the chain. Try again in a moment.' }
           }
 
         } else if (functionName === 'get_perps_info') {
