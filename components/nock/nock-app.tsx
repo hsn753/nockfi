@@ -246,9 +246,40 @@ export function NockApp() {
     setDrawerOpen(false)
   }, [])
 
+  // Always points at the CURRENT handleLoose — handleSend and handleLoose have
+  // different dependency arrays, so a direct closure capture could go stale (the exact
+  // failure mode behind two earlier wallet bugs in this file). Assigned right after
+  // handleLoose's declaration below.
+  const handleLooseRef = useRef<((actionId: string) => Promise<void>) | null>(null)
+
   const handleSend = useCallback(
     async (text: string) => {
       const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
+
+      // "Draw. Loose." is the product's own language, so users reasonably TYPE those
+      // words instead of clicking the card buttons — confirmed live: a user typed
+      // "Loose" to confirm a withdrawal, the text went to the AI instead of executing
+      // anything, and the model then claimed the withdrawal succeeded when nothing had
+      // happened on-chain at all. Typing the command now does exactly what clicking
+      // the button does, on the most recent still-actionable card.
+      const command = text.trim().toLowerCase().replace(/[.!]+$/, '')
+      if (command === 'loose' || command === 'draw' || command === 'loose it' || command === 'draw it') {
+        const lastActionable = [...messages].reverse().find(
+          (m): m is Extract<ChatMessage, { role: 'robin' }> =>
+            m.role === 'robin' && !!m.action && (m.action.status === 'pending' || m.action.status === 'reviewing'),
+        )
+        if (lastActionable?.action) {
+          setMessages((prev) => [...prev, userMsg])
+          if (command.startsWith('loose')) {
+            void handleLooseRef.current?.(lastActionable.action.id)
+          } else {
+            handleDraw(lastActionable.action.id)
+          }
+          return
+        }
+        // No actionable card — fall through to the AI, which is instructed to explain
+        // there's nothing pending rather than invent an outcome.
+      }
 
       // Privy takes a moment to restore the session after a page load/refresh — sending
       // a message in that brief window meant walletAddress was still undefined, which
@@ -696,6 +727,8 @@ export function NockApp() {
       }, 1200)
     }
   }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress])
+
+  handleLooseRef.current = handleLoose
 
   const handleNewChat = useCallback(() => {
     setMessages([])
