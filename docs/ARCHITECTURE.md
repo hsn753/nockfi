@@ -175,6 +175,11 @@ Client (`components/nock/nock-app.tsx`):
   can produce. Official SDKs are Python/Go only; community TS SDKs are unaudited.
   Revisit if Lighter ships an official TS SDK (`elliottech/lighter-python` issue #49)
   or publishes deposit-contract docs.
+- **Stock token trading blocked by 0x**: the 0x quote API returns
+  `BUY_TOKEN_NOT_AUTHORIZED_FOR_TRADE` ("not authorized for trade due to legal
+  restrictions") for Robinhood's tokenized equities. Registry, prices, and holdings all
+  work; trading needs a different route (direct Uniswap integration is the candidate —
+  the pools are permissionless and liquid).
 - **Morpho's GraphQL API doesn't index Robinhood Chain** — all Morpho data must come
   from direct RPC reads (which is what we do).
 

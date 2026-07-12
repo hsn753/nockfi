@@ -143,10 +143,20 @@ export async function fetchSwapQuote({
   }
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { reason?: string; validationErrors?: { reason: string }[] }
+    const body = await res.json().catch(() => ({})) as { name?: string; message?: string; reason?: string; validationErrors?: { reason: string }[] }
     console.error('[get-swap-quote] 0x API non-OK response:', res.status, JSON.stringify(body))
+    // 0x blocks securities-like tokens (Robinhood's tokenized stocks among them) at
+    // the API level for legal reasons — surface that plainly so the user hears the
+    // real cause, not a generic failure that reads like a bug or a balance problem.
+    if (body?.name === 'BUY_TOKEN_NOT_AUTHORIZED_FOR_TRADE' || body?.name === 'SELL_TOKEN_NOT_AUTHORIZED_FOR_TRADE') {
+      return {
+        ...baseResult(fromToken, toToken, amount),
+        error: 'The swap routing provider (0x) does not permit trading this token through its API for legal/regulatory reasons — this applies to tokenized stocks. This is a restriction on their side, not a balance or liquidity problem. Tell the user plainly that stock token trading is not available through Nock right now, though prices and holdings remain fully viewable.',
+      }
+    }
     const message =
       body?.validationErrors?.[0]?.reason ??
+      body?.message ??
       body?.reason ??
       `0x API returned ${res.status}`
     return { ...baseResult(fromToken, toToken, amount), error: message }
