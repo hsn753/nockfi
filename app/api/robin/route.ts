@@ -7,6 +7,7 @@ import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
+import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
@@ -100,12 +101,20 @@ When the user wants to swap, trade, buy, or sell any token:
 When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options or get_perps_info) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
 
-When the user asks to actually deposit into the yield vault:
-1. If you haven't already shown them get_yield_options data this conversation, call it first so the conversation is grounded in the real current vault.
-2. If they haven't given a specific USDG amount, ask for one before doing anything else. Never guess or default an amount.
-3. Call get_yield_deposit_quote with that amount. This checks live on-chain whether the vault is actually accepting a deposit of this size for this wallet right now.
-4. If it returns an error, that means deposits are currently closed for this wallet — relay its message to the user plainly and honestly, and do NOT call propose_action. This is a real, current on-chain condition, not a bug or a missing feature — say so rather than implying something is broken.
-5. If it returns a real transaction, call propose_action for the yield agent using the real numbers from the quote (amount, sharesPreview, vaultSymbol) — never invented ones.
+When the user wants to actually earn yield / lend / deposit USDG:
+1. If you haven't already shown them get_yield_options data this conversation, call it first — it returns the live Morpho lending markets (USDe, syrupUSDG, spUSDG) with real current APYs, plus the (currently closed) Steakhouse vault.
+2. If they haven't given a specific USDG amount, ask for one. If they haven't picked a market, show them the live options and let them choose — you may point out which currently has the highest APY, but be honest that higher APY usually reflects higher utilization (harder to withdraw quickly) and different collateral risk. Never pick silently for them.
+3. Call get_yield_deposit_quote with the amount AND the market they chose.
+4. If it returns an error, relay it plainly and do NOT call propose_action.
+5. If it returns a real transaction, call propose_action for the yield agent using the real numbers from the quote (amount, market, supplyApyPct) — never invented ones. In the detail text, note this lends directly into one Morpho market (the same markets Robinhood Earn uses) and that withdrawals depend on the market having idle liquidity at that moment.
+
+When the user asks about their yield/lending positions or earnings: call get_yield_positions and present what it returns — real on-chain positions with accrued interest included. If they have none, say so plainly.
+
+When the user wants to withdraw supplied USDG:
+1. Call get_yield_positions first if you haven't this conversation, so you know what they actually have.
+2. If they haven't given a specific amount and market, ask (or offer their full position amount for the market they name).
+3. Call get_yield_withdraw_quote with the amount and market. If it errors (no position, amount too large, or the market lacks idle liquidity right now), relay the real reason plainly — the liquidity case is a real, temporary market condition, not a bug.
+4. If it returns a real transaction, call propose_action for the yield agent with the real numbers.
 
 When the user asks to actually open a perps position: call get_perps_info to show them the real current market data (mark price, funding, open interest, max leverage), then tell them plainly that opening a position isn't executable through Nock yet — this is real, live market data from Lighter for informational purposes only right now. Never call propose_action for the perps agent under any circumstances yet, even if they explicitly ask to open a position — there is no real order-placement flow behind it yet.
 
@@ -187,13 +196,37 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_yield_deposit_quote',
-      description: 'Checks live on-chain whether the Steakhouse USDG vault is currently accepting a deposit of this size for the connected wallet, and if so, builds the real deposit transaction (with a real shares-received preview). Deposits may currently be closed to direct wallet interaction — if so this returns a clear error explaining that, and you must not call propose_action. Only call this once the user has given you a specific USDG amount to deposit; never guess or default one.',
+      description: 'Builds a real USDG lending transaction. Pass market (USDe, syrupUSDG, or spUSDG) to lend directly into that Morpho market — permissionless, works for any wallet, earns the live rate shown by get_yield_options. Omit market to try the Steakhouse vault instead (currently closed to direct deposits — that path returns an error explaining so). Only call this once the user has given a specific USDG amount AND picked a market; never guess or default either.',
       parameters: {
         type: 'object',
         properties: {
-          amount: { type: 'string', description: 'Human-readable USDG amount to deposit, e.g. "100"' },
+          amount: { type: 'string', description: 'Human-readable USDG amount to lend, e.g. "100"' },
+          market: { type: 'string', enum: ['USDe', 'syrupUSDG', 'spUSDG'], description: 'Which Morpho market to lend into. Omit only to attempt the (currently closed) Steakhouse vault.' },
         },
         required: ['amount'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_yield_positions',
+      description: "Returns the user's real, current USDG lending positions across the Morpho markets (how much they have supplied and to which market), read live on-chain. Call this whenever the user asks what they're earning, their yield positions, or how much they have lent out. Also call it before quoting a withdrawal.",
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_yield_withdraw_quote',
+      description: "Builds a real withdrawal transaction for USDG the user has supplied to a Morpho market. Checks live on-chain that the user actually has that much supplied AND that the market has enough idle liquidity to withdraw right now (high-utilization markets may not — the error will say the real available amount). Only call this once the user has given a specific USDG amount and market; never guess or default either.",
+      parameters: {
+        type: 'object',
+        properties: {
+          amount: { type: 'string', description: 'Human-readable USDG amount to withdraw, e.g. "50"' },
+          market: { type: 'string', enum: ['USDe', 'syrupUSDG', 'spUSDG'], description: 'Which Morpho market to withdraw from.' },
+        },
+        required: ['amount', 'market'],
       },
     },
   },
@@ -374,7 +407,11 @@ export async function POST(request: Request) {
     let action: ActionPreview | undefined
     let responseText = ''
     let lastSwapQuote: any = null
-    let lastYieldQuote: Awaited<ReturnType<typeof buildYieldDeposit>> | null = null
+    let lastYieldQuote:
+      | Awaited<ReturnType<typeof buildYieldDeposit>>
+      | Awaited<ReturnType<typeof buildMarketSupply>>
+      | Awaited<ReturnType<typeof buildMarketWithdraw>>
+      | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
     // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
@@ -462,7 +499,7 @@ export async function POST(request: Request) {
             result = {
               error: lastYieldQuote && 'error' in lastYieldQuote
                 ? lastYieldQuote.error
-                : 'No live deposit quote available. Call get_yield_deposit_quote with a specific USDG amount first, then call propose_action again with its real numbers.',
+                : 'No live quote available. Call get_yield_deposit_quote (or get_yield_withdraw_quote) with a specific USDG amount and market first, then call propose_action again with its real numbers.',
             }
           } else if (mismatchedTokenWord) {
             result = {
@@ -497,8 +534,12 @@ export async function POST(request: Request) {
             // card to the user, not just at execution time — matches the doc's "Vault
             // Agent confirms the action falls inside your set limits" happening as part
             // of the preview step, not after.
+            // Withdrawals are exempt: they bring the user's own money BACK to their
+            // wallet — a $1 spend limit must never be able to trap a $100 position.
+            const isWithdrawal =
+              input.agent === 'yield' && lastYieldQuote && 'direction' in lastYieldQuote && lastYieldQuote.direction === 'withdraw'
             let guardrailViolation: string | undefined
-            if ((input.agent === 'swap' || input.agent === 'yield') && walletAddress) {
+            if ((input.agent === 'swap' || input.agent === 'yield') && !isWithdrawal && walletAddress) {
               const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
               if (!isNaN(outcomeValueNum)) {
                 const wallet = await getWalletByAddress(walletAddress)
@@ -535,11 +576,16 @@ export async function POST(request: Request) {
               ...(input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote ? {
                 transactionData: lastYieldQuote.transaction,
                 fromToken: 'USDG',
-                toToken: lastYieldQuote.vaultSymbol,
+                toToken: 'vaultSymbol' in lastYieldQuote
+                  ? lastYieldQuote.vaultSymbol
+                  : `${lastYieldQuote.market} market`,
                 amount: lastYieldQuote.amount,
                 verified: true,
                 sellTokenAddress: lastYieldQuote.assetAddress,
                 sellTokenDecimals: lastYieldQuote.assetDecimals,
+                // 'withdraw' makes handleLoose skip the sell-token balance/approval
+                // pre-flight — nothing leaves the wallet on a withdrawal.
+                direction: 'direction' in lastYieldQuote ? lastYieldQuote.direction : 'supply',
               } : {}),
             } as any
             result = { status: 'preview_ready' }
@@ -658,10 +704,15 @@ export async function POST(request: Request) {
 
         } else if (functionName === 'get_yield_options') {
           try {
-            const vaults = await getYieldOptions()
+            const [vaults, markets] = await Promise.all([
+              getYieldOptions().catch(() => []),
+              getMorphoMarketData(),
+            ])
             result = {
-              vaults,
-              note: 'Real on-chain vault data (TVL from live totalAssets(), APY derived from real recorded share-price history — null if not enough history has been collected yet, never a guessed number). If the user wants to actually deposit, get a specific USDG amount from them and call get_yield_deposit_quote next — deposits may or may not currently be open, that tool checks live on-chain.',
+              vault: vaults[0] ?? null,
+              vaultNote: 'The Steakhouse USDG vault (Robinhood Earn) — real live data, but currently closed to direct deposits from external wallets.',
+              markets,
+              marketsNote: 'Real, live Morpho lending markets — the exact same three markets the Robinhood Earn vault itself lends into (confirmed on-chain), but open to any wallet permissionlessly. supplyApyPct is derived live from the on-chain interest rate model, never guessed. Lending here is direct: the user picks ONE market (unlike the vault, where a curator spreads across all three), and withdrawals are capped by availableLiquidityUsd at any given moment. Present APY, collateral type, and that liquidity caveat honestly.',
             }
           } catch (err) {
             console.error('[robin] get_yield_options error:', err)
@@ -669,7 +720,7 @@ export async function POST(request: Request) {
           }
 
         } else if (functionName === 'get_yield_deposit_quote') {
-          const { amount } = functionArgs as { amount?: string }
+          const { amount, market } = functionArgs as { amount?: string; market?: string }
 
           // Same hard backstop as get_swap_quote above — never let the model default or
           // guess a deposit amount, this is real money.
@@ -685,14 +736,64 @@ export async function POST(request: Request) {
             result = { error: 'amount is required.' }
           } else if (!walletAddress || !isAddress(walletAddress)) {
             result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else if (market && !(market in MORPHO_MARKETS)) {
+            result = { error: `Unknown market "${market}". Valid markets: ${Object.keys(MORPHO_MARKETS).join(', ')}.` }
           } else {
             try {
-              const quote = await buildYieldDeposit(walletAddress, amount)
+              const quote = market
+                ? await buildMarketSupply(walletAddress, amount, market as MorphoMarketKey)
+                : await buildYieldDeposit(walletAddress, amount)
               lastYieldQuote = quote
               result = quote
             } catch (err) {
               console.error('[robin] get_yield_deposit_quote error:', err)
               result = { error: 'Could not read live deposit availability from the chain. Try again in a moment.' }
+            }
+          }
+
+        } else if (functionName === 'get_yield_positions') {
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else {
+            try {
+              const positions = await getUserMarketPositions(walletAddress)
+              result = {
+                positions,
+                note: positions.length === 0
+                  ? 'This wallet has no USDG supplied to any Morpho market right now.'
+                  : 'Real on-chain lending positions, read live. suppliedUsd already includes accrued interest.',
+              }
+            } catch (err) {
+              console.error('[robin] get_yield_positions error:', err)
+              result = { error: 'Could not read lending positions from the chain. Try again in a moment.' }
+            }
+          }
+
+        } else if (functionName === 'get_yield_withdraw_quote') {
+          const { amount, market } = functionArgs as { amount?: string; market?: string }
+
+          const hasUserSpecifiedAmount = messages.some(
+            (m) => m.role === 'user' && /\d/.test(m.text.replace(/0x[a-fA-F0-9]{40}/g, '')),
+          )
+
+          if (!hasUserSpecifiedAmount) {
+            result = {
+              error: 'The user has not specified a withdrawal amount anywhere in this conversation. Do not guess or default to any amount — ask the user exactly how much USDG they want to withdraw, then call this tool again once they answer with a specific number.',
+            }
+          } else if (!amount || !market) {
+            result = { error: 'amount and market are both required.' }
+          } else if (!(market in MORPHO_MARKETS)) {
+            result = { error: `Unknown market "${market}". Valid markets: ${Object.keys(MORPHO_MARKETS).join(', ')}.` }
+          } else if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else {
+            try {
+              const quote = await buildMarketWithdraw(walletAddress, amount, market as MorphoMarketKey)
+              lastYieldQuote = quote
+              result = quote
+            } catch (err) {
+              console.error('[robin] get_yield_withdraw_quote error:', err)
+              result = { error: 'Could not build a withdrawal quote from the chain. Try again in a moment.' }
             }
           }
 

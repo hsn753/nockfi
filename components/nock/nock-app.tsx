@@ -386,11 +386,28 @@ export function NockApp() {
         const sellTokenAddress = (action as any).sellTokenAddress as string | undefined
         const sellTokenDecimals = (action as any).sellTokenDecimals as number | undefined
 
+        // A yield withdrawal brings USDG back INTO the wallet — nothing is sold or
+        // approved, so the sell-token balance/approval pre-flight below must be skipped
+        // (a wallet with a 0 USDG balance can still have a large supplied position to
+        // withdraw). Gas is still checked.
+        const isWithdrawal = action.agent === 'yield' && (action as any).direction === 'withdraw'
+
         if (!txData) {
           throw new Error('No transaction data in action')
         }
         if (!sellTokenAddress || sellTokenDecimals === undefined) {
           throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
+        }
+
+        // The Privy session policy that constrains delegated (instant-swap) execution
+        // only allows transactions to the 0x swap router — a Morpho lend/withdraw would
+        // be rejected server-side by Privy. Decline honestly up front rather than
+        // letting the user watch a doomed attempt. (Expanding the policy safely —
+        // especially constraining the withdraw receiver — is its own follow-up.)
+        if (action.agent === 'yield' && isUsingDelegatedWallet) {
+          throw new Error(
+            'Yield lending needs your connected external wallet — the instant-swap wallet is currently only authorized for swaps. Connect your main wallet and try again.',
+          )
         }
 
         // The wallet that will actually sign is always the connected wallet — the same
@@ -406,7 +423,16 @@ export function NockApp() {
         // only covered the verified list (which silently skipped this whole check for any
         // memecoin/unverified token). Without this, a wallet that can't cover the
         // transaction tends to hang and time out instead of failing cleanly.
-        if (publicClient && signerAddress) {
+        if (publicClient && signerAddress && isWithdrawal) {
+          // Withdrawal: only gas needs covering — the USDG comes back to the wallet.
+          const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
+          const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
+          if (ethBalance < gasCost) {
+            throw new Error(
+              `Not enough ETH for gas. This withdrawal needs about ${formatUnits(gasCost, 18)} ETH for gas, but this wallet has ${formatUnits(ethBalance, 18)} ETH on Robinhood Chain.`,
+            )
+          }
+        } else if (publicClient && signerAddress) {
           const isNativeEth = sellTokenAddress.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()
           const requiredAmount = parseUnits(fromAmount, sellTokenDecimals)
           const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
@@ -443,7 +469,7 @@ export function NockApp() {
           throw new Error('Not connected to Robinhood Chain — refresh and try again.')
         }
 
-        console.log(action.agent === 'yield' ? 'Executing real deposit transaction...' : 'Executing real swap transaction...')
+        console.log(action.agent === 'yield' ? (isWithdrawal ? 'Executing real withdrawal transaction...' : 'Executing real deposit transaction...') : 'Executing real swap transaction...')
         const result = isUsingDelegatedWallet
           ? await (async () => {
               const res = await fetch('/api/execute-delegated-swap', {
@@ -481,7 +507,10 @@ export function NockApp() {
               return executeSwap({
                 walletClient: freshWalletClient,
                 publicClient,
-                amount: fromAmount,
+                // A withdrawal transfers nothing FROM the wallet, so no approval is
+                // needed — amount '0' makes executeSwap's allowance check a no-op
+                // (allowance >= 0 always) without touching its signature.
+                amount: isWithdrawal ? '0' : fromAmount,
                 sellTokenAddress,
                 sellTokenDecimals,
                 transaction: txData,
@@ -550,7 +579,7 @@ export function NockApp() {
           throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}) — nothing was swapped, only gas was spent.`)
         }
 
-        console.log(action.agent === 'yield' ? 'Deposit executed! TX Hash:' : 'Swap executed! TX Hash:', result.txHash)
+        console.log(action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal executed! TX Hash:' : 'Deposit executed! TX Hash:') : 'Swap executed! TX Hash:', result.txHash)
 
         // Update UI with success
         setMessages((prev) => {
@@ -564,7 +593,7 @@ export function NockApp() {
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Done! ${action.agent === 'yield' ? 'Deposit' : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
+            text: `Done! ${action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal' : 'Deposit') : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
           const newPosition: Position = {
@@ -593,7 +622,7 @@ export function NockApp() {
         // ask the chain for the real number.
         fetchPortfolioValue()
       } catch (error) {
-        const actionNoun = action.agent === 'yield' ? 'Deposit' : 'Swap'
+        const actionNoun = action.agent === 'yield' ? ((action as any).direction === 'withdraw' ? 'Withdrawal' : 'Deposit') : 'Swap'
         console.error(`${actionNoun} execution failed:`, error)
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
         const isTimeout = /timeout/i.test(rawMessage)
