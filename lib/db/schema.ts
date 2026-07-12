@@ -43,7 +43,7 @@ export const messages = pgTable('messages', {
 
 // The audit-trail core. broadcastStatus (what the client/delegated execution call
 // itself reported) and verifyStatus (what /api/verify-tx's independent RPC check
-// found) are kept as two separate columns deliberately — this session had two
+// found) are kept as two separate columns deliberately — we hit two
 // confirmed bugs where those disagreed (a claimed success and a claimed revert, both
 // for transactions that never actually existed on-chain). Collapsing them into one
 // status column would erase exactly the discrepancy that mattered for diagnosing it.

@@ -35,7 +35,7 @@ export async function executeSwap({
     // already be approved to pull the sell token — unlike native ETH, which is wrapped
     // inline and needs no approval. Without this, the swap transaction reverts on-chain,
     // or a wallet's own pre-flight simulation refuses to let the user sign it at all
-    // (confirmed in production: a NOCK sale with plenty of ETH for gas showed a disabled
+    // (Seen in prod: a NOCK sale with plenty of ETH for gas showed a disabled
     // "Deposit ETH" button, because the wallet couldn't simulate a transferFrom with zero
     // allowance). Only approve the exact amount being sold, not unlimited, matching the
     // least-privilege approach used everywhere else in this app.

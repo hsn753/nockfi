@@ -130,17 +130,17 @@ If the user asks about anything NOT related to crypto, DeFi, trading, or blockch
 - Say: "I'm here to help with your crypto and DeFi needs. I can help you swap tokens, check your holdings, find yield opportunities, or manage positions. What would you like to do?"
 - Do not answer general knowledge questions, current events, or anything outside of crypto/DeFi.
 
-CRITICAL — you cannot execute anything, ever. The ONLY way any action executes is the user clicking the Loose button on the preview card in the app. Rules that follow from this, non-negotiable:
+CRITICAL — you cannot execute anything, ever. The ONLY way any action executes is the user pressing the Confirm button on the preview card in the app. Rules that follow from this, non-negotiable:
 - NEVER say an action was executed, completed, confirmed, withdrawn, deposited, or successful. The app itself posts the confirmation message (it starts with "Done!" and includes a real TX hash) after a genuine execution — that message is the only valid evidence something ran. If no such message exists in this conversation, the action HAS NOT RUN, no matter what was said.
-- If the user types "loose", "draw", "confirm", "proceed", "yes do it" or similar after you've proposed an action: do NOT re-propose, do NOT claim anything ran. Tell them to press the Loose button on the action card above to execute (or Draw to review). One sentence.
-- Never answer a question about current balances or positions from memory of earlier in the conversation — always call get_wallet_holdings or get_yield_positions again. A proposed action that was never Loosed changed NOTHING on-chain.
+- If the user types "confirm", "proceed", "yes do it" or similar after you've proposed an action: do NOT re-propose, do NOT claim anything ran. Tell them to press the Confirm button on the action card above to execute (or Review to check the details first). One sentence.
+- Never answer a question about current balances or positions from memory of earlier in the conversation — always call get_wallet_holdings or get_yield_positions again. A proposed action that was never confirmed changed NOTHING on-chain.
 
 Rules:
 - Keep all copy human, in sentence case.
 - Never use em dashes.
 - Never use markdown — no **bold**, no bullet dashes, no headers. The chat renders your text as plain text, so markdown syntax shows up as literal asterisks and dashes. Write plain sentences, and use "X: Y, Z: W" style lists inline if you need to enumerate a few things.
 - Never invent balances, prices, or protocol names. Only use data from tool calls.
-- Never say you will execute or confirm anything. You only preview. The user clicks Draw to review and Loose to execute.
+- Never say you will execute anything yourself. You only preview. The user presses Review to check an action and Confirm to execute it.
 - Be warm and direct. Get to the point fast.
 - Stay strictly on topic: crypto, DeFi, and on-chain actions only.`
 }
@@ -392,7 +392,7 @@ export async function POST(request: Request) {
     }
 
     // Always the connected wallet — the same one every balance check and the pre-flight/
-    // execution check on the client use. Confirmed live: quoting against a delegated
+    // execution check on the client use. Seen in prod: quoting against a delegated
     // wallet just because one existed on the account (independent of whether that's
     // actually the wallet the user is using) produced a quote for a wallet with a
     // completely different balance than the one just shown in holdings — "swap your
@@ -422,7 +422,7 @@ export async function POST(request: Request) {
     // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
     // to fetch real numbers, then propose_action to build the preview card from them.
     // A single non-looped round (the previous implementation) meant propose_action was
-    // never reachable after a data-fetching tool call, so no Draw/Loose card ever appeared.
+    // never reachable after a data-fetching tool call, so no action card ever appeared.
     for (let round = 0; round < 6; round++) {
       const response = await getOpenAI().chat.completions.create({
         model: 'gpt-4o-mini',
@@ -476,7 +476,7 @@ export async function POST(request: Request) {
           // history, which looks identical but has no transaction to actually execute.
           const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')
 
-          // Confirmed in production: the model can silently substitute a different token
+          // Seen in prod: the model can silently substitute a different token
           // than what the user asked for (user said "swap to NOCK", model quietly built a
           // preview for USDG instead, since it had suggested USDG as a fallback earlier in
           // the conversation) — with no error, no confirmation, nothing to catch in a
@@ -670,7 +670,7 @@ export async function POST(request: Request) {
         } else if (functionName === 'get_swap_quote') {
           const { fromToken, toToken, amount } = functionArgs
 
-          // Confirmed in production: despite the prompt explicitly saying to ask for an
+          // Seen in prod: despite the prompt explicitly saying to ask for an
           // amount before calling this tool, the model sometimes calls it anyway with a
           // fabricated amount (e.g. defaulting to "100 USDG") when the user never gave
           // one — occasionally producing a real 0x API error, and always a quote for a
@@ -885,7 +885,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // Deterministic card synthesis — confirmed live that the model sometimes builds a
+    // Deterministic card synthesis — in practice the model sometimes builds a
     // real yield quote (get_yield_deposit_quote / get_yield_withdraw_quote succeeded,
     // a genuine transaction exists) but then never calls propose_action, leaving the
     // user with no card to execute and no way to move their money. Those quote tools
@@ -942,17 +942,17 @@ export async function POST(request: Request) {
             direction: q.direction,
           } as object),
         } as any
-        responseText = `Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Loose on the card to execute it, or Draw to review first.`
+        responseText = `Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
       }
     }
 
-    // Hard backstop, not a prompt instruction — confirmed live TWICE that the prompt
+    // Hard backstop, not a prompt instruction — Seen twice in prod: the prompt
     // rule alone doesn't hold: the model claimed "the withdrawal has been executed
     // successfully" for an execution that never happened on-chain (once after the user
     // typed "Loose" as text, again after "yes proceed"), and separately claimed an
     // action was "ready for review" without ever calling propose_action (so no card
     // existed to execute). This server never executes anything — the ONLY execution
-    // path is the client's Loose button, and the client posts its own "Done! ... TX"
+    // path is the client's Confirm button, and the client posts its own "Done! ... TX"
     // message afterward. Therefore any model text claiming an execution outcome is
     // false by construction at the moment it's generated, and can be replaced
     // unconditionally.
@@ -963,11 +963,11 @@ export async function POST(request: Request) {
     const claimsCardExists =
       !action &&
       /(action|withdrawal|swap|deposit|lending).{0,60}ready (for|to)/i.test(responseText) &&
-      /\b(draw|loose)\b/i.test(responseText)
+      /\b(draw|loose|review|confirm)\b/i.test(responseText)
 
     if (claimsExecution) {
       responseText =
-        "Nothing has been executed — I can only preview actions, never run them. If there's an action card above, press its Loose button (or type \"loose\") to execute it. To see what actually happened, ask me for your holdings or yield positions and I'll check the chain."
+        "Nothing has been executed — I can only preview actions, never run them. If there's an action card above, press its Confirm button (or type \"confirm\") to execute it. To see what actually happened, ask me for your holdings or yield positions and I'll check the chain."
     } else if (claimsCardExists) {
       responseText =
         "I wasn't able to prepare that action correctly — no preview card was actually created, so there's nothing to confirm yet. Ask me again (for example: \"withdraw 5 USDG from the syrupUSDG market\") and I'll build a fresh preview."

@@ -89,7 +89,7 @@ function buildBalanceResults(ethRaw: any, erc20Results: any[], prices: Record<st
 // anything the user holds that this app doesn't otherwise watch. get_wallet_holdings only
 // ever checks the fixed list, so a real balance of an unlisted token (including one the user
 // swapped into through this app) would otherwise never show up, and the model would have no
-// real data to answer with — confirmed in production this led to the model just asserting
+// real data to answer with — seen in prod this led to the model just asserting
 // "0" with no tool call behind it, for a token the user's own wallet history proved they held.
 export async function fetchArbitraryTokenBalance(
   walletAddress: `0x${string}`,

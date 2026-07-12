@@ -149,7 +149,7 @@ export function SettingsView() {
             </h2>
             <div className="mt-1">
               <Toggle
-                label="Auto-loose safe actions"
+                label="Auto-confirm safe actions"
                 desc="Let Robin execute low-risk actions without confirmation"
               />
               <Toggle
@@ -329,7 +329,7 @@ function InstantSwapsSection() {
   ) as { address: string; delegated: boolean; id?: string } | undefined
 
   // identityToken fetched fresh here (not from the reactive useIdentityToken() hook,
-  // confirmed live to not reliably reflect a usable token for an already-connected
+  // known to not reliably reflect a usable token for an already-connected
   // session) rather than cached.
   const logEvent = async (eventType: DelegatedWalletEventType) => {
     if (!ownerWalletAddress || !embeddedWallet?.id) return

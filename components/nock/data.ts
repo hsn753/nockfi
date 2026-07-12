@@ -88,7 +88,7 @@ export type ActionPreview = {
   detail: string
   metrics: { label: string; value: string; positive?: boolean }[]
   status: 'pending' | 'confirming' | 'executed' | 'reviewing'
-  // Used to build the resulting active position and activity row on loose.
+  // Used to build the resulting active position and activity row once confirmed.
   outcome: {
     title: string
     value: string

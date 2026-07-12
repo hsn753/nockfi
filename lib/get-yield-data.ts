@@ -8,7 +8,7 @@ import { recordSnapshot, computeApy } from './db/vault-snapshots'
 // directly via eth_getCode (real bytecode) and asset() (returns our own already-verified
 // USDG address 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168) — not assumed from docs.
 // Morpho's public GraphQL API (api.morpho.org/graphql) does not index Robinhood Chain
-// yet (confirmed live: a direct vaultByAddress lookup for this exact vault returns
+// yet (Seen in prod: a direct vaultByAddress lookup for this exact vault returns
 // NOT_FOUND), so this reads the vault's real state directly on-chain instead.
 export const STEAKHOUSE_USDG_VAULT = '0xBeEff033F34C046626B8D0A041844C5d1A5409dd' as const
 
@@ -95,7 +95,7 @@ export type YieldDepositQuote = {
 const DEPOSIT_GAS_LIMIT = '300000'
 
 // Checks live on-chain whether this vault is actually accepting a deposit of this
-// size for this receiver (maxDeposit) before building anything — confirmed live that
+// size for this receiver (maxDeposit) before building anything — in practice
 // maxDeposit() currently returns 0 for every address tested, meaning Robinhood's real
 // Earn product likely gates deposits through its own app rather than the raw vault
 // contract. Returns an honest error in that case rather than a transaction that would

@@ -82,7 +82,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
               strokeWidth={1.75}
             />
             <p className="leading-relaxed">
-              Reviewed. Funds stay in your wallet until you loose the action.
+              Reviewed. Funds stay in your wallet until you confirm the action.
               You can withdraw at any time with no lockup.
             </p>
           </div>
@@ -92,7 +92,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
         {executed ? (
           <div className="mt-4 flex items-center gap-2 text-sm font-medium text-primary">
             <Check className="size-4" strokeWidth={2.5} />
-            Loosed. Moved to active positions.
+            Confirmed. Moved to active positions.
           </div>
         ) : (
           <div className="mt-4 flex gap-2.5">
@@ -102,7 +102,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
               onClick={() => onDraw(action.id)}
               className="flex-1 rounded-xl border border-border bg-secondary/60 py-3 text-sm font-semibold text-foreground transition-colors hover:bg-secondary disabled:opacity-50"
             >
-              Draw
+              Review
             </button>
             <button
               type="button"
@@ -113,10 +113,10 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
               {confirming ? (
                 <>
                   <Loader2 className="size-4 animate-spin" strokeWidth={2} />
-                  Loosing
+                  Confirming
                 </>
               ) : (
-                'Loose'
+                'Confirm'
               )}
             </button>
           </div>

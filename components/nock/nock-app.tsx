@@ -55,7 +55,7 @@ export function NockApp() {
   // useWalletClient go through a bridge that, per Privy's own docs, does NOT update its
   // cached provider when the network is switched outside the dApp (e.g. directly in the
   // MetaMask extension UI, which is the normal way a user adds/activates a custom
-  // network). Confirmed in production: a wallet switched to Robinhood Chain natively in
+  // network). Seen in prod: a wallet switched to Robinhood Chain natively in
   // MetaMask still read as the wrong network here when checked through wagmi's hooks.
   const activeWallet = wallets[0]
   const walletChainId = activeWallet?.chainId ? Number(activeWallet.chainId.split(':')[1]) : undefined
@@ -93,7 +93,7 @@ export function NockApp() {
 
   // Only actually true instant-swap usage when the CONNECTED wallet is itself the
   // delegated one (e.g. an embedded-wallet-only login) — not just "a delegated wallet
-  // exists somewhere on this account." Confirmed live: a user with both a funded
+  // exists somewhere on this account." Seen in prod: a user with both a funded
   // external wallet and a separate, unfunded delegated wallet got "not enough USDG"
   // on a swap their connected wallet's balance plainly covered, because execution
   // silently preferred the delegated wallet as signer just because one existed,
@@ -256,14 +256,13 @@ export function NockApp() {
     async (text: string) => {
       const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
 
-      // "Draw. Loose." is the product's own language, so users reasonably TYPE those
-      // words instead of clicking the card buttons — confirmed live: a user typed
-      // "Loose" to confirm a withdrawal, the text went to the AI instead of executing
-      // anything, and the model then claimed the withdrawal succeeded when nothing had
-      // happened on-chain at all. Typing the command now does exactly what clicking
-      // the button does, on the most recent still-actionable card.
+      // Users type the button words instead of clicking — one production incident came
+      // from exactly that. Typed commands act on the most recent actionable card.
+      // "loose"/"draw" kept as aliases from the old button naming.
       const command = text.trim().toLowerCase().replace(/[.!]+$/, '')
-      const isLooseOrDraw = command === 'loose' || command === 'draw' || command === 'loose it' || command === 'draw it'
+      const confirmWords = ['confirm', 'confirm it', 'loose', 'loose it']
+      const reviewWords = ['review', 'review it', 'draw', 'draw it']
+      const isLooseOrDraw = confirmWords.includes(command) || reviewWords.includes(command)
       // Bare confirmations users actually typed in production trying to execute a
       // pending action ("yes proceed" fabricated an execution claim from the model,
       // twice). Deterministic local handling — never let an affirmative reach the AI
@@ -280,9 +279,9 @@ export function NockApp() {
         )
         if (lastActionable?.action) {
           setMessages((prev) => [...prev, userMsg])
-          if (command.startsWith('loose')) {
+          if (confirmWords.includes(command)) {
             void handleLooseRef.current?.(lastActionable.action.id)
-          } else if (command.startsWith('draw')) {
+          } else if (reviewWords.includes(command)) {
             handleDraw(lastActionable.action.id)
           } else {
             // Affirmative, but "yes" must never fire a real transaction on its own —
@@ -292,7 +291,7 @@ export function NockApp() {
               {
                 id: `${Date.now()}-confirm-hint`,
                 role: 'robin',
-                text: 'To execute it, press the Loose button on the action card above, or type "loose". I never run anything from a yes alone.',
+                text: 'To execute it, press the Confirm button on the action card above, or type "confirm". I never run anything from a yes alone.',
               },
             ])
           }
@@ -332,7 +331,7 @@ export function NockApp() {
         console.log('[Nock] Sending to API - wallet address:', walletAddress)
 
         // Fetched fresh right here rather than read from a cached hook value — the
-        // reactive useIdentityToken() hook was confirmed live to not reliably reflect a
+        // reactive useIdentityToken() hook was known to not reliably reflect a
         // usable token for an already-connected session, causing every authenticated
         // request to fail with "missing identity token" even right after a hard refresh.
         // getIdentityToken() is Privy's own async getter for exactly this use case.
@@ -378,7 +377,7 @@ export function NockApp() {
       }
     },
     // walletAddress must be a real dependency here, not swallowed by the broader
-    // suppression below — confirmed live this was the actual root cause of "sidebar
+    // suppression below — this was the actual root cause of "sidebar
     // clearly shows a connected wallet, but Robin says none is connected": this
     // callback's closure only got recreated when messages/privyReady changed, so it
     // could keep using a stale (undefined) walletAddress captured before the wallet
@@ -422,7 +421,7 @@ export function NockApp() {
     const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield'
     if (isRealExecutionAgent && (activeWallet || delegatedWallet)) {
       try {
-        // Fetched fresh (not from the reactive useIdentityToken() hook, confirmed live
+        // Fetched fresh (not from the reactive useIdentityToken() hook, verified against prod
         // to not reliably reflect a usable token for an already-connected session) and
         // reused for both requests below.
         const identityToken = await getIdentityToken()
@@ -571,7 +570,7 @@ export function NockApp() {
 
         // Phase 1 of the transaction audit trail — log this attempt regardless of
         // outcome, before verify-tx (below) fills in the real, independently-checked
-        // result. Awaited (not fire-and-forget) deliberately: confirmed live this was a
+        // result. Awaited (not fire-and-forget) deliberately: this was a
         // genuine race when unawaited — verify-tx's UPDATE could reach the database and
         // find no matching row yet (log-submission's INSERT hadn't landed), silently
         // updating zero rows and leaving verify_status permanently null even though the
@@ -593,7 +592,7 @@ export function NockApp() {
               // A withdrawal flows market -> wallet, the reverse of a deposit. Without
               // this swap the audit row is indistinguishable from a deposit — confirmed
               // live: a real on-chain withdraw() was logged looking exactly like a
-              // supply, and got misread as one during an incident review.
+              // supply, which is ambiguous when auditing.
               fromTokenSymbol: isWithdrawal ? (action as any).toToken : fromToken,
               fromTokenAddress: isWithdrawal ? undefined : sellTokenAddress,
               fromAmount,
@@ -611,7 +610,7 @@ export function NockApp() {
 
         // Independent server-side confirmation is the ONLY thing allowed to decide
         // success/revert/didn't-happen — never result.error or result.txHash's own
-        // internal receipt check alone. Confirmed live, twice: a wallet client's own
+        // internal receipt check alone. Seen twice in prod: a wallet client's own
         // receipt wait produced a false "reverted on-chain" conclusion (with a real-
         // looking hash) for a transaction that our own trusted RPC_URL-backed check, and
         // an independent public RPC, both say never existed at all — not reverted, not

@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 // Independent server-side confirmation that a transaction really landed on Robinhood
 // Chain, using RPC_URL (the same endpoint every other balance/quote check in this app
 // already relies on) rather than trusting whatever the browser's own wallet-client
-// reported. Confirmed in production: a delegated-wallet swap reported "Done! Swap
+// reported. Seen in prod: a delegated-wallet swap reported "Done! Swap
 // executed" with a txHash, but neither wallet involved ever incremented its nonce and
 // the hash doesn't exist on Robinhood Chain by any independent check (RPC, Blockscout).
 // The client-side receipt wait that produced that false success cannot be trusted alone
