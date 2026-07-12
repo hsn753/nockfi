@@ -93,6 +93,23 @@ export const vaultSnapshots = pgTable('vault_snapshots', {
   index('vault_snapshots_address_recorded_idx').on(t.vaultAddress, t.recordedAt),
 ])
 
+// The real, user-configurable half of Vault Agent's spend limit — an additional,
+// app-level ceiling checked in propose_action (app/api/robin/route.ts) before any
+// swap/yield action is ever proposed. This sits alongside, not instead of, the
+// hardcoded global 0.05 ETH Privy policy (app/api/admin/setup-session-policy/route.ts)
+// that already gates delegated execution server-side — that stays as the outer ceiling
+// for delegated swaps; this can only ever be a tighter, user-set restriction on top,
+// and is the first limit of any kind for external-wallet execution. One row per wallet;
+// no row (or a null limit) means unlimited — never a fabricated default.
+export const walletGuardrails = pgTable('wallet_guardrails', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  maxUsdPerTransaction: numeric('max_usd_per_transaction'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex('wallet_guardrails_wallet_idx').on(t.walletId),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {

@@ -64,16 +64,16 @@ export const agents: Agent[] = [
   {
     id: 'vault',
     name: 'Vault agent',
-    tagline: 'Automated multi-strategy vaults that rebalance for you.',
+    tagline: 'Sets and enforces your guardrails on every action.',
     description:
-      'The vault agent allocates across multiple strategies and rebalances as conditions change. Set a target risk level and the agent handles entries, exits, and harvesting so your capital stays productive.',
+      'The vault agent sets and enforces the guardrails behind every request: a spend limit you control, and automatic protections against fabricated numbers or mismatched tokens. It works quietly in the background on every single action the other agents take, and never moves money itself.',
     capabilities: [
-      'Allocate across multiple strategies',
-      'Rebalance automatically as markets move',
-      'Harvest and reinvest without manual steps',
+      'Enforce a spend limit you set, before any action is even proposed',
+      'Block fabricated prices, amounts, or token substitutions automatically',
+      'Show your current guardrails in plain language, not just claim they exist',
     ],
-    gated: true,
-    status: 'available',
+    gated: false,
+    status: 'active',
   },
 ]
 

@@ -139,6 +139,8 @@ export function SettingsView() {
             )}
           </section>
 
+          {ready && authenticated && <GuardrailsSection />}
+
           {ready && authenticated && <InstantSwapsSection />}
 
           <section className="mt-4 rounded-xl border border-border bg-card p-4">
@@ -202,6 +204,114 @@ export function SettingsView() {
 const SESSION_SIGNER_ID = 'cv6ka6rbhmabtaydbh9e6pbo'
 const SESSION_POLICY_ID = 'mw6vn6xz49aehqip0ia7ezl4'
 
+// This is the real, user-configurable half of Vault Agent's spend limit — an
+// additional, app-level ceiling checked in propose_action (app/api/robin/route.ts)
+// before any swap/yield action is ever proposed, on top of (not instead of) the
+// hardcoded global Privy policy above.
+function GuardrailsSection() {
+  const { wallets } = useWallets()
+  const walletAddress = wallets[0]?.address
+
+  const [limit, setLimit] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [input, setInput] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    if (!walletAddress) return
+    let cancelled = false
+    setLoading(true)
+    ;(async () => {
+      const identityToken = await getIdentityToken()
+      const res = await fetch(`/api/guardrails?walletAddress=${walletAddress}`, {
+        headers: { 'X-Privy-Identity-Token': identityToken ?? '' },
+      }).catch(() => null)
+      const data = res && res.ok ? await res.json() : null
+      if (cancelled) return
+      setLimit(data?.maxUsdPerTransaction ?? null)
+      setLoading(false)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [walletAddress])
+
+  const save = async () => {
+    if (!walletAddress) return
+    const value = parseFloat(input)
+    if (isNaN(value) || value <= 0) {
+      setError('Enter a positive dollar amount.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    setSaved(false)
+    try {
+      const identityToken = await getIdentityToken()
+      const res = await fetch('/api/guardrails', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+        body: JSON.stringify({ walletAddress, maxUsdPerTransaction: value }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not save this limit')
+      setLimit(value)
+      setInput('')
+      setSaved(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Guardrails
+      </h2>
+      <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+        Vault agent enforces this limit on every swap or yield deposit Robin proposes —
+        before you ever see a preview, not just at execution. Applies to both instant
+        swaps and your connected wallet.
+      </p>
+
+      <div className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">Current spend limit</p>
+        <p className="text-sm text-foreground">
+          {loading ? 'Loading...' : limit !== null ? `$${limit} per transaction` : 'No limit set'}
+        </p>
+      </div>
+
+      <div className="mt-2.5 flex items-center gap-2">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="e.g. 500"
+          className="min-w-0 flex-1 rounded-lg border border-border bg-background/40 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={saving || !input}
+          onClick={save}
+          className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {saving && <Loader2 className="size-3 animate-spin" />}
+          Save limit
+        </button>
+      </div>
+
+      {saved && <p className="mt-2 text-xs text-primary">Limit saved.</p>}
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </section>
+  )
+}
+
 function InstantSwapsSection() {
   const { user: privyUser } = usePrivy()
   const { wallets } = useWallets()
@@ -256,7 +366,7 @@ function InstantSwapsSection() {
       </h2>
       <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
         Skip the per-transaction mobile approval by creating a separate Nock wallet and
-        granting Robin permission to swap on your behalf, within a spend limit you control.
+        granting Robin permission to swap on your behalf, within the spend limit set below.
         This is a different address from your connected wallet — you'll need to bridge or
         send funds to it separately.
       </p>

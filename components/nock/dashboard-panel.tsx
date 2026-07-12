@@ -1,11 +1,60 @@
 'use client'
 
-import { Bell, Sparkles } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Bell, Sparkles, ShieldCheck } from 'lucide-react'
+import { usePrivy, useWallets, getIdentityToken } from '@privy-io/react-auth'
 import { cn } from '@/lib/utils'
 import { type AttentionItem, type Position } from './data'
 import { AgentIcon } from './agent-icon'
 import { LiveBalances } from './live-balances'
 import { LiveActivity } from './live-activity'
+
+// The doc's "small Vault panel shows your current spend limits ... in plain view" —
+// self-contained like LiveBalances, fetches the real, saved limit from
+// app/api/guardrails (see lib/db/guardrails.ts), never a placeholder number.
+function GuardrailsCard() {
+  const { ready, authenticated } = usePrivy()
+  const { wallets } = useWallets()
+  const address = wallets[0]?.address
+
+  const [limit, setLimit] = useState<number | null | undefined>(undefined)
+
+  useEffect(() => {
+    if (!ready || !authenticated || !address) {
+      setLimit(undefined)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const identityToken = await getIdentityToken()
+      const res = await fetch(`/api/guardrails?walletAddress=${address}`, {
+        headers: { 'X-Privy-Identity-Token': identityToken ?? '' },
+      }).catch(() => null)
+      const data = res && res.ok ? await res.json() : null
+      if (!cancelled) setLimit(data?.maxUsdPerTransaction ?? null)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [ready, authenticated, address])
+
+  if (limit === undefined) return null
+
+  return (
+    <div className="rounded-2xl border border-border/60 bg-background/50 px-5 py-4">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
+        <p className="text-sm text-muted-foreground">Vault guardrails</p>
+      </div>
+      <p className="mt-1.5 text-lg font-semibold text-foreground">
+        {limit !== null ? `$${limit} per transaction` : 'No spend limit set'}
+      </p>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Enforced before any swap or yield deposit is proposed. Adjust it in Settings.
+      </p>
+    </div>
+  )
+}
 
 type DashTab = 'overview' | 'balances' | 'activity'
 
@@ -61,6 +110,9 @@ export function DashboardPanel({
                 {portfolioValue}
               </p>
             </div>
+
+            {/* Guardrails */}
+            <GuardrailsCard />
 
             {/* Needs attention */}
             <section className="flex flex-col gap-3">

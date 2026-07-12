@@ -8,6 +8,8 @@ import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
+import { getWalletByAddress } from '@/lib/db/wallets'
+import { getGuardrails } from '@/lib/db/guardrails'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
 
 export const dynamic = 'force-dynamic'
@@ -95,8 +97,8 @@ When the user wants to swap, trade, buy, or sell any token:
 - If the quote comes back with an error field, tell the user what it actually says. Do not guess prices, and never say a token is "not supported" just because one quote attempt failed — check the real error first.
 - If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers. If the quote's verified field is false, the outcome/detail text in propose_action MUST include an explicit unverified-token warning — this is not optional.
 
-When the user asks a general, browsing-style question about what's available — "what vaults are there," "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
-- Call the relevant tool (get_yield_options, get_perps_info, or check_vault_limits) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
+When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
+- Call the relevant tool (get_yield_options or get_perps_info) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
 
 When the user asks to actually deposit into the yield vault:
 1. If you haven't already shown them get_yield_options data this conversation, call it first so the conversation is grounded in the real current vault.
@@ -107,10 +109,11 @@ When the user asks to actually deposit into the yield vault:
 
 When the user asks to actually open a perps position: call get_perps_info to show them the real current market data (mark price, funding, open interest, max leverage), then tell them plainly that opening a position isn't executable through Nock yet — this is real, live market data from Lighter for informational purposes only right now. Never call propose_action for the perps agent under any circumstances yet, even if they explicitly ask to open a position — there is no real order-placement flow behind it yet.
 
-When the user asks you to actually do something with their money or assets for vaults (deposit):
-1. Call check_vault_limits to get current data.
-2. Based on the data returned, call propose_action with a fully structured preview of the action you recommend.
-3. After propose_action returns, write one or two sentences in plain language explaining what you found and what you are proposing. Invite the user to use the Draw button to review it.
+When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
+
+If the user asks to set, raise, lower, or remove their spend limit: tell them plainly that's done from Settings, not through chat — Robin can only report the current limit, not change it. Do not invent a confirmation that a limit was changed.
+
+If a swap or yield deposit gets refused for exceeding the user's spend limit (the tool result will say so explicitly): relay that reason plainly, and mention they can adjust it from Settings if they want to allow it. Do not retry with a smaller amount unless the user explicitly asks for one.
 
 Answer direct, factual questions about how this app or Robinhood Chain works (e.g. "how much does gas cost," "what is Robinhood Chain," "how long does bridging take") plainly and briefly, from what you actually know or have already called a tool for — these are on-topic, don't deflect them. Only use the off-topic redirect below for things genuinely unrelated to crypto/DeFi (politics, general knowledge, etc.), never for a real question about this app or this chain just because it doesn't map to a specific tool call.
 
@@ -128,21 +131,6 @@ Rules:
 - Stay strictly on topic: crypto, DeFi, and on-chain actions only.`
 }
 
-function callStubTool(name: string, _input: unknown): unknown {
-  switch (name) {
-    case 'check_vault_limits':
-      return {
-        vaults: [
-          { name: 'Balanced', targetApy: '5.10%', risk: 'Balanced', tvl: '$8.2M', minDeposit: '$100' },
-          { name: 'Aggressive', targetApy: '12.40%', risk: 'High', tvl: '$2.1M', minDeposit: '$500' },
-          { name: 'Conservative', targetApy: '3.20%', risk: 'Low', tvl: '$14.8M', minDeposit: '$50' },
-        ],
-        requiresNock: true,
-      }
-    default:
-      return { error: `Unknown tool: ${name}` }
-  }
-}
 
 type ProposeActionInput = {
   agent: AgentId
@@ -226,8 +214,8 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'check_vault_limits',
-      description: 'Returns available multi-strategy vaults (name, target APY, risk, TVL, min deposit). This is representative preview data, not a live-integrated protocol yet — say so plainly if the user asks whether they can actually deposit right now. Call this whenever the user asks what vaults exist, without necessarily proposing an action unless they ask you to.',
+      name: 'get_vault_status',
+      description: 'Returns the user\'s real, currently-set spend limit (or "no limit set"), plus the automatic protections already in place on every proposed action. Call this whenever the user asks about their guardrails, spend limits, permissions, or what Vault Agent does.',
       parameters: {
         type: 'object',
         properties: {},
@@ -503,6 +491,30 @@ export async function POST(request: Request) {
               outcomeValue = !isNaN(amountNum) ? `$${(amountNum * usdgPrice).toFixed(2)}` : 'Value unavailable'
             }
 
+            // Vault Agent's real spend-limit check — an additional, app-level ceiling on
+            // top of the existing global Privy policy (see lib/db/schema.ts's
+            // walletGuardrails table). Fires here, before propose_action ever returns a
+            // card to the user, not just at execution time — matches the doc's "Vault
+            // Agent confirms the action falls inside your set limits" happening as part
+            // of the preview step, not after.
+            let guardrailViolation: string | undefined
+            if ((input.agent === 'swap' || input.agent === 'yield') && walletAddress) {
+              const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
+              if (!isNaN(outcomeValueNum)) {
+                const wallet = await getWalletByAddress(walletAddress)
+                const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
+                if (guardrails.maxUsdPerTransaction !== null && outcomeValueNum > guardrails.maxUsdPerTransaction) {
+                  guardrailViolation = `This action is worth about ${outcomeValue}, which is over the user's set spend limit of $${guardrails.maxUsdPerTransaction} per transaction. Do not propose this action. Tell the user plainly it was blocked by their own spend limit, and that they can raise it from Settings if they want to allow it.`
+                }
+              }
+            }
+
+            if (guardrailViolation) {
+              result = { error: guardrailViolation }
+              openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
+              continue
+            }
+
             action = {
               id: `act-${Date.now()}`,
               agent: input.agent,
@@ -693,8 +705,32 @@ export async function POST(request: Request) {
             result = { error: 'Could not reach the Lighter market data API. Try again in a moment.' }
           }
 
+        } else if (functionName === 'get_vault_status') {
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else {
+            try {
+              const wallet = await getWalletByAddress(walletAddress)
+              const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
+              result = {
+                maxUsdPerTransaction: guardrails.maxUsdPerTransaction,
+                note: guardrails.maxUsdPerTransaction === null
+                  ? 'No spend limit is set — any swap or yield deposit amount can be proposed.'
+                  : `Proposed swaps and yield deposits over $${guardrails.maxUsdPerTransaction} will be declined before a preview is ever shown.`,
+                automaticProtections: [
+                  'Every proposed action is built from a fresh, live quote — never a reused or guessed number.',
+                  'A swap or deposit amount is never invented — Robin always asks the user for an exact amount first.',
+                  'If the user mentions a token that does not match the current quote, the action is refused rather than silently substituted.',
+                ],
+              }
+            } catch (err) {
+              console.error('[robin] get_vault_status error:', err)
+              result = { error: 'Could not read guardrail settings. Try again in a moment.' }
+            }
+          }
+
         } else {
-          result = callStubTool(functionName, functionArgs)
+          result = { error: `Unknown tool: ${functionName}` }
         }
 
         openaiMessages.push({
