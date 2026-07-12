@@ -141,7 +141,7 @@ export async function buildYieldDeposit(
       data,
       value: '0',
       gas: DEPOSIT_GAS_LIMIT,
-      gasPrice: gasPrice.toString(),
+      gasPrice: (gasPrice * BigInt(2)).toString(),
     },
     assetAddress,
     assetDecimals: USDG_DECIMALS,

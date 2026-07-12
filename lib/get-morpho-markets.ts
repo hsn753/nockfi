@@ -286,7 +286,7 @@ export async function buildMarketSupply(
   })
 
   return {
-    transaction: { to: MORPHO_CORE, data, value: '0', gas: SUPPLY_GAS_LIMIT, gasPrice: gasPrice.toString() },
+    transaction: { to: MORPHO_CORE, data, value: '0', gas: SUPPLY_GAS_LIMIT, gasPrice: (gasPrice * BigInt(2)).toString() },
     assetAddress: USDG_ADDRESS,
     assetDecimals: USDG_DECIMALS,
     market: marketKey,
@@ -344,7 +344,7 @@ export async function buildMarketWithdraw(
   const marketData = (await getMorphoMarketData()).find((d) => d.key === marketKey)!
 
   return {
-    transaction: { to: MORPHO_CORE, data, value: '0', gas: SUPPLY_GAS_LIMIT, gasPrice: gasPrice.toString() },
+    transaction: { to: MORPHO_CORE, data, value: '0', gas: SUPPLY_GAS_LIMIT, gasPrice: (gasPrice * BigInt(2)).toString() },
     assetAddress: USDG_ADDRESS,
     assetDecimals: USDG_DECIMALS,
     market: marketKey,
