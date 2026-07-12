@@ -418,7 +418,7 @@ export function NockApp() {
     }
 
     // REAL SWAP/YIELD-DEPOSIT EXECUTION - NO MOCK DATA
-    const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield'
+    const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield' || action.agent === 'stock'
     if (isRealExecutionAgent && (activeWallet || delegatedWallet)) {
       try {
         // Fetched fresh (not from the reactive useIdentityToken() hook, verified against prod
@@ -648,7 +648,7 @@ export function NockApp() {
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Done! ${action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal' : 'Deposit') : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
+            text: `Done! ${action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal' : 'Deposit') : action.agent === 'stock' ? 'Trade' : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
           const newPosition: Position = {
@@ -677,7 +677,7 @@ export function NockApp() {
         // ask the chain for the real number.
         fetchPortfolioValue()
       } catch (error) {
-        const actionNoun = action.agent === 'yield' ? ((action as any).direction === 'withdraw' ? 'Withdrawal' : 'Deposit') : 'Swap'
+        const actionNoun = action.agent === 'yield' ? ((action as any).direction === 'withdraw' ? 'Withdrawal' : 'Deposit') : action.agent === 'stock' ? 'Trade' : 'Swap'
         console.error(`${actionNoun} execution failed:`, error)
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
         const isTimeout = /timeout/i.test(rawMessage)

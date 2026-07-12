@@ -9,6 +9,7 @@ import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
+import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
 import type { ActionPreview, AgentId, ChatMessage } from '@/components/nock/data'
@@ -55,7 +56,7 @@ function buildSystemPrompt(walletAddress?: string): string {
     ? `The user's connected wallet address on Robinhood Chain is ${walletAddress}.`
     : `The user does not have a wallet connected right now.`
 
-  return `You are Robin, the concierge for Nock, an onchain agent platform. You help users put their capital to work across four specialized agents: yield, swap, perps, and vaults. Nock does not offer stock or other regulated-security tokens right now — if a user asks about stock tokens (AAPL, TSLA, or any tokenized equity), tell them plainly that isn't available through Nock right now, and redirect to what you can actually help with (crypto swaps, yield, perps, vaults).
+  return `You are Robin, the concierge for Nock, an onchain agent platform. You help users put their capital to work across five specialized agents: yield, swap, perps, stock tokens, and vault (guardrails).
 
 CRITICAL: You ONLY help with DeFi, crypto, and on-chain actions. If someone asks about anything else (politics, general knowledge, unrelated topics), politely redirect them back to what you can help with.
 
@@ -97,6 +98,12 @@ When the user wants to swap, trade, buy, or sell any token:
 - When you answer a general "what tokens are supported" or "what can I swap" question, always mention BOTH things: the verified list above, AND that you can also look up any specific memecoin or community token by name (unverified, real scam risk, but real trading happens on Robinhood Chain). Don't imply the verified list is the only thing swappable — that's not true and undersells what this app can actually do.
 - If the quote comes back with an error field, tell the user what it actually says. Do not guess prices, and never say a token is "not supported" just because one quote attempt failed — check the real error first.
 - If the quote succeeds, call propose_action using the real fromAmount, toAmount, and exchangeRate from the quote. Never substitute invented numbers. If the quote's verified field is false, the outcome/detail text in propose_action MUST include an explicit unverified-token warning — this is not optional.
+
+When the user asks about stocks or tokenized equities (prices, what's available, buying, selling):
+- Call get_stock_tokens — it returns ONLY Robinhood's official stock tokens, verified on-chain against the official issuer. Never use get_trending_tokens for a stock symbol; that tool surfaces impersonator contracts with the same ticker.
+- At least once per conversation, make the framing clear: a stock token tracks the stock's price but is NOT share ownership — no dividends, no voting rights. It trades on-chain 24/7, including when the real market is closed, so its price can drift from the official close.
+- To buy or sell: resolve the OFFICIAL contract address via get_stock_tokens (pass the symbol), then call get_swap_quote using that exact address as toToken (buying with USDG) or fromToken (selling), then propose_action with agent "stock" and the real quote numbers. Same rules as swaps: never guess amounts, always quote fresh.
+- If a symbol isn't in the registry, say Robinhood doesn't issue that stock token — do not go looking for it among unverified tokens.
 
 When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options or get_perps_info) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
@@ -238,6 +245,20 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_stock_tokens',
+      description: "Returns Robinhood's OFFICIAL tokenized stocks on Robinhood Chain (AAPL, TSLA, NVDA, SPY and ~50 more), each verified on-chain against Robinhood's official deployer, with live trading prices, liquidity, and 24h volume from real pools. This is the ONLY valid source for a stock token's contract address — same-ticker impersonator contracts exist and get_trending_tokens would surface them. Pass a symbol for one specific stock, or omit it for the full list sorted by volume. A stock token is price exposure, not share ownership — say so when presenting.",
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Stock ticker to look up, e.g. TSLA. Omit for the full verified list.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_perps_info',
       description: 'Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter\'s own live margin requirement). Scoped to crypto/memecoin markets only. Opening a position through this app is not built yet — say so plainly if the user asks to actually open one. Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.',
       parameters: {
@@ -315,7 +336,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         properties: {
           agent: {
             type: 'string',
-            enum: ['yield', 'perps', 'swap', 'vault'],
+            enum: ['yield', 'perps', 'swap', 'stock', 'vault'],
             description: 'Which agent handles this action',
           },
           action: {
@@ -486,18 +507,49 @@ export async function POST(request: Request) {
           // user instead of guessing. A false positive here just costs an extra clarifying
           // question — an acceptable price for never silently executing the wrong trade.
           let mismatchedTokenWord: string | undefined
-          if (input.agent === 'swap' && lastSwapQuote?.transaction && lastUserMessage) {
+          let stockImpersonatorWord: string | undefined
+          if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction && lastUserMessage) {
             const quoteSymbols = new Set(
               [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol]
                 .filter((s): s is string => typeof s === 'string')
                 .map((s) => s.toUpperCase()),
             )
-            mismatchedTokenWord = extractCandidateTokenWords(lastUserMessage.text).find((w) => !quoteSymbols.has(w))
+            const quoteAddresses = new Set(
+              [lastSwapQuote.fromSymbol, lastSwapQuote.toSymbol, lastSwapQuote.sellTokenAddress]
+                .filter((s): s is string => typeof s === 'string')
+                .map((s) => s.toLowerCase()),
+            )
+            const candidates = extractCandidateTokenWords(lastUserMessage.text)
+
+            // Stock symbols resolve through the verified registry only. If the user
+            // named a symbol Robinhood officially issues, the quote must involve that
+            // exact contract — a same-ticker impersonator (four fake TSLAs exist) must
+            // never be tradeable through a stock request. When the official address IS
+            // on the quote, the symbol counts as matched for the mismatch guard below
+            // (the quote sides show raw addresses for non-SWAP_TOKENS assets, so the
+            // symbol never literally appears there).
+            const matchedViaRegistry = new Set<string>()
+            for (const w of candidates) {
+              const official = await findStockToken(w).catch(() => null)
+              if (!official) continue
+              if (quoteAddresses.has(official.address.toLowerCase())) {
+                matchedViaRegistry.add(w)
+              } else {
+                stockImpersonatorWord = w
+              }
+            }
+
+            mismatchedTokenWord = candidates.find((w) => !quoteSymbols.has(w) && !matchedViaRegistry.has(w))
+            if (stockImpersonatorWord) mismatchedTokenWord = undefined
           }
 
-          if (input.agent === 'swap' && !lastSwapQuote?.transaction) {
+          if ((input.agent === 'swap' || input.agent === 'stock') && !lastSwapQuote?.transaction) {
             result = {
               error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
+            }
+          } else if (stockImpersonatorWord) {
+            result = {
+              error: `The user asked about ${stockImpersonatorWord}, which is an official Robinhood stock token, but this quote does not involve that symbol's official contract address. Do not propose this trade. Call get_stock_tokens with symbol "${stockImpersonatorWord}" to get the official address, quote against that exact address, and try again. Never trade a same-ticker lookalike contract for a stock request.`,
             }
           } else if (input.agent === 'yield' && !(lastYieldQuote && 'transaction' in lastYieldQuote)) {
             // Same hard backstop as swap above — a preview card must be backed by a real,
@@ -522,9 +574,16 @@ export async function POST(request: Request) {
             // we already have. If we don't have a verified price for the sell side (e.g.
             // selling an unverified memecoin), say so plainly instead of guessing.
             let outcomeValue = input.outcome.value
-            if (input.agent === 'swap' && lastSwapQuote?.transaction) {
+            if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction) {
               const prices = await getReferencePrices()
-              const fromPrice = prices[(lastSwapQuote.fromSymbol || '').toUpperCase()]
+              let fromPrice = prices[(lastSwapQuote.fromSymbol || '').toUpperCase()]
+              // Selling a stock token: the sell side is a raw address with no reference
+              // price — use the registry's live pool price instead of giving up.
+              if (fromPrice === undefined && typeof lastSwapQuote.sellTokenAddress === 'string') {
+                const stocks = await getStockTokens().catch(() => [])
+                const match = stocks.find((s) => s.address.toLowerCase() === lastSwapQuote.sellTokenAddress.toLowerCase())
+                if (match?.priceUsd != null) fromPrice = match.priceUsd
+              }
               const fromAmountNum = parseFloat(String(lastSwapQuote.fromAmount).replace(/,/g, ''))
               outcomeValue = fromPrice !== undefined && !isNaN(fromAmountNum)
                 ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
@@ -547,7 +606,7 @@ export async function POST(request: Request) {
             const isWithdrawal =
               input.agent === 'yield' && lastYieldQuote && 'direction' in lastYieldQuote && lastYieldQuote.direction === 'withdraw'
             let guardrailViolation: string | undefined
-            if ((input.agent === 'swap' || input.agent === 'yield') && !isWithdrawal && walletAddress) {
+            if ((input.agent === 'swap' || input.agent === 'stock' || input.agent === 'yield') && !isWithdrawal && walletAddress) {
               const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
               if (!isNaN(outcomeValueNum)) {
                 const wallet = await getWalletByAddress(walletAddress)
@@ -572,7 +631,7 @@ export async function POST(request: Request) {
               metrics: input.metrics,
               status: 'pending',
               outcome: { ...input.outcome, value: outcomeValue },
-              ...(input.agent === 'swap' && lastSwapQuote?.transaction ? {
+              ...((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction ? {
                 transactionData: lastSwapQuote.transaction,
                 fromToken: lastSwapQuote.fromSymbol,
                 toToken: lastSwapQuote.toSymbol,
@@ -803,6 +862,30 @@ export async function POST(request: Request) {
               console.error('[robin] get_yield_withdraw_quote error:', err)
               result = { error: 'Could not build a withdrawal quote from the chain. Try again in a moment.' }
             }
+          }
+
+        } else if (functionName === 'get_stock_tokens') {
+          const { symbol } = functionArgs as { symbol?: string }
+          try {
+            if (symbol) {
+              const token = await findStockToken(symbol)
+              result = token
+                ? {
+                    token,
+                    note: 'Official Robinhood stock token, verified on-chain against the official issuer. priceUsd is the live on-chain trading price (24/7 — it can drift from the official market close). Price exposure only, not share ownership. To trade it, quote with get_swap_quote using this exact address.',
+                  }
+                : { error: `Robinhood doesn't issue an official stock token with the symbol "${symbol}". Do not look for it among unverified tokens — tell the user it isn't available as an official stock token.` }
+            } else {
+              const tokens = await getStockTokens()
+              result = {
+                tokens: tokens.slice(0, 25),
+                totalCount: tokens.length,
+                note: 'Official Robinhood stock tokens only, each verified on-chain against the official issuer, sorted by 24h volume. Prices are live on-chain trading prices (24/7). Price exposure, not share ownership — no dividends or voting rights.',
+              }
+            }
+          } catch (err) {
+            console.error('[robin] get_stock_tokens error:', err)
+            result = { error: 'Could not load the verified stock token registry. Try again in a moment.' }
           }
 
         } else if (functionName === 'get_perps_info') {

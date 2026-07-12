@@ -6,7 +6,7 @@ export type NavView =
   | 'settings'
   | 'dashboard'
 
-export type AgentId = 'yield' | 'perps' | 'swap' | 'vault'
+export type AgentId = 'yield' | 'perps' | 'swap' | 'stock' | 'vault'
 
 export type Agent = {
   id: AgentId
@@ -57,6 +57,20 @@ export const agents: Agent[] = [
       'Split orders for best execution',
       'Preview price impact before confirming',
       'Protect trades from slippage and MEV',
+    ],
+    gated: false,
+    status: 'active',
+  },
+  {
+    id: 'stock',
+    name: 'Stock token agent',
+    tagline: 'Trade tokenized stocks, live around the clock.',
+    description:
+      "The stock token agent trades Robinhood's official tokenized equities (AAPL, TSLA, NVDA, SPY and more) on-chain, 24/7. Every token is verified against Robinhood's official deployer before it's ever quoted, so impersonator contracts can't reach you. A stock token gives you price exposure, not share ownership — no dividends, no voting rights.",
+    capabilities: [
+      'Buy and sell official tokenized stocks around the clock',
+      'Verify every contract against the official issuer before quoting',
+      'Live on-chain prices from real trading, never estimates',
     ],
     gated: false,
     status: 'active',

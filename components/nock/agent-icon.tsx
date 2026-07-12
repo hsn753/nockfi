@@ -1,10 +1,11 @@
-import { Coins, TrendingUp, ArrowLeftRight, Vault } from 'lucide-react'
+import { Coins, TrendingUp, ArrowLeftRight, Vault, CandlestickChart } from 'lucide-react'
 import type { AgentId } from './data'
 
 const map = {
   yield: Coins,
   perps: TrendingUp,
   swap: ArrowLeftRight,
+  stock: CandlestickChart,
   vault: Vault,
 } as const
 
