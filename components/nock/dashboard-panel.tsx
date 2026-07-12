@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Bell, Sparkles, ShieldCheck } from 'lucide-react'
+import { Bell, Sparkles, ShieldCheck, Percent, Zap } from 'lucide-react'
 import { usePrivy, useWallets, getIdentityToken } from '@privy-io/react-auth'
 import { cn } from '@/lib/utils'
 import { type AttentionItem, type Position } from './data'
@@ -12,6 +12,148 @@ import { LiveActivity } from './live-activity'
 // The doc's "small Vault panel shows your current spend limits ... in plain view" —
 // self-contained like LiveBalances, fetches the real, saved limit from
 // app/api/guardrails (see lib/db/guardrails.ts), never a placeholder number.
+// Live yield positions in plain view, so the user doesn't have to keep asking Robin
+// "what am I holding in yield" — reads real on-chain positions (accrued interest
+// included) via /api/yield-positions, refreshed every 60s and on wallet change.
+function YieldPositionsCard() {
+  const { ready, authenticated } = usePrivy()
+  const { wallets } = useWallets()
+  const address = wallets[0]?.address
+
+  const [positions, setPositions] = useState<
+    { market: string; collateralSymbol: string; suppliedUsd: number; apyPct: number | null }[] | null
+  >(null)
+
+  useEffect(() => {
+    if (!ready || !authenticated || !address) {
+      setPositions(null)
+      return
+    }
+    let cancelled = false
+    const load = () => {
+      fetch(`/api/yield-positions?address=${encodeURIComponent(address)}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!cancelled && data) setPositions(data.positions ?? [])
+        })
+        .catch(() => {})
+    }
+    load()
+    const interval = setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [ready, authenticated, address])
+
+  if (!positions || positions.length === 0) return null
+
+  const total = positions.reduce((sum, p) => sum + p.suppliedUsd, 0)
+
+  return (
+    <div className="rounded-2xl border border-border/60 bg-background/50 px-5 py-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Percent className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
+          <p className="text-sm text-muted-foreground">Yield positions</p>
+        </div>
+        <p className="text-sm font-semibold tabular-nums text-foreground">${total.toFixed(2)}</p>
+      </div>
+      <ul className="mt-2.5 flex flex-col gap-2">
+        {positions.map((p) => (
+          <li key={p.market} className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm text-foreground">{p.market} market</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {p.apyPct !== null ? `${p.apyPct.toFixed(2)}% APY, live` : 'APY unavailable'}
+              </p>
+            </div>
+            <p className="shrink-0 text-sm font-medium tabular-nums text-foreground">
+              ${p.suppliedUsd.toFixed(2)}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Lent on Morpho, interest included. Withdraw any time via chat.
+      </p>
+    </div>
+  )
+}
+
+// The instant-swap (embedded) wallet's real holdings — a separate address from the
+// connected wallet, previously only visible by asking Robin or digging into Settings.
+// Shown whenever the embedded wallet exists, with its delegation state.
+function InstantSwapWalletCard() {
+  const { ready, authenticated, user: privyUser } = usePrivy()
+
+  const embedded = privyUser?.linkedAccounts?.find(
+    (a: any) => a.type === 'wallet' && a.walletClientType === 'privy' && a.chainType === 'ethereum',
+  ) as { address: string; delegated?: boolean } | undefined
+
+  const [balances, setBalances] = useState<
+    { symbol: string; amount: string; usdValue?: number | null }[] | null
+  >(null)
+
+  useEffect(() => {
+    if (!ready || !authenticated || !embedded?.address) {
+      setBalances(null)
+      return
+    }
+    let cancelled = false
+    const load = () => {
+      fetch(`/api/balances?address=${encodeURIComponent(embedded.address)}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!cancelled && data) setBalances(data.balances ?? [])
+        })
+        .catch(() => {})
+    }
+    load()
+    const interval = setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [ready, authenticated, embedded?.address])
+
+  if (!embedded || !balances) return null
+
+  const total = balances.reduce((sum, b) => sum + (b.usdValue ?? 0), 0)
+  const held = balances.filter((b) => parseFloat(String(b.amount).replace(/,/g, '')) > 0)
+
+  return (
+    <div className="rounded-2xl border border-border/60 bg-background/50 px-5 py-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Zap className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
+          <p className="text-sm text-muted-foreground">Instant-swap wallet</p>
+        </div>
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          <span className={cn('size-1.5 rounded-full', embedded.delegated ? 'bg-primary' : 'bg-secondary')} />
+          {embedded.delegated ? 'Enabled' : 'Disabled'}
+        </span>
+      </div>
+      <p className="mt-1.5 text-lg font-semibold tabular-nums text-foreground">${total.toFixed(2)}</p>
+      {held.length > 0 ? (
+        <ul className="mt-1 flex flex-col gap-1">
+          {held.map((b) => (
+            <li key={b.symbol} className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>{b.symbol}</span>
+              <span className="tabular-nums">
+                {b.amount}
+                {b.usdValue != null ? ` ($${b.usdValue.toFixed(2)})` : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-0.5 text-xs text-muted-foreground">Empty — send funds to it from Settings to use instant swaps.</p>
+      )}
+    </div>
+  )
+}
+
 function GuardrailsCard() {
   const { ready, authenticated } = usePrivy()
   const { wallets } = useWallets()
@@ -110,6 +252,12 @@ export function DashboardPanel({
                 {portfolioValue}
               </p>
             </div>
+
+            {/* Yield positions */}
+            <YieldPositionsCard />
+
+            {/* Instant-swap wallet */}
+            <InstantSwapWalletCard />
 
             {/* Guardrails */}
             <GuardrailsCard />
