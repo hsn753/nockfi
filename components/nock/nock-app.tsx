@@ -569,10 +569,14 @@ export function NockApp() {
               privyWalletId: isUsingDelegatedWallet ? (delegatedWallet as any)?.id : undefined,
               agent: action.agent,
               actionId: action.id,
-              fromTokenSymbol: fromToken,
-              fromTokenAddress: sellTokenAddress,
+              // A withdrawal flows market -> wallet, the reverse of a deposit. Without
+              // this swap the audit row is indistinguishable from a deposit — confirmed
+              // live: a real on-chain withdraw() was logged looking exactly like a
+              // supply, and got misread as one during an incident review.
+              fromTokenSymbol: isWithdrawal ? (action as any).toToken : fromToken,
+              fromTokenAddress: isWithdrawal ? undefined : sellTokenAddress,
               fromAmount,
-              toTokenSymbol: (action as any).toToken,
+              toTokenSymbol: isWithdrawal ? fromToken : (action as any).toToken,
               quoteJson: action,
               broadcastStatus: !result.txHash || result.txHash === '0x'
                 ? 'no_hash_returned'
