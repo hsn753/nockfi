@@ -850,6 +850,33 @@ export async function POST(request: Request) {
     const fallback =
       "I'm not sure how to help with that. Try asking me what you hold, to put idle funds to work, swap tokens, open a perps position, or deposit into a vault."
 
+    // Hard backstop, not a prompt instruction — confirmed live TWICE that the prompt
+    // rule alone doesn't hold: the model claimed "the withdrawal has been executed
+    // successfully" for an execution that never happened on-chain (once after the user
+    // typed "Loose" as text, again after "yes proceed"), and separately claimed an
+    // action was "ready for review" without ever calling propose_action (so no card
+    // existed to execute). This server never executes anything — the ONLY execution
+    // path is the client's Loose button, and the client posts its own "Done! ... TX"
+    // message afterward. Therefore any model text claiming an execution outcome is
+    // false by construction at the moment it's generated, and can be replaced
+    // unconditionally.
+    const claimsExecution =
+      /has been (executed|withdrawn|completed|processed)|executed successfully|withdrawn successfully|(withdrawal|swap|deposit|transaction) (was|is now) (successful|complete)|funds have been (withdrawn|moved|transferred)/i.test(
+        responseText,
+      )
+    const claimsCardExists =
+      !action &&
+      /(action|withdrawal|swap|deposit|lending).{0,60}ready (for|to)/i.test(responseText) &&
+      /\b(draw|loose)\b/i.test(responseText)
+
+    if (claimsExecution) {
+      responseText =
+        "Nothing has been executed — I can only preview actions, never run them. If there's an action card above, press its Loose button (or type \"loose\") to execute it. To see what actually happened, ask me for your holdings or yield positions and I'll check the chain."
+    } else if (claimsCardExists) {
+      responseText =
+        "I wasn't able to prepare that action correctly — no preview card was actually created, so there's nothing to confirm yet. Ask me again (for example: \"withdraw 5 USDG from the syrupUSDG market\") and I'll build a fresh preview."
+    }
+
     return NextResponse.json({ text: responseText || fallback, action, bridgeInfo })
   } catch (err) {
     console.error('[robin] API error:', err)

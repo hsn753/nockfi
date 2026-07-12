@@ -263,7 +263,17 @@ export function NockApp() {
       // happened on-chain at all. Typing the command now does exactly what clicking
       // the button does, on the most recent still-actionable card.
       const command = text.trim().toLowerCase().replace(/[.!]+$/, '')
-      if (command === 'loose' || command === 'draw' || command === 'loose it' || command === 'draw it') {
+      const isLooseOrDraw = command === 'loose' || command === 'draw' || command === 'loose it' || command === 'draw it'
+      // Bare confirmations users actually typed in production trying to execute a
+      // pending action ("yes proceed" fabricated an execution claim from the model,
+      // twice). Deterministic local handling — never let an affirmative reach the AI
+      // while a card is waiting, and never auto-execute on an ambiguous "yes" either.
+      const isBareAffirmative =
+        /^(yes|yep|yeah|ok|okay|sure|confirm|proceed|go ahead|do it|yes please|yes sure|yes confirm|yes proceed|yes continue|please proceed|yes go ahead|confirm and proceed|yes confirm and proceed)$/.test(
+          command.replace(/\s+/g, ' '),
+        )
+
+      if (isLooseOrDraw || isBareAffirmative) {
         const lastActionable = [...messages].reverse().find(
           (m): m is Extract<ChatMessage, { role: 'robin' }> =>
             m.role === 'robin' && !!m.action && (m.action.status === 'pending' || m.action.status === 'reviewing'),
@@ -272,8 +282,19 @@ export function NockApp() {
           setMessages((prev) => [...prev, userMsg])
           if (command.startsWith('loose')) {
             void handleLooseRef.current?.(lastActionable.action.id)
-          } else {
+          } else if (command.startsWith('draw')) {
             handleDraw(lastActionable.action.id)
+          } else {
+            // Affirmative, but "yes" must never fire a real transaction on its own —
+            // answer locally and deterministically instead of letting the AI respond.
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `${Date.now()}-confirm-hint`,
+                role: 'robin',
+                text: 'To execute it, press the Loose button on the action card above, or type "loose". I never run anything from a yes alone.',
+              },
+            ])
           }
           return
         }
