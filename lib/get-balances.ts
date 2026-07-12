@@ -2,6 +2,7 @@ import { createPublicClient, http, erc20Abi, formatUnits } from 'viem'
 import { nockChain } from './chain'
 import { getReferencePrices } from './get-prices'
 import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from './get-swap-quote'
+import { getStockTokens } from './get-stock-tokens'
 
 export type BalanceEntry = {
   symbol: string
@@ -48,7 +49,7 @@ export async function fetchWalletBalances(address: `0x${string}`): Promise<Balan
   })
 
   try {
-    const [[ethRaw, ...erc20Results], prices] = await Promise.all([
+    const [[ethRaw, ...erc20Results], prices, stockEntries] = await Promise.all([
       Promise.all([
         client.getBalance({ address }),
         ...TOKENS.flatMap(({ address: tokenAddr }) => [
@@ -60,15 +61,58 @@ export async function fetchWalletBalances(address: `0x${string}`): Promise<Balan
         console.error('[get-balances] Price fetch failed:', err)
         return {} as Record<string, number>
       }),
+      // Official stock-token positions. Without this, a TSLA position bought through
+      // this very app was invisible to holdings — and the model, unable to answer
+      // "how much TSLA do I hold", went hunting through the unverified token list
+      // where same-ticker impersonators live. Best-effort: a registry/multicall
+      // failure must not take down core balances.
+      fetchStockBalances(client, address).catch((err) => {
+        console.error('[get-balances] Stock balance fetch failed:', err)
+        return [] as BalanceEntry[]
+      }),
     ])
 
     console.log('[get-balances] Raw results received')
 
-    return buildBalanceResults(ethRaw, erc20Results, prices)
+    return [...buildBalanceResults(ethRaw, erc20Results, prices), ...stockEntries]
   } catch (err) {
     console.error('[get-balances] Error during fetch:', err)
     throw err
   }
+}
+
+// All ~50 verified stock tokens in one Multicall3 round-trip (registry decimals are
+// uniformly 18, verified on-chain — see get-uniswap-quote.ts). Only nonzero positions
+// are returned: 50 zero rows would drown the real holdings for every wallet.
+async function fetchStockBalances(
+  client: ReturnType<typeof createPublicClient>,
+  address: `0x${string}`,
+): Promise<BalanceEntry[]> {
+  const stocks = await getStockTokens()
+  if (stocks.length === 0) return []
+
+  const results = await client.multicall({
+    contracts: stocks.map((s) => ({
+      address: s.address as `0x${string}`,
+      abi: erc20Abi,
+      functionName: 'balanceOf' as const,
+      args: [address],
+    })),
+    allowFailure: true,
+  })
+
+  return stocks.flatMap((s, i) => {
+    const r = results[i]
+    if (r.status !== 'success') return []
+    const raw = r.result as bigint
+    if (raw === BigInt(0)) return []
+    return [{
+      symbol: s.symbol,
+      name: `${s.name} (official stock token)`,
+      amount: fmtBalance(raw, 18),
+      usdValue: usdValueFor(raw, 18, s.priceUsd ?? undefined),
+    }]
+  })
 }
 
 function buildBalanceResults(ethRaw: any, erc20Results: any[], prices: Record<string, number>): BalanceEntry[] {
