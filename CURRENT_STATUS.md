@@ -63,7 +63,8 @@ ZEROX_API_KEY=
 
 - **URL**: https://nock-main.vercel.app
 - **GitHub**: https://github.com/hsn753/nockfi
-- **Auto-deploy**: Enabled (pushes to main trigger deployment)
+- **Auto-deploy**: GitHub integration connected July 12, 2026 — pushes to main trigger a production build. (Before that date every deploy was manual via `./deploy.sh` / `npx vercel --prod`; the CLI path still works as a fallback.)
+- **Verify what's live**: `curl https://nock-main.vercel.app/api/health` returns the deployed commit SHA.
 
 ## ⚠️ KNOWN ISSUES & FIXES NEEDED
 
