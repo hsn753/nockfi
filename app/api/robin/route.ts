@@ -445,6 +445,9 @@ export async function POST(request: Request) {
       for (const toolCall of message.tool_calls) {
         const functionName = (toolCall as any).function.name
         const functionArgs = JSON.parse((toolCall as any).function.arguments)
+        // Diagnostic trail for "what did the model actually do" questions — confirmed
+        // necessary when a missing propose_action call was undiagnosable from logs.
+        console.log('[robin] tool call:', functionName, JSON.stringify(functionArgs).slice(0, 200))
 
         let result: unknown
 
@@ -849,6 +852,67 @@ export async function POST(request: Request) {
 
     const fallback =
       "I'm not sure how to help with that. Try asking me what you hold, to put idle funds to work, swap tokens, open a perps position, or deposit into a vault."
+
+    // Deterministic card synthesis — confirmed live that the model sometimes builds a
+    // real yield quote (get_yield_deposit_quote / get_yield_withdraw_quote succeeded,
+    // a genuine transaction exists) but then never calls propose_action, leaving the
+    // user with no card to execute and no way to move their money. Those quote tools
+    // are only ever called because the user explicitly asked to lend or withdraw, so
+    // when a real quote exists and the model failed to produce the card, build it
+    // server-side from the quote's own verified numbers. The model's cooperation is
+    // no longer on the critical path for users reaching their funds.
+    if (!action && lastYieldQuote && 'transaction' in lastYieldQuote && 'direction' in lastYieldQuote) {
+      const q = lastYieldQuote
+      const isW = q.direction === 'withdraw'
+      const amountNum = parseFloat(q.amount)
+      const valueStr = !isNaN(amountNum) ? `$${amountNum.toFixed(2)}` : 'Value unavailable'
+
+      // Same spend-limit rule as the propose_action path: applies to money leaving
+      // the wallet (supply), never to withdrawals returning the user's own funds.
+      let blockedByLimit = false
+      if (!isW && walletAddress && !isNaN(amountNum)) {
+        const wallet = await getWalletByAddress(walletAddress)
+        const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
+        if (guardrails.maxUsdPerTransaction !== null && amountNum > guardrails.maxUsdPerTransaction) {
+          blockedByLimit = true
+          responseText = `That's about ${valueStr}, which is over your set spend limit of $${guardrails.maxUsdPerTransaction} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
+        }
+      }
+
+      if (!blockedByLimit) {
+        action = {
+          id: `act-${Date.now()}`,
+          agent: 'yield',
+          action: isW ? `Withdraw ${q.amount} USDG from ${q.market} market` : `Lend ${q.amount} USDG to ${q.market} market`,
+          detail: isW
+            ? `Withdraws your supplied USDG (plus accrued interest stays until fully withdrawn) from the Morpho ${q.market} market back to your wallet.`
+            : `Lends directly into the Morpho ${q.market} market at a live APY of ${q.supplyApyPct.toFixed(2)}%. Withdrawals depend on market liquidity.`,
+          metrics: [
+            { label: isW ? 'Amount withdrawn' : 'Amount lent', value: `${q.amount} USDG` },
+            { label: 'Market', value: q.market },
+            { label: isW ? 'Type' : 'Live APY', value: isW ? 'Withdrawal' : `${q.supplyApyPct.toFixed(2)}%` },
+          ],
+          status: 'pending',
+          outcome: {
+            title: isW ? 'USDG back in wallet' : `${q.market} lending position`,
+            value: valueStr,
+            meta: `${q.amount} USDG`,
+            activityTitle: isW ? `Withdrew ${q.amount} USDG from ${q.market} market` : `Lent ${q.amount} USDG to ${q.market} market`,
+          },
+          ...( {
+            transactionData: q.transaction,
+            fromToken: 'USDG',
+            toToken: `${q.market} market`,
+            amount: q.amount,
+            verified: true,
+            sellTokenAddress: q.assetAddress,
+            sellTokenDecimals: q.assetDecimals,
+            direction: q.direction,
+          } as object),
+        } as any
+        responseText = `Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Loose on the card to execute it, or Draw to review first.`
+      }
+    }
 
     // Hard backstop, not a prompt instruction — confirmed live TWICE that the prompt
     // rule alone doesn't hold: the model claimed "the withdrawal has been executed
