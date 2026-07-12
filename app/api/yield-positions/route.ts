@@ -18,10 +18,14 @@ export async function GET(req: NextRequest) {
       getUserMarketPositions(address),
       getMorphoMarketData(),
     ])
-    const withApy = positions.map((p) => ({
-      ...p,
-      apyPct: markets.find((m) => m.key === p.market)?.supplyApyPct ?? null,
-    }))
+    // Sub-cent dust remainders (share-rounding leftovers after a full withdrawal)
+    // would otherwise show as "$0.00" rows forever.
+    const withApy = positions
+      .filter((p) => p.suppliedUsd >= 0.01)
+      .map((p) => ({
+        ...p,
+        apyPct: markets.find((m) => m.key === p.market)?.supplyApyPct ?? null,
+      }))
     return NextResponse.json({ positions: withApy })
   } catch (err) {
     console.error('[yield-positions] Error:', err)
