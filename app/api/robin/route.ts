@@ -749,6 +749,10 @@ export async function POST(request: Request) {
             }
           } else if (!fromToken || !toToken || !amount) {
             result = { error: 'fromToken, toToken, and amount are all required.' }
+          } else if (!walletAddress || !isAddress(walletAddress)) {
+            // 0x requires a taker address, which is the connected wallet — without one
+            // the quote 400s with a cryptic validation error the model then misreads.
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first — a quote needs their address as the taker.' }
           } else {
             const supportedSymbols = Object.keys(SWAP_TOKENS).join(', ')
             try {
