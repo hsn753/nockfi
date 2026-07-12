@@ -853,6 +853,38 @@ export async function POST(request: Request) {
     const fallback =
       "I'm not sure how to help with that. Try asking me what you hold, to put idle funds to work, swap tokens, open a perps position, or deposit into a vault."
 
+    // Deterministic command path — the model (gpt-4o-mini) has proven unreliable at
+    // chaining quote -> propose_action for withdrawals, and a user unable to reach
+    // their own supplied funds is the worst failure this app can have. If the user's
+    // message is an unambiguous lend/withdraw command and no quote was built this
+    // turn, build it directly — no model cooperation needed at all.
+    if (!action && !(lastYieldQuote && 'transaction' in lastYieldQuote) && walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const match = lastUser?.text.match(
+        /\b(withdraw|lend|deposit|supply)\s+\$?([\d,.]+)\s*(?:usdg)?\s+(?:from|to|into)\s+(?:the\s+)?(usde|syrupusdg|spusdg)\b/i,
+      )
+      if (match) {
+        const [, verb, rawAmount, rawMarket] = match
+        const marketKey = (Object.keys(MORPHO_MARKETS) as MorphoMarketKey[]).find(
+          (k) => k.toLowerCase() === rawMarket.toLowerCase(),
+        )
+        if (marketKey) {
+          try {
+            const quote = verb.toLowerCase() === 'withdraw'
+              ? await buildMarketWithdraw(walletAddress, rawAmount.replace(/,/g, ''), marketKey)
+              : await buildMarketSupply(walletAddress, rawAmount.replace(/,/g, ''), marketKey)
+            if ('transaction' in quote) {
+              lastYieldQuote = quote
+            } else {
+              responseText = quote.error
+            }
+          } catch (err) {
+            console.error('[robin] deterministic yield command failed:', err)
+          }
+        }
+      }
+    }
+
     // Deterministic card synthesis — confirmed live that the model sometimes builds a
     // real yield quote (get_yield_deposit_quote / get_yield_withdraw_quote succeeded,
     // a genuine transaction exists) but then never calls propose_action, leaving the
