@@ -867,12 +867,17 @@ export async function POST(request: Request) {
                 getStockBorrowPositions(walletAddress).catch(() => []),
               ])
               console.log('[robin] Balances fetched:', balances)
+              // The total is computed HERE, never left to the model's arithmetic —
+              // seen live: items summing to ~$14.3 presented as "approximately $8.37".
+              const walletUsd = balances.reduce((s, b) => s + (b.usdValue ?? 0), 0)
+              const netCollateralUsd = collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
               result = {
                 balances,
                 collateralPositions,
+                totalPortfolioUsd: Number((walletUsd + netCollateralUsd).toFixed(2)),
                 note: collateralPositions.length > 0
-                  ? 'Live on-chain balances with live USD reference prices. collateralPositions is stock the user OWNS but has posted as loan collateral on Morpho — it is NOT in the wallet balances above and MUST be listed as its own line ("posted as collateral"), with the debt owed and liquidation price next to it. Its net contribution to total portfolio value is collateralValueUsd minus borrowedUsd.'
-                  : 'Live on-chain balances with live USD reference prices.',
+                  ? 'Live on-chain balances with live USD reference prices. collateralPositions is stock the user OWNS but has posted as loan collateral on Morpho — it is NOT in the wallet balances above and MUST be listed as its own line ("posted as collateral"), with the debt owed and liquidation price next to it. State totalPortfolioUsd as the total portfolio value EXACTLY as given (it already includes collateral net of debt) — never compute your own total.'
+                  : 'Live on-chain balances with live USD reference prices. State totalPortfolioUsd as the total portfolio value exactly as given — never compute your own total.',
               }
             } catch (err) {
               console.error('[robin] Balance fetch error:', err)
