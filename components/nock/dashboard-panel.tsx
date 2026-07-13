@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Bell, Sparkles, ShieldCheck, Percent, Zap } from 'lucide-react'
+import { ShieldCheck, Percent, Zap } from 'lucide-react'
 import { usePrivy, useWallets, getIdentityToken } from '@privy-io/react-auth'
 import { cn } from '@/lib/utils'
 import { type AttentionItem, type Position } from './data'
@@ -223,17 +223,17 @@ export function DashboardPanel({
 }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
-      {/* Tabs */}
-      <div className="flex h-14 shrink-0 items-center gap-0.5 border-b border-border px-4">
+      {/* Tabs — lime pill for the active tab, per the Figma rail */}
+      <div className="flex h-14 shrink-0 items-center gap-1 px-4">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             onClick={() => onTabChange(t.id)}
             className={cn(
-              'rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors',
+              'rounded-full px-3.5 py-1.5 font-serif text-sm transition-colors',
               tab === t.id
-                ? 'bg-secondary text-foreground'
+                ? 'bg-primary text-primary-foreground'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >
@@ -247,7 +247,7 @@ export function DashboardPanel({
           <div className="flex flex-col gap-6 p-5">
             {/* Portfolio hero */}
             <div className="rounded-2xl border border-border/60 bg-background/50 px-5 py-5">
-              <p className="text-sm text-muted-foreground">Portfolio value</p>
+              <p className="text-sm text-muted-foreground">Portfolio Value</p>
               <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums text-foreground">
                 {portfolioValue}
               </p>
@@ -265,8 +265,7 @@ export function DashboardPanel({
             {/* Needs attention */}
             <section className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
-                <Bell className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
-                <h2 className="text-sm font-medium text-muted-foreground">Needs attention</h2>
+                <h2 className="font-serif text-lg text-foreground">Needs Attention</h2>
                 {attention.length > 0 && (
                   <span className="rounded-full bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground">
                     {attention.length}
@@ -301,8 +300,7 @@ export function DashboardPanel({
             {/* Active positions */}
             <section className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
-                <Sparkles className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
-                <h2 className="text-sm font-medium text-muted-foreground">Active positions</h2>
+                <h2 className="font-serif text-lg text-foreground">Active Positions</h2>
                 <span className="rounded-full bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground">
                   {positions.length}
                 </span>

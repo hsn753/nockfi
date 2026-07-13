@@ -8,9 +8,10 @@ import { AgentIcon } from './agent-icon'
 type Props = {
   selectedAgent: AgentId | null
   onSelect: (id: AgentId | null) => void
+  onChatWithRobin: () => void
 }
 
-export function AgentsView({ selectedAgent, onSelect }: Props) {
+export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-background md:flex-row">
       {/* Grid */}
@@ -49,18 +50,17 @@ export function AgentsView({ selectedAgent, onSelect }: Props) {
                   <p className="text-sm font-medium text-foreground">
                     {a.name}
                   </p>
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <span
-                      className={cn(
-                        'size-1.5 rounded-full',
-                        a.status === 'active' ? 'bg-primary' : 'bg-muted-foreground/40',
-                      )}
-                    />
+                  <span
+                    className={cn(
+                      'text-xs',
+                      a.status === 'active' ? 'text-primary' : 'text-muted-foreground',
+                    )}
+                  >
                     {a.status === 'active' ? 'Active' : 'Available'}
                   </span>
                 </div>
                 {a.gated && (
-                  <span className="flex items-center gap-1 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                  <span className="flex items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                     <Lock className="size-3" strokeWidth={2} />
                     $NOCK
                   </span>
@@ -76,13 +76,13 @@ export function AgentsView({ selectedAgent, onSelect }: Props) {
 
       {/* Detail panel */}
       {selectedAgent && (
-        <AgentDetail id={selectedAgent} onBack={() => onSelect(null)} />
+        <AgentDetail id={selectedAgent} onBack={() => onSelect(null)} onChatWithRobin={onChatWithRobin} />
       )}
     </div>
   )
 }
 
-function AgentDetail({ id, onBack }: { id: AgentId; onBack: () => void }) {
+function AgentDetail({ id, onBack, onChatWithRobin }: { id: AgentId; onBack: () => void; onChatWithRobin: () => void }) {
   const agent = getAgent(id)
   return (
     <div className="flex min-h-0 w-full flex-col overflow-y-auto bg-card md:w-96 md:shrink-0 md:border-l md:border-border">
@@ -103,16 +103,15 @@ function AgentDetail({ id, onBack }: { id: AgentId; onBack: () => void }) {
             <AgentIcon agent={agent.id} className="size-5" />
           </span>
           <div>
-            <h2 className="text-base font-semibold text-foreground">
+            <h2 className="font-serif text-lg text-foreground">
               {agent.name}
             </h2>
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <span
-                className={cn(
-                  'size-1.5 rounded-full',
-                  agent.status === 'active' ? 'bg-primary' : 'bg-muted-foreground/40',
-                )}
-              />
+            <span
+              className={cn(
+                'text-xs',
+                agent.status === 'active' ? 'text-primary' : 'text-muted-foreground',
+              )}
+            >
               {agent.status === 'active' ? 'Active' : 'Available'}
             </span>
           </div>
@@ -131,8 +130,8 @@ function AgentDetail({ id, onBack }: { id: AgentId; onBack: () => void }) {
           {agent.description}
         </p>
 
-        <h3 className="mt-5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          What it does
+        <h3 className="mt-6 font-serif text-lg text-foreground">
+          What It Does
         </h3>
         <ul className="mt-2 flex flex-col gap-2">
           {agent.capabilities.map((c) => (
@@ -148,15 +147,16 @@ function AgentDetail({ id, onBack }: { id: AgentId; onBack: () => void }) {
 
         <button
           type="button"
-          className={cn(
-            'mt-6 w-full rounded-xl px-3 py-3 text-sm font-semibold transition-colors',
-            agent.gated
-              ? 'border border-border bg-secondary text-foreground hover:bg-secondary/70'
-              : 'bg-primary text-primary-foreground hover:bg-primary/90',
-          )}
+          onClick={onChatWithRobin}
+          className="mt-6 w-full rounded-full bg-primary px-4 py-3.5 font-serif text-base text-primary-foreground transition-colors hover:bg-primary/90"
         >
-          {agent.gated ? 'Unlock with $NOCK' : 'Chat with Robin about this'}
+          Chat With Robin
         </button>
+        {agent.gated && (
+          <p className="mt-2 text-center text-xs text-muted-foreground">
+            Actions unlock with $NOCK at token launch — asking questions is always free.
+          </p>
+        )}
       </div>
     </div>
   )

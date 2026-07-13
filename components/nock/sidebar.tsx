@@ -39,9 +39,10 @@ type Props = {
   onDeleteConversation: (id: string) => void
 }
 
+// Nav per the Figma sidebar: Chat With Robin first, no separate Overview entry —
+// the dashboard rail IS the overview on desktop (mobile reaches it via BottomNav).
 const navItems: { view: NavView; label: string; icon: typeof LayoutGrid }[] = [
-  { view: 'overview', label: 'Overview', icon: LayoutGrid },
-  { view: 'chat', label: 'Chat with Robin', icon: MessageSquare },
+  { view: 'chat', label: 'Chat With Robin', icon: MessageSquare },
 ]
 
 export function Sidebar({
@@ -135,9 +136,7 @@ export function Sidebar({
                       )}
                     >
                       <AgentIcon agent={a.id} className="size-4 shrink-0" />
-                      <span className="flex-1 text-left">
-                        {a.name.replace(' agent', '')}
-                      </span>
+                      <span className="flex-1 text-left">{a.navLabel}</span>
                       {a.gated && (
                         <span className="size-1.5 rounded-full bg-primary/70" />
                       )}
@@ -226,12 +225,10 @@ export function Sidebar({
             type="button"
             onClick={login}
             disabled={!ready}
-            className="flex w-full items-center gap-3 rounded-xl border border-border bg-background/40 px-3 py-3 transition-colors hover:bg-secondary/60 disabled:opacity-50"
+            className="flex w-full items-center justify-center gap-2.5 rounded-full bg-primary px-4 py-3.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
           >
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground">
-              <Wallet className="size-4" strokeWidth={1.75} />
-            </span>
-            <span className="text-sm text-muted-foreground">Connect wallet</span>
+            <Wallet className="size-4" strokeWidth={2} />
+            Connect Wallet
           </button>
         )}
 

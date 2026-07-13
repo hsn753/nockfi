@@ -883,6 +883,7 @@ export function NockApp() {
         <AgentsView
           selectedAgent={selectedAgent}
           onSelect={handleSelectAgent}
+          onChatWithRobin={() => setActiveView('chat')}
         />
       )
     }
@@ -925,6 +926,7 @@ export function NockApp() {
           <AgentsView
             selectedAgent={selectedAgent}
             onSelect={handleSelectAgent}
+            onChatWithRobin={() => setActiveView('chat')}
           />
         )
       case 'activity':

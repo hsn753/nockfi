@@ -11,6 +11,8 @@ export type AgentId = 'yield' | 'perps' | 'swap' | 'stock' | 'vault'
 export type Agent = {
   id: AgentId
   name: string
+  // Sidebar label per the Figma nav ("Swaps", "Tokenized Stocks" — not the card names).
+  navLabel: string
   tagline: string
   description: string
   capabilities: string[]
@@ -21,6 +23,7 @@ export type Agent = {
 export const agents: Agent[] = [
   {
     id: 'yield',
+    navLabel: 'Yield',
     name: 'Yield agent',
     tagline: 'Earn on idle stablecoins across vetted lending markets.',
     description:
@@ -35,6 +38,7 @@ export const agents: Agent[] = [
   },
   {
     id: 'perps',
+    navLabel: 'Perps',
     name: 'Perps agent',
     tagline: 'Trade perpetual futures with managed risk.',
     description:
@@ -49,6 +53,7 @@ export const agents: Agent[] = [
   },
   {
     id: 'swap',
+    navLabel: 'Swaps',
     name: 'Swap agent',
     tagline: 'Swap tokens at the best route with low slippage.',
     description:
@@ -63,6 +68,7 @@ export const agents: Agent[] = [
   },
   {
     id: 'stock',
+    navLabel: 'Tokenized Stocks',
     name: 'Stock token agent',
     tagline: 'Trade tokenized stocks, live around the clock.',
     description:
@@ -77,6 +83,7 @@ export const agents: Agent[] = [
   },
   {
     id: 'vault',
+    navLabel: 'Vault',
     name: 'Vault agent',
     tagline: 'Sets and enforces your guardrails on every action.',
     description:
