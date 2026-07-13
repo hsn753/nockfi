@@ -172,7 +172,7 @@ When the user asks what they hold, their portfolio, their balances, or anything 
 - Each holding includes a real usdValue (ETH and WETH from CoinGecko, USDG hardcoded at 1). usdValue is a number — including 0 for a zero balance, which just means $0, not "unavailable." It is only null if a price feed failed for that specific asset; only then say its dollar value isn't available right now. Present both the token amount and its $ value, and total everything with a usdValue into a portfolio $ figure.
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
 - If the user asks about their balance of one specific VERIFIED token (${SUPPORTED_TOKENS_LIST}) — e.g. "what's my USDG balance" — just call get_wallet_holdings and answer from that one entry. Do NOT call get_token_balance for a verified token; that tool takes a raw contract address, not a symbol, and will fail or be misused if you pass a symbol like "USDG" as if it were an address.
-- get_wallet_holdings checks the verified token list (${SUPPORTED_TOKENS_LIST}) PLUS every official Robinhood stock token the wallet holds a nonzero balance of (marked "official stock token"). A stock holdings question ("how much TSLA do I hold") is answered directly from get_wallet_holdings — if the stock doesn't appear there, the user holds none of the OFFICIAL token; never go looking for a stock symbol among unverified tokens. It cannot see memecoins or other unverified tokens, even one the user swapped into through this app. If the user asks specifically about a memecoin/community token they hold that's NOT in that verified list (by name or address), you MUST call get_token_balance with that token's exact contract address (look it up via get_trending_tokens first if you only have a symbol) — this is a real, separate on-chain balance check. NEVER say a user holds "0" of a specific token, or that a token isn't in their wallet, without having actually called the right tool for it. Saying a specific number with no tool call behind it is exactly the kind of invented data you must never produce.
+- get_wallet_holdings checks the verified token list (${SUPPORTED_TOKENS_LIST}) PLUS every official Robinhood stock token the wallet holds a nonzero balance of (marked "official stock token"). If it returns collateralPositions, ALWAYS list them: that stock is still the user's, just posted as loan collateral — show the amount, the debt owed, and the liquidation price, and count (collateral value − debt) into the total instead of dropping it. A stock holdings question ("how much TSLA do I hold") is answered directly from get_wallet_holdings — if the stock doesn't appear there, the user holds none of the OFFICIAL token; never go looking for a stock symbol among unverified tokens. It cannot see memecoins or other unverified tokens, even one the user swapped into through this app. If the user asks specifically about a memecoin/community token they hold that's NOT in that verified list (by name or address), you MUST call get_token_balance with that token's exact contract address (look it up via get_trending_tokens first if you only have a symbol) — this is a real, separate on-chain balance check. NEVER say a user holds "0" of a specific token, or that a token isn't in their wallet, without having actually called the right tool for it. Saying a specific number with no tool call behind it is exactly the kind of invented data you must never produce.
 
 When the user asks what's trending, hot, popular, pumping, or moving on Robinhood Chain, without naming a specific token:
 - Call get_trending_tokens with no symbol argument — it returns the current top tokens by trading volume. This is a real, valid request on its own, not just a lookup step before a swap — do not deflect it as off-topic.
@@ -854,11 +854,21 @@ export async function POST(request: Request) {
           } else {
             try {
               console.log('[robin] Fetching balances for:', walletAddress)
-              const balances = await fetchWalletBalances(walletAddress)
+              // Collateral positions ride along — without them, stock posted as
+              // collateral silently vanishes from the answer (seen live: a borrow
+              // made TSLA "disappear" and the stated portfolio total drop, when the
+              // user still owned it and owed 2 USDG against it).
+              const [balances, collateralPositions] = await Promise.all([
+                fetchWalletBalances(walletAddress),
+                getStockBorrowPositions(walletAddress).catch(() => []),
+              ])
               console.log('[robin] Balances fetched:', balances)
               result = {
                 balances,
-                note: 'Live on-chain balances with live USD reference prices.',
+                collateralPositions,
+                note: collateralPositions.length > 0
+                  ? 'Live on-chain balances with live USD reference prices. collateralPositions is stock the user OWNS but has posted as loan collateral on Morpho — it is NOT in the wallet balances above and MUST be listed as its own line ("posted as collateral"), with the debt owed and liquidation price next to it. Its net contribution to total portfolio value is collateralValueUsd minus borrowedUsd.'
+                  : 'Live on-chain balances with live USD reference prices.',
               }
             } catch (err) {
               console.error('[robin] Balance fetch error:', err)
