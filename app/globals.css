@@ -5,7 +5,8 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-heading: var(--font-sans);
+  --font-heading: var(--font-serif), ui-serif, Georgia, serif;
+  --font-serif: var(--font-instrument-serif), ui-serif, Georgia, serif;
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
   --color-ring: var(--ring);
@@ -42,7 +43,7 @@
   --card-foreground: #f5f5f5;
   --popover: #141414;
   --popover-foreground: #f5f5f5;
-  --primary: #5eead4;
+  --primary: #ccff00;
   --primary-foreground: #0a0a0a;
   --secondary: #1c1c1c;
   --secondary-foreground: #f5f5f5;
@@ -51,11 +52,11 @@
   --accent: #1c1c1c;
   --accent-foreground: #f5f5f5;
   --destructive: #f87171;
-  --success: #5eead4;
+  --success: #ccff00;
   --warning: #e8c16a;
   --border: #232323;
   --input: #232323;
-  --ring: #5eead4;
+  --ring: #ccff00;
   --radius: 1rem;
 }
 

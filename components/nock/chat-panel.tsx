@@ -5,6 +5,7 @@ import { Send, SquarePen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from './data'
 import { RobinAvatar } from './robin-avatar'
+import { NockMark } from './nock-logo'
 import { ActionPreviewCard } from './action-preview-card'
 import { BridgeInfoCard } from './bridge-info-card'
 
@@ -160,10 +161,12 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
         <div className="mx-auto flex max-w-2xl flex-col gap-7 px-5 py-8 md:px-6">
           {messages.length === 0 && !isLoading && (
             <div className="flex flex-col items-center justify-center py-24 text-center">
-              <RobinAvatar className="mb-4 size-14 opacity-60" />
-              <p className="text-base font-medium text-foreground">How can I help?</p>
-              <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
-                Ask me to put your USDC to work, swap tokens, open a position, or explore your options.
+              <NockMark className="mb-8 size-20" />
+              <h2 className="font-serif text-3xl text-foreground md:text-4xl">
+                Hey, I&rsquo;m Robin, how can I help?
+              </h2>
+              <p className="mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
+                Ask me to put your USDG to work, swap tokens, open a position, or explore your options.
               </p>
             </div>
           )}

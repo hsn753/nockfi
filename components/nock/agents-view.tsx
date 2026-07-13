@@ -20,11 +20,11 @@ export function AgentsView({ selectedAgent, onSelect }: Props) {
           selectedAgent && 'hidden md:block',
         )}
       >
-        <header className="flex h-14 items-center border-b border-border px-5">
+        <header className="flex items-center border-b border-border px-5 py-4">
           <div>
-            <h1 className="text-sm font-semibold text-foreground">Agents</h1>
-            <p className="text-xs text-muted-foreground">
-              Five specialized agents, one concierge
+            <h1 className="font-serif text-2xl text-foreground">Nock Agent Suite</h1>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              All of our tailored agents in one spot.
             </p>
           </div>
         </header>

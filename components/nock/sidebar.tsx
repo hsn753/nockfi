@@ -4,7 +4,6 @@ import { useState } from 'react'
 import {
   LayoutGrid,
   MessageSquare,
-  Bot,
   Activity,
   Settings,
   ChevronDown,
@@ -16,6 +15,7 @@ import { cn } from '@/lib/utils'
 import type { ConversationSummary } from '@/lib/chat-storage'
 import { agents, user, type NavView, type AgentId } from './data'
 import { AgentIcon } from './agent-icon'
+import { NockLogo, NockMark } from './nock-logo'
 
 function formatRelative(ts: number): string {
   const diff = Date.now() - ts
@@ -67,10 +67,7 @@ export function Sidebar({
     <div className="flex h-full flex-col bg-card">
       {/* Wordmark */}
       <div className="flex h-14 items-center px-5">
-        <span className="text-lg font-semibold tracking-tight">
-          <span className="text-foreground">N</span>
-          <span className="text-primary">ock</span>
-        </span>
+        <NockLogo />
       </div>
 
       {/* Nav */}
@@ -105,7 +102,7 @@ export function Sidebar({
                 }}
                 className="flex flex-1 items-center gap-3 py-2.5 pl-3 pr-2 text-left"
               >
-                <Bot className="size-4 shrink-0" strokeWidth={1.75} />
+                <NockMark className="size-4 shrink-0" />
                 <span className="flex-1">Agents</span>
               </button>
               <button
