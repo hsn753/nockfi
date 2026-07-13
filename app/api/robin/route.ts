@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import { isAddress } from 'viem'
+import { isAddress, formatUnits } from 'viem'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
@@ -836,9 +836,13 @@ export async function POST(request: Request) {
                 // amount drives the client's balance pre-flight: the approval amount is
                 // what actually leaves the wallet. '0' (no approval — borrow-only or
                 // withdraw-only) makes that check a no-op; the address must still be a
-                // real ERC20 for the balanceOf read, so USDG stands in.
+                // real ERC20 for the balanceOf read, so USDG stands in. formatUnits,
+                // never float math: Number()/10**18 on an 18-decimal amount rounded a
+                // full-balance collateral post UP by one wei, and the pre-flight then
+                // demanded more than the wallet holds ("Not enough TSLA ...709 vs
+                // ...708" — seen live).
                 amount: lastCollateralQuote.approval
-                  ? (Number(lastCollateralQuote.approval.amountRaw) / 10 ** lastCollateralQuote.approval.tokenDecimals).toString()
+                  ? formatUnits(BigInt(lastCollateralQuote.approval.amountRaw), lastCollateralQuote.approval.tokenDecimals)
                   : '0',
                 verified: true,
                 sellTokenAddress: lastCollateralQuote.approval?.tokenAddress ?? '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
@@ -1468,7 +1472,7 @@ export async function POST(request: Request) {
             routeVia: 'morpho-collateral',
             fromToken: q.approval?.tokenSymbol ?? q.stockSymbol,
             toToken: isBorrow ? 'USDG' : `${q.stockSymbol} loan`,
-            amount: q.approval ? (Number(q.approval.amountRaw) / 10 ** q.approval.tokenDecimals).toString() : '0',
+            amount: q.approval ? formatUnits(BigInt(q.approval.amountRaw), q.approval.tokenDecimals) : '0',
             verified: true,
             sellTokenAddress: q.approval?.tokenAddress ?? '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
             sellTokenDecimals: q.approval?.tokenDecimals ?? 6,
