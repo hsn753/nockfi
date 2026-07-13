@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDb } from '@/lib/db/client'
 import { wallets } from '@/lib/db/schema'
-import { getStockBorrowPositions } from '@/lib/get-stock-collateral'
+import { getAllStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { syncLoanRiskEvents } from '@/lib/db/loan-risk'
 
 // Scheduled sweep (vercel.json crons) over every wallet this app has ever seen:
@@ -27,23 +27,26 @@ export async function GET(req: NextRequest) {
     const db = getDb()
     const allWallets = await db.select({ id: wallets.id, address: wallets.address }).from(wallets)
 
-    let checked = 0
     let opened = 0
     let resolved = 0
     let withLoans = 0
 
-    // Sequential on purpose: tens of wallets at most today, and parallel sweeps
-    // would hammer the RPC and the oracle for no reason.
+    // All wallets' positions in a handful of multicalls (one position read per
+    // wallet×market, chunked; market state and oracle read once per market) —
+    // ~3 RPC round-trips per 400 wallets rather than ~4 per wallet, so the sweep
+    // stays inside the function budget at thousands of users.
+    const allPositions = await getAllStockBorrowPositions(allWallets.map((w) => w.address))
+    const checked = allWallets.length
+
     for (const w of allWallets) {
       try {
-        const positions = await getStockBorrowPositions(w.address)
-        checked++
+        const positions = allPositions.get(w.address.toLowerCase()) ?? []
         if (positions.length > 0) withLoans++
         const r = await syncLoanRiskEvents(w.id, positions)
         opened += r.opened
         resolved += r.resolved
       } catch (err) {
-        console.error(`[monitor-loans] Failed for ${w.address}:`, err)
+        console.error(`[monitor-loans] Sync failed for ${w.address}:`, err)
       }
     }
 

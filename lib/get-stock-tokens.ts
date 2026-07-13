@@ -175,11 +175,24 @@ async function fetchPrices(addresses: string[]): Promise<Map<string, { priceUsd:
   return out
 }
 
+// The registry list is cached above, but prices previously hit DexScreener on
+// EVERY call — every holdings check, quote, and collateral lookup. That's fine
+// for a handful of users and a rate-limit death spiral at scale, so the fully
+// priced result is cached too. 60s keeps prices honest for display while
+// collapsing any burst of traffic to at most one upstream fetch a minute per
+// server instance. (Trade execution never depends on these prices — quotes come
+// from the pools/oracles directly.)
+const PRICED_CACHE_TTL_MS = 60 * 1000
+let cachedPriced: StockToken[] | null = null
+let pricedCacheExpiresAt = 0
+
 export async function getStockTokens(): Promise<StockToken[]> {
+  if (cachedPriced && Date.now() < pricedCacheExpiresAt) return cachedPriced
+
   const registry = await fetchVerifiedRegistry()
   const prices = await fetchPrices(registry.map((r) => r.address))
 
-  return registry
+  const priced = registry
     .map((r) => {
       const p = prices.get(r.address.toLowerCase())
       return {
@@ -190,6 +203,10 @@ export async function getStockTokens(): Promise<StockToken[]> {
       }
     })
     .sort((a, b) => b.volume24hUsd - a.volume24hUsd)
+
+  cachedPriced = priced
+  pricedCacheExpiresAt = Date.now() + PRICED_CACHE_TTL_MS
+  return priced
 }
 
 // The ONLY correct way to resolve a stock symbol to a contract address. Exact

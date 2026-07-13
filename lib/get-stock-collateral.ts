@@ -308,40 +308,75 @@ export type StockBorrowPosition = {
 }
 
 export async function getStockBorrowPositions(user: string): Promise<StockBorrowPosition[]> {
+  const all = await getAllStockBorrowPositions([user])
+  return all.get(user.toLowerCase()) ?? []
+}
+
+// Batch scan built for the monitoring sweep: positions for N wallets × M markets
+// go through Multicall3 in chunks, and market state + oracle price are read ONCE
+// per market — not once per wallet. The per-wallet loop this replaced was ~4 RPC
+// round-trips per wallet, which is a non-starter for a sweep over thousands of
+// users (and the reason the single-wallet reader above now just delegates here).
+const MULTICALL_CHUNK = 400
+
+export async function getAllStockBorrowPositions(addresses: string[]): Promise<Map<string, StockBorrowPosition[]>> {
+  const out = new Map<string, StockBorrowPosition[]>()
+  if (addresses.length === 0) return out
   const markets = await getStockCollateralMarkets()
-  const positions = await Promise.all(markets.map(async (m) => {
-    const [pos, state, oraclePrice] = await Promise.all([
-      rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'position', args: [m.id, user as `0x${string}`] }),
+  if (markets.length === 0) return out
+
+  // One state + oracle read per market.
+  const marketLive = await Promise.all(markets.map(async (m) => {
+    const [state, oraclePrice] = await Promise.all([
       rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
       rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
     ])
-    const collateralRaw = pos[2]
-    const borrowShares = pos[1]
-    if (collateralRaw === BigInt(0) && borrowShares === BigInt(0)) return null
-
-    const totalBorrowAssets = state[2]
-    const totalBorrowShares = state[3]
-    const borrowedRaw = totalBorrowShares === BigInt(0)
-      ? BigInt(0)
-      : (borrowShares * totalBorrowAssets) / totalBorrowShares
-    const collateralUnits = Number(formatUnits(collateralRaw, STOCK_DECIMALS))
-    const priceUsd = Number(oraclePrice) / ORACLE_PRICE_SCALE
-    const collateralValueUsd = collateralUnits * priceUsd
-    const borrowedUsd = Number(formatUnits(borrowedRaw, USDG_DECIMALS))
-    const lltv = Number(m.params.lltv) / 1e18
-    const maxDebtUsd = collateralValueUsd * lltv
-    return {
-      stockSymbol: m.stockSymbol,
-      collateralAmount: collateralUnits.toLocaleString('en-US', { maximumFractionDigits: 8 }),
-      collateralValueUsd,
-      borrowedUsd,
-      ltvUtilizationPct: maxDebtUsd > 0 ? (borrowedUsd / maxDebtUsd) * 100 : 0,
-      liquidationPriceUsd: collateralUnits > 0 && borrowedUsd > 0
-        ? borrowedUsd / (collateralUnits * lltv)
-        : null,
-    }
+    return { m, totalBorrowAssets: state[2], totalBorrowShares: state[3], priceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE }
   }))
-  return positions.filter((p): p is StockBorrowPosition => p !== null)
+
+  // Every (wallet, market) position via multicall, chunked.
+  const calls = addresses.flatMap((addr) => markets.map((m) => ({
+    address: MORPHO_CORE as `0x${string}`,
+    abi: MORPHO_VIEW_ABI,
+    functionName: 'position' as const,
+    args: [m.id, addr as `0x${string}`] as const,
+  })))
+  const results: unknown[] = []
+  for (let i = 0; i < calls.length; i += MULTICALL_CHUNK) {
+    const chunk = await rpcClient.multicall({ contracts: calls.slice(i, i + MULTICALL_CHUNK), allowFailure: true })
+    results.push(...chunk)
+  }
+
+  addresses.forEach((addr, ai) => {
+    const positions: StockBorrowPosition[] = []
+    marketLive.forEach((live, mi) => {
+      const r = results[ai * markets.length + mi] as { status: string; result?: readonly [bigint, bigint, bigint] }
+      if (r.status !== 'success' || !r.result) return
+      const [, borrowShares, collateralRaw] = r.result
+      if (collateralRaw === BigInt(0) && borrowShares === BigInt(0)) return
+
+      const borrowedRaw = live.totalBorrowShares === BigInt(0)
+        ? BigInt(0)
+        : (borrowShares * live.totalBorrowAssets) / live.totalBorrowShares
+      const collateralUnits = Number(formatUnits(collateralRaw, STOCK_DECIMALS))
+      const collateralValueUsd = collateralUnits * live.priceUsd
+      const borrowedUsd = Number(formatUnits(borrowedRaw, USDG_DECIMALS))
+      const lltv = Number(live.m.params.lltv) / 1e18
+      const maxDebtUsd = collateralValueUsd * lltv
+      positions.push({
+        stockSymbol: live.m.stockSymbol,
+        collateralAmount: collateralUnits.toLocaleString('en-US', { maximumFractionDigits: 8 }),
+        collateralValueUsd,
+        borrowedUsd,
+        ltvUtilizationPct: maxDebtUsd > 0 ? (borrowedUsd / maxDebtUsd) * 100 : 0,
+        liquidationPriceUsd: collateralUnits > 0 && borrowedUsd > 0
+          ? borrowedUsd / (collateralUnits * lltv)
+          : null,
+      })
+    })
+    out.set(addr.toLowerCase(), positions)
+  })
+  return out
 }
 
 // ---------------------------------------------------------------------------
