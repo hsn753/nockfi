@@ -1233,12 +1233,30 @@ export async function POST(request: Request) {
               if (!('error' in quote)) {
                 const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user')
                 if (lastUserMsg) {
-                  const named: string[] = []
+                  const namedAll: string[] = []
                   for (const w of extractCandidateTokenWords(lastUserMsg.text)) {
-                    if (await findStockToken(w).catch(() => null)) named.push(w)
+                    if (await findStockToken(w).catch(() => null)) namedAll.push(w)
                   }
-                  if (named.length > 0 && !named.includes(quote.stockSymbol.toUpperCase())) {
-                    symbolMismatch = `The user's message names ${named.join('/')}, but this quote is for ${quote.stockSymbol}. Never substitute a different stock position. Quote again with the symbol the user actually named, or ask them to clarify which position they mean.`
+                  if (namedAll.length > 0 && !namedAll.includes(quote.stockSymbol.toUpperCase())) {
+                    // Ticker/common-word collisions must not block legit quotes:
+                    // several official tickers are everyday words ("how much would
+                    // it COST to borrow against my Apple" names Costco; "borrow some
+                    // COIN against my Tesla" names Coinbase). A named symbol only
+                    // counts as the-stock-the-user-means if the wallet actually
+                    // holds it or has a position in it — a real substitution (user
+                    // holds NVDA, said NVDA, quote is TSLA) is still caught.
+                    const [holdings, loanPositions] = await Promise.all([
+                      fetchWalletBalances(walletAddress as `0x${string}`).catch(() => []),
+                      getStockBorrowPositions(walletAddress).catch(() => []),
+                    ])
+                    const ownable = new Set<string>([
+                      ...holdings.filter((b) => parseFloat(String(b.amount).replace(/[<,]/g, '')) > 0).map((b) => b.symbol.toUpperCase()),
+                      ...loanPositions.map((p) => p.stockSymbol.toUpperCase()),
+                    ])
+                    const named = namedAll.filter((w) => ownable.has(w))
+                    if (named.length > 0 && !named.includes(quote.stockSymbol.toUpperCase())) {
+                      symbolMismatch = `The user's message names ${named.join('/')}, which they actually hold, but this quote is for ${quote.stockSymbol}. Never substitute a different stock position. Quote again with the symbol the user actually named, or ask them to clarify which position they mean.`
+                    }
                   }
                 }
               }
