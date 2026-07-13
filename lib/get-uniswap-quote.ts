@@ -119,6 +119,10 @@ export type UniswapStockQuote = {
   sellTokenDecimals: number
   routeVia: 'uniswap-v4'
   poolFeePct: number
+  // Unix seconds after which the encoded transaction's on-chain deadline check
+  // reverts. Exposed so the client can refuse a stale card BEFORE broadcasting —
+  // confirming past the deadline burns gas on a guaranteed revert (seen live).
+  deadlineTimestamp?: number
   error?: string
 }
 
@@ -249,5 +253,6 @@ export async function fetchUniswapStockQuote(params: {
       gasPrice: (gasPrice * BigInt(2)).toString(),
     },
     poolFeePct: best.tier.fee / 10000,
+    deadlineTimestamp: Number(deadline),
   }
 }

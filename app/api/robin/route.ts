@@ -823,6 +823,7 @@ export async function POST(request: Request) {
                 // Stock trades execute through the Uniswap Universal Router (Permit2
                 // settlement), not the 0x router — the client picks its executor off this.
                 ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
+                ...(lastSwapQuote.deadlineTimestamp ? { quoteDeadline: lastSwapQuote.deadlineTimestamp } : {}),
               } : {}),
               ...(input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote ? {
                 transactionData: lastYieldQuote.transaction,
@@ -1224,8 +1225,28 @@ export async function POST(request: Request) {
                 : (repayUsd
                     ? await buildStockRepay(walletAddress, stockSymbol, repayUsd === 'all' ? 'all' : repayUsd)
                     : { error: "repayUsd is required — an exact USDG amount or 'all'." })
+              // Same silent-substitution backstop quoted trades have: if the user's
+              // own message names an official stock symbol, the collateral quote must
+              // be for that stock — the model must never quietly borrow against a
+              // different position than the one the user asked about.
+              let symbolMismatch: string | undefined
+              if (!('error' in quote)) {
+                const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user')
+                if (lastUserMsg) {
+                  const named: string[] = []
+                  for (const w of extractCandidateTokenWords(lastUserMsg.text)) {
+                    if (await findStockToken(w).catch(() => null)) named.push(w)
+                  }
+                  if (named.length > 0 && !named.includes(quote.stockSymbol.toUpperCase())) {
+                    symbolMismatch = `The user's message names ${named.join('/')}, but this quote is for ${quote.stockSymbol}. Never substitute a different stock position. Quote again with the symbol the user actually named, or ask them to clarify which position they mean.`
+                  }
+                }
+              }
+
               if ('error' in quote) {
                 result = { error: quote.error }
+              } else if (symbolMismatch) {
+                result = { error: symbolMismatch }
               } else {
                 lastCollateralQuote = quote
                 // A quoted trade and a quoted collateral action are mutually exclusive
@@ -1467,6 +1488,7 @@ export async function POST(request: Request) {
               sellTokenAddress: lastSwapQuote.sellTokenAddress,
               sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
               ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
+              ...(lastSwapQuote.deadlineTimestamp ? { quoteDeadline: lastSwapQuote.deadlineTimestamp } : {}),
             } as object),
           } as any
           responseText = `Here's the trade preview, built from the live quote. Press Confirm on the card to execute it, or Review to check the details first.`

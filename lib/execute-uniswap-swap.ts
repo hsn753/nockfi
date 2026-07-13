@@ -1,5 +1,6 @@
 import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits } from 'viem'
 import { UNISWAP_V4 } from './get-uniswap-quote'
+import { resolveSendGasPrice } from './gas'
 
 // Executes a stock-token trade through the Uniswap Universal Router. Unlike the 0x
 // router (which pulls tokens via a direct ERC20 allowance), the Universal Router
@@ -109,7 +110,7 @@ export async function executeUniswapV4Swap({
       to: router,
       data: transaction.data as `0x${string}`,
       gas: BigInt(transaction.gas),
-      gasPrice: BigInt(transaction.gasPrice),
+      gasPrice: await resolveSendGasPrice(publicClient, transaction.gasPrice),
       value: BigInt(transaction.value || '0'),
     })
 

@@ -1,5 +1,6 @@
 import { type Hash, type WalletClient, type PublicClient, erc20Abi } from 'viem'
 import type { CollateralStep } from './get-stock-collateral'
+import { resolveSendGasPrice } from './gas'
 
 // Executes a Morpho collateral action: an optional exact-amount ERC20 approval,
 // then each quoted step in order (supplyCollateral -> borrow, or repay ->
@@ -64,7 +65,7 @@ export async function executeCollateralSequence({
         to: s.to as `0x${string}`,
         data: s.data as `0x${string}`,
         gas: BigInt(s.gas),
-        gasPrice: BigInt(s.gasPrice),
+        gasPrice: await resolveSendGasPrice(publicClient, s.gasPrice),
         value: BigInt(s.value || '0'),
       })
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })

@@ -13,6 +13,7 @@ import {
 import { executeSwap } from '@/lib/execute-swap'
 import { executeUniswapV4Swap } from '@/lib/execute-uniswap-swap'
 import { executeCollateralSequence } from '@/lib/execute-collateral'
+import { resolveSendGasPrice } from '@/lib/gas'
 import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
@@ -514,6 +515,17 @@ export function NockApp() {
           throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
         }
 
+        // Stock-trade quotes carry an on-chain deadline (15 min). Confirming a
+        // stale card would broadcast a guaranteed revert — gas spent, confusing
+        // "slippage" error (exactly how the first live TSLA buy failed). Refuse
+        // BEFORE broadcasting, with the honest reason.
+        const quoteDeadline = (action as any).quoteDeadline as number | undefined
+        if (quoteDeadline && Math.floor(Date.now() / 1000) > quoteDeadline) {
+          throw new Error(
+            'This trade preview has expired — quotes are only valid for 15 minutes, and executing an expired one would fail on-chain and still cost gas. Nothing was sent. Ask for a fresh quote and confirm that one.',
+          )
+        }
+
         // The Privy session policy that constrains delegated (instant-swap) execution
         // only allows transactions to the 0x swap router — a Morpho lend/withdraw would
         // be rejected server-side by Privy. Decline honestly up front rather than
@@ -540,8 +552,11 @@ export function NockApp() {
         // transaction tends to hang and time out instead of failing cleanly.
         if (publicClient && signerAddress && isWithdrawal) {
           // Withdrawal: only gas needs covering — the USDG comes back to the wallet.
+          // Gas priced with the SAME resolver the executors send with — a pre-flight
+          // priced at the (possibly stale) quoted gasPrice could pass and the real
+          // send still fail on funds.
           const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
-          const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
+          const gasCost = BigInt(txData.gas || '0') * (await resolveSendGasPrice(publicClient, txData.gasPrice))
           if (ethBalance < gasCost) {
             throw new Error(
               `Not enough ETH for gas. This withdrawal needs about ${formatUnits(gasCost, 18)} ETH for gas, but this wallet has ${formatUnits(ethBalance, 18)} ETH on Robinhood Chain.`,
@@ -551,7 +566,7 @@ export function NockApp() {
           const isNativeEth = sellTokenAddress.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()
           const requiredAmount = parseUnits(fromAmount, sellTokenDecimals)
           const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
-          const gasCost = BigInt(txData.gas || '0') * BigInt(txData.gasPrice || '0')
+          const gasCost = BigInt(txData.gas || '0') * (await resolveSendGasPrice(publicClient, txData.gasPrice))
 
           if (isNativeEth) {
             const totalNeeded = requiredAmount + gasCost

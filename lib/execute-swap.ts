@@ -1,5 +1,6 @@
 import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits, encodeFunctionData } from 'viem'
 import { NATIVE_ETH_ADDRESS } from './get-swap-quote'
+import { resolveSendGasPrice } from './gas'
 
 export type ExecuteSwapParams = {
   walletClient: WalletClient
@@ -73,7 +74,7 @@ export async function executeSwap({
       to: transaction.to as `0x${string}`,
       data: transaction.data as `0x${string}`,
       gas: BigInt(transaction.gas),
-      gasPrice: BigInt(transaction.gasPrice),
+      gasPrice: await resolveSendGasPrice(publicClient, transaction.gasPrice),
       value: BigInt(transaction.value),
     })
 
