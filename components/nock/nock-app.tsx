@@ -131,10 +131,57 @@ export function NockApp() {
       const data = await res.json()
       console.log('[Nock] Balances received:', data.balances)
 
-      const total = (data.balances || []).reduce(
+      const walletTotal = (data.balances || []).reduce(
         (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
         0,
       )
+
+      // Stock posted as loan collateral is still the user's asset, net of the
+      // debt against it. Without this the portfolio total silently dropped by
+      // the full collateral value the moment a loan opened (seen live: a $2
+      // borrow read as a $3 portfolio loss). The same fetch drives the loan
+      // position card and the Vault Agent's liquidation-risk attention item —
+      // the docs' "anything Vault flags surfaces in Needs Attention".
+      type LoanPos = {
+        stockSymbol: string
+        collateralAmount: string
+        collateralValueUsd: number
+        borrowedUsd: number
+        ltvUtilizationPct: number
+        liquidationPriceUsd: number | null
+      }
+      const loans: LoanPos[] = data.collateralPositions || []
+      const netCollateral = loans.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+      const total = walletTotal + netCollateral
+
+      setPositions((prev) => {
+        const withoutLoans = prev.filter((p) => !p.id.startsWith('loan-'))
+        const loanCards: Position[] = loans.map((p) => ({
+          id: `loan-${p.stockSymbol}`,
+          agent: 'stock' as AgentId,
+          title: `${p.stockSymbol} loan — ${p.collateralAmount} ${p.stockSymbol} posted`,
+          subtitle: `Debt $${p.borrowedUsd.toFixed(2)} · liquidation at $${p.liquidationPriceUsd?.toFixed(2) ?? '—'}`,
+          value: `$${(p.collateralValueUsd - p.borrowedUsd).toFixed(2)} net`,
+          meta: `${p.ltvUtilizationPct.toFixed(0)}% of liquidation ceiling`,
+          metaPositive: p.ltvUtilizationPct < 80,
+        }))
+        return [...loanCards, ...withoutLoans]
+      })
+      setAttention((prev) => {
+        const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-'))
+        const risky = loans.filter((p) => p.ltvUtilizationPct >= 80)
+        return [
+          ...risky.map((p) => ({
+            id: `loan-risk-${p.stockSymbol}`,
+            agent: 'vault' as AgentId,
+            title: `${p.stockSymbol} loan is close to liquidation`,
+            subtitle: `Debt is at ${p.ltvUtilizationPct.toFixed(0)}% of the ceiling — liquidation if ${p.stockSymbol} falls to $${p.liquidationPriceUsd?.toFixed(2) ?? '—'}. Repay some debt or post more collateral.`,
+            meta: 'At risk',
+          })),
+          ...withoutLoanRisk,
+        ]
+      })
+
       setRealPortfolioValue(total)
       return total
     } catch (err) {
@@ -667,19 +714,25 @@ export function NockApp() {
             text: `Done! ${action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal' : 'Deposit') : action.agent === 'stock' ? 'Trade' : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
-          const newPosition: Position = {
-            id: `pos-${actionId}`,
-            agent: action.agent,
-            title: action.outcome.title,
-            subtitle: `${agent.name} · active`,
-            value: action.outcome.value,
-            meta: action.outcome.meta,
-            metaPositive: true,
-          }
+          // Collateral actions don't get an action-based card: fetchPortfolioValue
+          // (called right below) derives the authoritative live loan card from the
+          // chain — it shows real debt/LTV and disappears when the loan closes,
+          // which a frozen snapshot card can't do.
+          if ((action as any).routeVia !== 'morpho-collateral') {
+            const newPosition: Position = {
+              id: `pos-${actionId}`,
+              agent: action.agent,
+              title: action.outcome.title,
+              subtitle: `${agent.name} · active`,
+              value: action.outcome.value,
+              meta: action.outcome.meta,
+              metaPositive: true,
+            }
 
-          setPositions((p) =>
-            p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
-          )
+            setPositions((p) =>
+              p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
+            )
+          }
           setAttention((att) => att.filter((x) => x.agent !== action.agent))
 
           return [...updated, confirm]
