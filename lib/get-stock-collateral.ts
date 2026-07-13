@@ -1,4 +1,4 @@
-import { createPublicClient, http, formatUnits, parseAbiItem } from 'viem'
+import { createPublicClient, http, formatUnits, parseUnits, parseAbiItem, encodeFunctionData, erc20Abi } from 'viem'
 import { nockChain } from './chain'
 import { MORPHO_CORE } from './get-morpho-markets'
 import { getStockTokens } from './get-stock-tokens'
@@ -18,6 +18,87 @@ const STOCK_DECIMALS = 18
 const CREATE_MARKET_EVENT = parseAbiItem(
   'event CreateMarket(bytes32 indexed id, (address loanToken, address collateralToken, address oracle, address irm, uint256 lltv) marketParams)',
 )
+
+const MORPHO_WRITE_ABI = [
+  {
+    type: 'function', name: 'supplyCollateral', stateMutability: 'nonpayable',
+    inputs: [
+      {
+        type: 'tuple', name: 'marketParams',
+        components: [
+          { type: 'address', name: 'loanToken' },
+          { type: 'address', name: 'collateralToken' },
+          { type: 'address', name: 'oracle' },
+          { type: 'address', name: 'irm' },
+          { type: 'uint256', name: 'lltv' },
+        ],
+      },
+      { type: 'uint256', name: 'assets' },
+      { type: 'address', name: 'onBehalf' },
+      { type: 'bytes', name: 'data' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function', name: 'borrow', stateMutability: 'nonpayable',
+    inputs: [
+      {
+        type: 'tuple', name: 'marketParams',
+        components: [
+          { type: 'address', name: 'loanToken' },
+          { type: 'address', name: 'collateralToken' },
+          { type: 'address', name: 'oracle' },
+          { type: 'address', name: 'irm' },
+          { type: 'uint256', name: 'lltv' },
+        ],
+      },
+      { type: 'uint256', name: 'assets' },
+      { type: 'uint256', name: 'shares' },
+      { type: 'address', name: 'onBehalf' },
+      { type: 'address', name: 'receiver' },
+    ],
+    outputs: [{ type: 'uint256' }, { type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'repay', stateMutability: 'nonpayable',
+    inputs: [
+      {
+        type: 'tuple', name: 'marketParams',
+        components: [
+          { type: 'address', name: 'loanToken' },
+          { type: 'address', name: 'collateralToken' },
+          { type: 'address', name: 'oracle' },
+          { type: 'address', name: 'irm' },
+          { type: 'uint256', name: 'lltv' },
+        ],
+      },
+      { type: 'uint256', name: 'assets' },
+      { type: 'uint256', name: 'shares' },
+      { type: 'address', name: 'onBehalf' },
+      { type: 'bytes', name: 'data' },
+    ],
+    outputs: [{ type: 'uint256' }, { type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'withdrawCollateral', stateMutability: 'nonpayable',
+    inputs: [
+      {
+        type: 'tuple', name: 'marketParams',
+        components: [
+          { type: 'address', name: 'loanToken' },
+          { type: 'address', name: 'collateralToken' },
+          { type: 'address', name: 'oracle' },
+          { type: 'address', name: 'irm' },
+          { type: 'uint256', name: 'lltv' },
+        ],
+      },
+      { type: 'uint256', name: 'assets' },
+      { type: 'address', name: 'onBehalf' },
+      { type: 'address', name: 'receiver' },
+    ],
+    outputs: [],
+  },
+] as const
 
 const MORPHO_VIEW_ABI = [
   {
@@ -227,4 +308,264 @@ export async function getStockBorrowPositions(user: string): Promise<StockBorrow
     }
   }))
   return positions.filter((p): p is StockBorrowPosition => p !== null)
+}
+
+// ---------------------------------------------------------------------------
+// Execution quote builders. A borrow or repay is a SEQUENCE of transactions
+// (approve handled client-side, then supplyCollateral+borrow / repay+withdraw),
+// so quotes carry an ordered `steps` array instead of the single `transaction`
+// the swap/yield quotes use. Every number is read live on-chain at quote time —
+// same honesty rules as buildMarketSupply/buildMarketWithdraw.
+// ---------------------------------------------------------------------------
+
+// New debt is capped at this fraction of the market's hard LLTV so a fresh
+// position never starts on the liquidation edge — at 77% LLTV and 85% headroom,
+// TSLA has to fall ~13% before liquidation, not 0.1%.
+const BORROW_SAFETY_FRACTION = 0.85
+const COLLATERAL_GAS_LIMIT = '500000'
+
+export type CollateralStep = {
+  label: string
+  to: string
+  data: string
+  value: string
+  gas: string
+  gasPrice: string
+}
+
+export type StockCollateralQuote = {
+  kind: 'stock-borrow' | 'stock-repay'
+  stockSymbol: string
+  steps: CollateralStep[]
+  // ERC20 approval the client must ensure before running steps (null = none needed).
+  approval: { tokenAddress: string; tokenSymbol: string; tokenDecimals: number; amountRaw: string; spender: string } | null
+  collateralDelta: string // stock units posted (borrow) or returned (repay-close), '0' otherwise
+  usdgAmount: string // USDG borrowed or repaid
+  borrowApyPct: number
+  oraclePriceUsd: number
+  ltvUtilizationAfterPct: number
+  liquidationPriceUsdAfter: number | null
+  debtAfterUsd: number
+}
+
+async function getMarketBySymbol(stockSymbol: string) {
+  const markets = await getStockCollateralMarkets()
+  return markets.find((m) => m.stockSymbol.toLowerCase() === stockSymbol.toLowerCase()) ?? null
+}
+
+async function readLiveMarket(m: StockCollateralMarket) {
+  const [state, oraclePrice, gasPrice] = await Promise.all([
+    rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
+    rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
+    rpcClient.getGasPrice(),
+  ])
+  return {
+    totalSupplyAssets: state[0], totalSupplyShares: state[1],
+    totalBorrowAssets: state[2], totalBorrowShares: state[3],
+    priceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE,
+    gasPrice: (gasPrice * BigInt(2)).toString(),
+  }
+}
+
+function step(label: string, data: `0x${string}`, gasPrice: string): CollateralStep {
+  return { label, to: MORPHO_CORE, data, value: '0', gas: COLLATERAL_GAS_LIMIT, gasPrice }
+}
+
+export async function buildStockBorrow(
+  user: string,
+  stockSymbol: string,
+  borrowUsd: string,
+  collateralAmount?: string, // stock units to post; default = the user's full wallet balance
+): Promise<{ error: string } | StockCollateralQuote> {
+  const m = await getMarketBySymbol(stockSymbol)
+  if (!m) return { error: `No Morpho market accepts ${stockSymbol.toUpperCase()} as collateral. Only official stock tokens with a live market can back a loan — call get_stock_collateral_info for the current list.` }
+
+  const borrowAssets = parseUnits(borrowUsd.replace(/,/g, ''), USDG_DECIMALS)
+  if (borrowAssets <= BigInt(0)) return { error: 'Borrow amount must be greater than zero.' }
+
+  const [live, pos, walletBalance] = await Promise.all([
+    readLiveMarket(m),
+    rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'position', args: [m.id, user as `0x${string}`] }),
+    rpcClient.readContract({ address: m.params.collateralToken, abi: erc20Abi, functionName: 'balanceOf', args: [user as `0x${string}`] }),
+  ])
+
+  // Idle liquidity is the hard ceiling on any new borrow.
+  const idleRaw = live.totalSupplyAssets - live.totalBorrowAssets
+  if (borrowAssets > idleRaw) {
+    return { error: `The ${m.stockSymbol} market only has ${formatUnits(idleRaw, USDG_DECIMALS)} USDG available to borrow right now. Borrow up to that amount, or try again later.` }
+  }
+
+  // New collateral to post: explicit amount, or the full wallet balance (more
+  // collateral = lower LTV = safer; the user can name a smaller amount).
+  const postRaw = collateralAmount !== undefined
+    ? parseUnits(collateralAmount.replace(/,/g, ''), STOCK_DECIMALS)
+    : walletBalance
+  if (postRaw > walletBalance) {
+    return { error: `This wallet holds ${formatUnits(walletBalance, STOCK_DECIMALS)} ${m.stockSymbol} — it can't post ${collateralAmount}.` }
+  }
+
+  const existingCollateral = pos[2]
+  const totalCollateralRaw = existingCollateral + postRaw
+  const totalCollateralUnits = Number(formatUnits(totalCollateralRaw, STOCK_DECIMALS))
+  if (totalCollateralUnits <= 0) {
+    return { error: `No ${m.stockSymbol} to use as collateral — the wallet holds none and none is already posted.` }
+  }
+
+  // Existing debt (if any) counts against the same collateral.
+  const existingDebtRaw = live.totalBorrowShares === BigInt(0)
+    ? BigInt(0)
+    : (pos[1] * live.totalBorrowAssets) / live.totalBorrowShares
+  const debtAfterUsd = Number(formatUnits(existingDebtRaw + borrowAssets, USDG_DECIMALS))
+
+  const lltv = Number(m.params.lltv) / 1e18
+  const collateralValueUsd = totalCollateralUnits * live.priceUsd
+  const maxSafeDebtUsd = collateralValueUsd * lltv * BORROW_SAFETY_FRACTION
+  if (debtAfterUsd > maxSafeDebtUsd) {
+    return {
+      error: `Too much borrow for the collateral. ${totalCollateralUnits.toFixed(6)} ${m.stockSymbol} is worth $${collateralValueUsd.toFixed(2)} at the oracle price, which safely supports about $${maxSafeDebtUsd.toFixed(2)} of total debt (${(lltv * 100).toFixed(0)}% LLTV with a safety buffer)${Number(formatUnits(existingDebtRaw, USDG_DECIMALS)) > 0 ? `, and $${formatUnits(existingDebtRaw, USDG_DECIMALS)} is already borrowed` : ''}. Borrow less or post more collateral.`,
+    }
+  }
+
+  const steps: CollateralStep[] = []
+  if (postRaw > BigInt(0)) {
+    steps.push(step(
+      `Post ${formatUnits(postRaw, STOCK_DECIMALS)} ${m.stockSymbol} as collateral`,
+      encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'supplyCollateral', args: [m.params, postRaw, user as `0x${string}`, '0x'] }),
+      live.gasPrice,
+    ))
+  }
+  steps.push(step(
+    `Borrow ${formatUnits(borrowAssets, USDG_DECIMALS)} USDG`,
+    // Receiver is always the user themselves — never a third address.
+    encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'borrow', args: [m.params, borrowAssets, BigInt(0), user as `0x${string}`, user as `0x${string}`] }),
+    live.gasPrice,
+  ))
+
+  const marketData = (await getStockCollateralMarketData()).find((d) => d.stockSymbol === m.stockSymbol)
+
+  return {
+    kind: 'stock-borrow',
+    stockSymbol: m.stockSymbol,
+    steps,
+    approval: postRaw > BigInt(0)
+      ? { tokenAddress: m.params.collateralToken, tokenSymbol: m.stockSymbol, tokenDecimals: STOCK_DECIMALS, amountRaw: postRaw.toString(), spender: MORPHO_CORE }
+      : null,
+    collateralDelta: formatUnits(postRaw, STOCK_DECIMALS),
+    usdgAmount: formatUnits(borrowAssets, USDG_DECIMALS),
+    borrowApyPct: marketData?.borrowApyPct ?? 0,
+    oraclePriceUsd: live.priceUsd,
+    ltvUtilizationAfterPct: (debtAfterUsd / (collateralValueUsd * lltv)) * 100,
+    liquidationPriceUsdAfter: debtAfterUsd / (totalCollateralUnits * lltv),
+    debtAfterUsd,
+  }
+}
+
+export async function buildStockRepay(
+  user: string,
+  stockSymbol: string,
+  repayUsd: string | 'all',
+): Promise<{ error: string } | StockCollateralQuote> {
+  const m = await getMarketBySymbol(stockSymbol)
+  if (!m) return { error: `No Morpho collateral market exists for ${stockSymbol.toUpperCase()}.` }
+
+  const [live, pos] = await Promise.all([
+    readLiveMarket(m),
+    rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'position', args: [m.id, user as `0x${string}`] }),
+  ])
+  const borrowShares = pos[1]
+  const collateralRaw = pos[2]
+  const debtRaw = live.totalBorrowShares === BigInt(0)
+    ? BigInt(0)
+    : (borrowShares * live.totalBorrowAssets) / live.totalBorrowShares
+  const debtUsd = Number(formatUnits(debtRaw, USDG_DECIMALS))
+
+  // No debt: "repay" means getting the posted collateral back out.
+  if (debtRaw === BigInt(0)) {
+    if (collateralRaw === BigInt(0)) return { error: `This wallet has no debt and no collateral in the ${m.stockSymbol} market — nothing to repay or withdraw.` }
+    return {
+      kind: 'stock-repay',
+      stockSymbol: m.stockSymbol,
+      steps: [step(
+        `Withdraw ${formatUnits(collateralRaw, STOCK_DECIMALS)} ${m.stockSymbol} collateral back to the wallet`,
+        encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'withdrawCollateral', args: [m.params, collateralRaw, user as `0x${string}`, user as `0x${string}`] }),
+        live.gasPrice,
+      )],
+      approval: null,
+      collateralDelta: formatUnits(collateralRaw, STOCK_DECIMALS),
+      usdgAmount: '0',
+      borrowApyPct: 0,
+      oraclePriceUsd: live.priceUsd,
+      ltvUtilizationAfterPct: 0,
+      liquidationPriceUsdAfter: null,
+      debtAfterUsd: 0,
+    }
+  }
+
+  const isFullRepay = repayUsd === 'all'
+  const steps: CollateralStep[] = []
+  let approvalRaw: bigint
+  let repaidUsdStr: string
+
+  if (isFullRepay) {
+    // Repaying by SHARES clears the debt exactly even as interest accrues between
+    // quote and signing — an assets-denominated "full" repay would leave dust or
+    // revert. The approval carries a 1% buffer for that same accrual; only the
+    // real debt is pulled.
+    approvalRaw = (debtRaw * BigInt(101)) / BigInt(100)
+    repaidUsdStr = formatUnits(debtRaw, USDG_DECIMALS)
+    steps.push(step(
+      `Repay the full ${repaidUsdStr} USDG debt`,
+      encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'repay', args: [m.params, BigInt(0), borrowShares, user as `0x${string}`, '0x'] }),
+      live.gasPrice,
+    ))
+    if (collateralRaw > BigInt(0)) {
+      steps.push(step(
+        `Withdraw ${formatUnits(collateralRaw, STOCK_DECIMALS)} ${m.stockSymbol} collateral back to the wallet`,
+        encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'withdrawCollateral', args: [m.params, collateralRaw, user as `0x${string}`, user as `0x${string}`] }),
+        live.gasPrice,
+      ))
+    }
+  } else {
+    const repayAssets = parseUnits(repayUsd.replace(/,/g, ''), USDG_DECIMALS)
+    if (repayAssets <= BigInt(0)) return { error: 'Repay amount must be greater than zero.' }
+    if (repayAssets >= debtRaw) {
+      return { error: `The debt is ${debtUsd.toFixed(4)} USDG — repaying ${repayUsd} would overpay. Say "repay all" to close the position exactly (interest accrues by the second, so a fixed number can't).` }
+    }
+    approvalRaw = repayAssets
+    repaidUsdStr = formatUnits(repayAssets, USDG_DECIMALS)
+    steps.push(step(
+      `Repay ${repaidUsdStr} USDG of the debt`,
+      encodeFunctionData({ abi: MORPHO_WRITE_ABI, functionName: 'repay', args: [m.params, repayAssets, BigInt(0), user as `0x${string}`, '0x'] }),
+      live.gasPrice,
+    ))
+  }
+
+  const usdgBalance = await rpcClient.readContract({ address: m.params.loanToken, abi: erc20Abi, functionName: 'balanceOf', args: [user as `0x${string}`] })
+  if (usdgBalance < approvalRaw) {
+    return { error: `Repaying needs about ${formatUnits(approvalRaw, USDG_DECIMALS)} USDG but this wallet only holds ${formatUnits(usdgBalance, USDG_DECIMALS)} USDG. Top up USDG first (e.g. sell a little stock).` }
+  }
+
+  const debtAfterRaw = isFullRepay ? BigInt(0) : debtRaw - parseUnits(repayUsd.replace(/,/g, ''), USDG_DECIMALS)
+  const debtAfterUsd = Number(formatUnits(debtAfterRaw, USDG_DECIMALS))
+  const collateralUnits = Number(formatUnits(collateralRaw, STOCK_DECIMALS))
+  const lltv = Number(m.params.lltv) / 1e18
+  const collateralAfterUnits = isFullRepay ? 0 : collateralUnits
+
+  return {
+    kind: 'stock-repay',
+    stockSymbol: m.stockSymbol,
+    steps,
+    approval: { tokenAddress: m.params.loanToken, tokenSymbol: 'USDG', tokenDecimals: USDG_DECIMALS, amountRaw: approvalRaw.toString(), spender: MORPHO_CORE },
+    collateralDelta: isFullRepay ? formatUnits(collateralRaw, STOCK_DECIMALS) : '0',
+    usdgAmount: repaidUsdStr,
+    borrowApyPct: 0,
+    oraclePriceUsd: live.priceUsd,
+    ltvUtilizationAfterPct: collateralAfterUnits > 0 && debtAfterUsd > 0
+      ? (debtAfterUsd / (collateralAfterUnits * live.priceUsd * lltv)) * 100
+      : 0,
+    liquidationPriceUsdAfter: collateralAfterUnits > 0 && debtAfterUsd > 0
+      ? debtAfterUsd / (collateralAfterUnits * lltv)
+      : null,
+    debtAfterUsd,
+  }
 }

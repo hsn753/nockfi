@@ -10,7 +10,7 @@ import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
-import { getStockCollateralMarketData, getStockBorrowPositions } from '@/lib/get-stock-collateral'
+import { getStockCollateralMarketData, getStockBorrowPositions, buildStockBorrow, buildStockRepay, type StockCollateralQuote } from '@/lib/get-stock-collateral'
 import { fetchUniswapStockQuote } from '@/lib/get-uniswap-quote'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
@@ -197,7 +197,10 @@ When the user asks about stocks or tokenized equities (prices, what's available,
 - At least once per conversation, make the framing clear: a stock token tracks the stock's price but is NOT share ownership — no dividends, no voting rights. It trades on-chain 24/7, including when the real market is closed, so its price can drift from the official close.
 - To buy or sell: resolve the OFFICIAL contract address via get_stock_tokens (pass the symbol), then call get_swap_quote using that exact address as toToken (buying with USDG) or fromToken (selling), then propose_action with agent "stock" and the real quote numbers. Stock trades route through Uniswap directly and trade against USDG only. The first trade can take up to three wallet confirmations (two approvals, then the trade) — mention that when proposing. Same rules as swaps: never guess amounts, always quote fresh.
 - If a symbol isn't in the registry, say Robinhood doesn't issue that stock token — do not go looking for it among unverified tokens.
-- If the user asks about borrowing against a stock position, using stock as collateral, or a loan on their stocks: call get_stock_collateral_info and present the real markets (LLTV, live borrow APY, oracle price, available USDG) and their current position health if any. Be explicit about liquidation risk: if the stock's oracle price falls enough that debt exceeds collateralValue × LLTV, the collateral gets liquidated. Executing the borrow through Nock is not built yet — say so plainly; never call propose_action for a borrow.
+- If the user asks about borrowing against a stock position, using stock as collateral, or a loan on their stocks: call get_stock_collateral_info and present the real markets (LLTV, live borrow APY, oracle price, available USDG) and their current position health if any. Be explicit about liquidation risk: if the stock's oracle price falls enough that debt exceeds collateralValue × LLTV, the collateral gets liquidated.
+- To actually BORROW: get the exact USDG amount from the user (never guess), call get_stock_borrow_quote, then propose_action with agent "stock" using its real numbers. When proposing, ALWAYS state: the liquidation price, that the full stock balance is posted as collateral by default (they can name a smaller amount), and that the collateral stays theirs and comes back when the debt is repaid. If the quote returns an error (too much borrow, no liquidity, no market), relay it plainly.
+- To REPAY or close the loan: call get_stock_repay_quote (exact USDG amount, or 'all' to repay everything and reclaim the collateral in one flow), then propose_action. Repaying 'all' is the only way to fully close — interest accrues by the second, so a typed number can't hit zero exactly.
+- Multiple wallet confirmations are normal for collateral actions (an approval plus one or two Morpho transactions) — mention it when proposing.
 
 When the user asks a general, browsing-style question about what's available — "what yield options do you have," "what perps markets can I trade" — without asking you to actually do anything yet:
 - Call the relevant tool (get_yield_options or get_perps_info) and present what it returns directly. Do not call propose_action for a browsing question — that's only for when the user wants you to actually recommend and preview a specific action. If they follow up asking you to act on one of the options, then follow the action flow below.
@@ -354,11 +357,42 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_stock_collateral_info',
-      description: "Returns live Morpho lending markets on Robinhood Chain where an OFFICIAL stock token can be posted as collateral to borrow USDG — the market's max loan-to-value (LLTV), live borrow APY, the oracle price liquidations use, and available USDG liquidity. If a wallet is connected, also returns the user's current borrow positions with collateral value, debt, LTV utilization, and liquidation price. Markets are discovered on-chain and gated to the verified stock registry, so impersonator-token markets never appear. Call this when the user asks about borrowing against a stock position, using stock as collateral, margin/loans on their stocks, or their existing borrow position health. Borrowing execution is not wired yet — present the data and say proposing the borrow itself is coming; never call propose_action for a borrow.",
+      description: "Returns live Morpho lending markets on Robinhood Chain where an OFFICIAL stock token can be posted as collateral to borrow USDG — the market's max loan-to-value (LLTV), live borrow APY, the oracle price liquidations use, and available USDG liquidity. If a wallet is connected, also returns the user's current borrow positions with collateral value, debt, LTV utilization, and liquidation price. Markets are discovered on-chain and gated to the verified stock registry, so impersonator-token markets never appear. Call this when the user asks about borrowing against a stock position, using stock as collateral, margin/loans on their stocks, or their existing borrow position health — and before quoting a borrow, to know what exists.",
       parameters: {
         type: 'object',
         properties: {},
         required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_borrow_quote',
+      description: "Builds the real, executable transactions for borrowing USDG against an official stock token on Morpho (posting the stock as collateral + borrowing in one flow). Requires a connected wallet. borrowUsd is the exact USDG amount the user wants to borrow — never guess it, ask. collateralAmount (stock units) is optional: by default the user's ENTIRE wallet balance of that stock is posted as collateral (more collateral = safer position) — mention that default when proposing, and pass an explicit amount if the user wants to post less. The quote enforces a safety buffer (max ~65% effective LTV at TSLA's 77% LLTV) and returns liquidation price and LTV after the action. On success, call propose_action with agent 'stock' using the quote's real numbers. If it returns an error, relay it plainly and do NOT propose.",
+      parameters: {
+        type: 'object',
+        properties: {
+          stockSymbol: { type: 'string', description: 'Official stock token symbol, e.g. TSLA' },
+          borrowUsd: { type: 'string', description: 'USDG amount to borrow, e.g. "2"' },
+          collateralAmount: { type: 'string', description: 'Optional: stock units to post as collateral. Omit to post the full wallet balance.' },
+        },
+        required: ['stockSymbol', 'borrowUsd'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_repay_quote',
+      description: "Builds the real, executable transactions for repaying a USDG debt borrowed against a stock token. repayUsd is either an exact USDG amount (partial repay) or the string 'all' to close the position — 'all' repays the exact live debt AND returns the posted stock collateral to the wallet in the same flow. If the position has zero debt but posted collateral, this quotes withdrawing the collateral back. Requires the wallet to hold enough USDG (checked live; relays a clear error if not). On success, call propose_action with agent 'stock' using the quote's real numbers. Repays are never blocked by the spend limit — returning debt reduces risk.",
+      parameters: {
+        type: 'object',
+        properties: {
+          stockSymbol: { type: 'string', description: 'Official stock token symbol, e.g. TSLA' },
+          repayUsd: { type: 'string', description: "USDG amount to repay, or 'all' to close the position and withdraw the collateral" },
+        },
+        required: ['stockSymbol', 'repayUsd'],
       },
     },
   },
@@ -540,6 +574,7 @@ export async function POST(request: Request) {
     let action: ActionPreview | undefined
     let responseText = ''
     let lastSwapQuote: any = null
+    let lastCollateralQuote: StockCollateralQuote | null = null
     let lastYieldQuote:
       | Awaited<ReturnType<typeof buildYieldDeposit>>
       | Awaited<ReturnType<typeof buildMarketSupply>>
@@ -618,9 +653,13 @@ export async function POST(request: Request) {
               ? await validateQuotedTrade(lastSwapQuote, lastUserMessage?.text)
               : {}
 
-          if ((input.agent === 'swap' || input.agent === 'stock') && !lastSwapQuote?.transaction) {
+          // A stock-agent action can be backed by EITHER a trade quote or a collateral
+          // quote (borrow/repay) — exactly one is set (the quote handlers null the other).
+          const isCollateralAction = input.agent === 'stock' && lastCollateralQuote !== null && !lastSwapQuote?.transaction
+
+          if ((input.agent === 'swap' || input.agent === 'stock') && !lastSwapQuote?.transaction && !isCollateralAction) {
             result = {
-              error: 'No fresh quote available. Call get_swap_quote with the current fromToken/toToken/amount first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
+              error: 'No fresh quote available. Call get_swap_quote (for a trade) or get_stock_borrow_quote/get_stock_repay_quote (for collateral actions) first, then call propose_action again with its real numbers. Do not reuse or recompute numbers from earlier in the conversation.',
             }
           } else if (directionMismatch) {
             result = { error: directionMismatch }
@@ -651,7 +690,15 @@ export async function POST(request: Request) {
             // we already have. If we don't have a verified price for the sell side (e.g.
             // selling an unverified memecoin), say so plainly instead of guessing.
             let outcomeValue = input.outcome.value
-            if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction) {
+            if (isCollateralAction && lastCollateralQuote) {
+              // Borrow: the risk number is the USDG borrowed. Repay/close: the USDG
+              // repaid (or the collateral's oracle value when only withdrawing).
+              const q = lastCollateralQuote
+              const usdNum = parseFloat(q.usdgAmount)
+              outcomeValue = usdNum > 0
+                ? `$${usdNum.toFixed(2)}`
+                : `$${(parseFloat(q.collateralDelta) * q.oraclePriceUsd).toFixed(2)}`
+            } else if ((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction) {
               outcomeValue = await computeQuotedTradeValue(lastSwapQuote)
             } else if (input.agent === 'yield' && lastYieldQuote && 'transaction' in lastYieldQuote) {
               const prices = await getReferencePrices()
@@ -670,8 +717,12 @@ export async function POST(request: Request) {
             // wallet — a $1 spend limit must never be able to trap a $100 position.
             const isWithdrawal =
               input.agent === 'yield' && lastYieldQuote && 'direction' in lastYieldQuote && lastYieldQuote.direction === 'withdraw'
+            // Repaying debt (or reclaiming posted collateral) brings the user's own
+            // position back — the spend limit must never trap someone in a loan,
+            // the same reasoning as the yield-withdrawal exemption.
+            const isRepay = isCollateralAction && lastCollateralQuote?.kind === 'stock-repay'
             let guardrailViolation: string | undefined
-            if ((input.agent === 'swap' || input.agent === 'stock' || input.agent === 'yield') && !isWithdrawal) {
+            if ((input.agent === 'swap' || input.agent === 'stock' || input.agent === 'yield') && !isWithdrawal && !isRepay) {
               const exceededLimit = await getExceededSpendLimit(walletAddress, outcomeValue)
               if (exceededLimit !== null) {
                 guardrailViolation = `This action is worth about ${outcomeValue}, which is over the user's set spend limit of $${exceededLimit} per transaction. Do not propose this action. Tell the user plainly it was blocked by their own spend limit, and that they can raise it from Settings if they want to allow it.`
@@ -688,18 +739,49 @@ export async function POST(request: Request) {
             // is built from. Caught live: the model framed a sell as a buy while the
             // attached transaction did the opposite. Display and execution can no
             // longer diverge for quoted trades.
+            // Collateral cards are fully server-bound like quoted trades — headline,
+            // metrics, and the executable steps all come from the same live quote.
+            const collateralBound = isCollateralAction && lastCollateralQuote
+              ? (() => {
+                  const q = lastCollateralQuote!
+                  const isBorrow = q.kind === 'stock-borrow'
+                  const closing = !isBorrow && parseFloat(q.collateralDelta) > 0
+                  const headline = isBorrow
+                    ? `Borrow ${q.usdgAmount} USDG against ${q.collateralDelta !== '0' ? `${q.collateralDelta} ` : 'your posted '}${q.stockSymbol}`
+                    : parseFloat(q.usdgAmount) > 0
+                      ? (closing ? `Repay ${q.usdgAmount} USDG and reclaim ${q.collateralDelta} ${q.stockSymbol}` : `Repay ${q.usdgAmount} USDG of the ${q.stockSymbol} loan`)
+                      : `Withdraw ${q.collateralDelta} ${q.stockSymbol} collateral`
+                  const metrics = isBorrow
+                    ? [
+                        { label: 'Collateral', value: `${q.collateralDelta !== '0' ? q.collateralDelta : 'already posted'} ${q.stockSymbol}` },
+                        { label: 'You receive', value: `${q.usdgAmount} USDG` },
+                        { label: 'Liquidation price', value: q.liquidationPriceUsdAfter ? `$${q.liquidationPriceUsdAfter.toFixed(2)}` : '—' },
+                      ]
+                    : [
+                        { label: 'You repay', value: `${q.usdgAmount} USDG` },
+                        { label: 'Collateral returned', value: q.collateralDelta !== '0' ? `${q.collateralDelta} ${q.stockSymbol}` : 'stays posted' },
+                        { label: 'Debt after', value: `$${q.debtAfterUsd.toFixed(2)}` },
+                      ]
+                  return { headline, metrics }
+                })()
+              : null
+
             const isQuotedTrade = (input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction
             const tradeVerb = input.agent === 'stock'
               ? (String(lastSwapQuote?.fromSymbol).toUpperCase() === 'USDG' ? 'Buy' : 'Sell')
               : 'Swap'
-            const boundAction = isQuotedTrade
+            const boundAction = collateralBound
+              ? collateralBound.headline
+              : isQuotedTrade
               ? (tradeVerb === 'Buy'
                   ? `Buy ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol} with ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}`
                   : tradeVerb === 'Sell'
                     ? `Sell ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`
                     : `Swap ${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol} for ${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}`)
               : input.action
-            const boundMetrics = isQuotedTrade
+            const boundMetrics = collateralBound
+              ? collateralBound.metrics
+              : isQuotedTrade
               ? [
                   { label: 'You pay', value: `${lastSwapQuote.fromAmount} ${lastSwapQuote.fromSymbol}` },
                   { label: 'You receive', value: `${lastSwapQuote.toAmount} ${lastSwapQuote.toSymbol}` },
@@ -740,6 +822,27 @@ export async function POST(request: Request) {
                 // 'withdraw' makes handleLoose skip the sell-token balance/approval
                 // pre-flight — nothing leaves the wallet on a withdrawal.
                 direction: 'direction' in lastYieldQuote ? lastYieldQuote.direction : 'supply',
+              } : {}),
+              ...(isCollateralAction && lastCollateralQuote ? {
+                // Multi-step Morpho action. transactionData carries the LAST step so
+                // the shared pipeline's gas math and null-guard work unchanged; the
+                // client executes collateralSteps in order via executeCollateralSequence.
+                transactionData: lastCollateralQuote.steps[lastCollateralQuote.steps.length - 1],
+                collateralSteps: lastCollateralQuote.steps,
+                approval: lastCollateralQuote.approval,
+                routeVia: 'morpho-collateral',
+                fromToken: lastCollateralQuote.approval?.tokenSymbol ?? lastCollateralQuote.stockSymbol,
+                toToken: lastCollateralQuote.kind === 'stock-borrow' ? 'USDG' : `${lastCollateralQuote.stockSymbol} loan`,
+                // amount drives the client's balance pre-flight: the approval amount is
+                // what actually leaves the wallet. '0' (no approval — borrow-only or
+                // withdraw-only) makes that check a no-op; the address must still be a
+                // real ERC20 for the balanceOf read, so USDG stands in.
+                amount: lastCollateralQuote.approval
+                  ? (Number(lastCollateralQuote.approval.amountRaw) / 10 ** lastCollateralQuote.approval.tokenDecimals).toString()
+                  : '0',
+                verified: true,
+                sellTokenAddress: lastCollateralQuote.approval?.tokenAddress ?? '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+                sellTokenDecimals: lastCollateralQuote.approval?.tokenDecimals ?? 6,
               } : {}),
             } as any
             result = { status: 'preview_ready' }
@@ -921,6 +1024,7 @@ export async function POST(request: Request) {
               }
               if (!quote.error) {
                 lastSwapQuote = quote
+                lastCollateralQuote = null
               }
               result = quote.error
                 ? { error: quote.error, supportedTokens: supportedSymbols }
@@ -1062,11 +1166,47 @@ export async function POST(request: Request) {
               : {
                   markets,
                   userPositions: positions,
-                  note: 'Live on-chain Morpho markets where an OFFICIAL stock token is the collateral and USDG is borrowed. oraclePriceUsd is the price liquidations use (can differ slightly from the DEX trading price). lltvPct is the hard ceiling: debt above collateralValue × LLTV is liquidatable. Executing a borrow through Nock is not wired yet — present the data honestly and say the borrow action itself is coming soon; never call propose_action for a borrow.',
+                  note: 'Live on-chain Morpho markets where an OFFICIAL stock token is the collateral and USDG is borrowed. oraclePriceUsd is the price liquidations use (can differ slightly from the DEX trading price). lltvPct is the hard ceiling: debt above collateralValue × LLTV is liquidatable. To actually borrow or repay, call get_stock_borrow_quote / get_stock_repay_quote with the user’s exact amounts, then propose_action.',
                 }
           } catch (err) {
             console.error('[robin] get_stock_collateral_info error:', err)
             result = { error: 'Could not load stock collateral markets from the chain. Try again in a moment.' }
+          }
+
+        } else if (functionName === 'get_stock_borrow_quote' || functionName === 'get_stock_repay_quote') {
+          const { stockSymbol, borrowUsd, collateralAmount, repayUsd } = functionArgs as {
+            stockSymbol?: string; borrowUsd?: string; collateralAmount?: string; repayUsd?: string
+          }
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else if (!stockSymbol) {
+            result = { error: 'stockSymbol is required.' }
+          } else {
+            try {
+              const quote = functionName === 'get_stock_borrow_quote'
+                ? (borrowUsd
+                    ? await buildStockBorrow(walletAddress, stockSymbol, borrowUsd, collateralAmount)
+                    : { error: 'borrowUsd is required — ask the user for the exact USDG amount to borrow, never guess.' })
+                : (repayUsd
+                    ? await buildStockRepay(walletAddress, stockSymbol, repayUsd === 'all' ? 'all' : repayUsd)
+                    : { error: "repayUsd is required — an exact USDG amount or 'all'." })
+              if ('error' in quote) {
+                result = { error: quote.error }
+              } else {
+                lastCollateralQuote = quote
+                // A quoted trade and a quoted collateral action are mutually exclusive
+                // intents within one turn — whichever tool ran last wins the card.
+                lastSwapQuote = null
+                result = {
+                  ...quote,
+                  steps: quote.steps.map((s) => s.label), // model sees the plan, never raw calldata
+                  note: `Real executable quote. ${quote.kind === 'stock-borrow' ? `LTV after this borrow: ${quote.ltvUtilizationAfterPct.toFixed(0)}% of the liquidation ceiling; liquidation if ${quote.stockSymbol} oracle price falls to $${quote.liquidationPriceUsdAfter?.toFixed(2)}. State both numbers when proposing.` : 'Repaying reduces risk and is exempt from the spend limit.'} The user may see ${quote.steps.length + (quote.approval ? 1 : 0)} wallet confirmations (approval + each step) — mention that. Now call propose_action with agent 'stock' using these exact numbers.`,
+                }
+              }
+            } catch (err) {
+              console.error('[robin] collateral quote error:', err)
+              result = { error: 'Could not build the collateral quote from the chain. Try again in a moment.' }
+            }
           }
 
         } else if (functionName === 'get_perps_info') {
@@ -1265,6 +1405,66 @@ export async function POST(request: Request) {
           } as any
           responseText = `Here's the trade preview, built from the live quote. Press Confirm on the card to execute it, or Review to check the details first.`
         }
+      }
+    }
+
+    // Collateral quotes get the same cardless-quote synthesis as swaps and yield —
+    // a borrow/repay quote only exists because the user asked to act, so a missing
+    // propose_action call must not leave them stuck without a card.
+    if (!action && lastCollateralQuote) {
+      const q = lastCollateralQuote
+      const isBorrow = q.kind === 'stock-borrow'
+      const usdNum = parseFloat(q.usdgAmount)
+      const valueStr = usdNum > 0 ? `$${usdNum.toFixed(2)}` : `$${(parseFloat(q.collateralDelta) * q.oraclePriceUsd).toFixed(2)}`
+      const exceededLimit = isBorrow ? await getExceededSpendLimit(walletAddress, valueStr) : null
+      if (exceededLimit !== null) {
+        responseText = `That borrow is worth about ${valueStr}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
+      } else {
+        const closing = !isBorrow && parseFloat(q.collateralDelta) > 0
+        const headline = isBorrow
+          ? `Borrow ${q.usdgAmount} USDG against ${q.collateralDelta !== '0' ? `${q.collateralDelta} ` : 'your posted '}${q.stockSymbol}`
+          : usdNum > 0
+            ? (closing ? `Repay ${q.usdgAmount} USDG and reclaim ${q.collateralDelta} ${q.stockSymbol}` : `Repay ${q.usdgAmount} USDG of the ${q.stockSymbol} loan`)
+            : `Withdraw ${q.collateralDelta} ${q.stockSymbol} collateral`
+        action = {
+          id: `act-${Date.now()}`,
+          agent: 'stock',
+          action: headline,
+          detail: isBorrow
+            ? `Posts the ${q.stockSymbol} as collateral on Morpho and borrows USDG against it at ${q.borrowApyPct.toFixed(2)}% APY. The collateral stays yours and comes back when the debt is repaid. Liquidation if the ${q.stockSymbol} oracle price falls to $${q.liquidationPriceUsdAfter?.toFixed(2)}.`
+            : `Repays the Morpho loan${closing ? ` and returns the posted ${q.stockSymbol} collateral to your wallet` : ''}.`,
+          metrics: isBorrow
+            ? [
+                { label: 'Collateral', value: `${q.collateralDelta !== '0' ? q.collateralDelta : 'already posted'} ${q.stockSymbol}` },
+                { label: 'You receive', value: `${q.usdgAmount} USDG` },
+                { label: 'Liquidation price', value: q.liquidationPriceUsdAfter ? `$${q.liquidationPriceUsdAfter.toFixed(2)}` : '—' },
+              ]
+            : [
+                { label: 'You repay', value: `${q.usdgAmount} USDG` },
+                { label: 'Collateral returned', value: q.collateralDelta !== '0' ? `${q.collateralDelta} ${q.stockSymbol}` : 'stays posted' },
+                { label: 'Debt after', value: `$${q.debtAfterUsd.toFixed(2)}` },
+              ],
+          status: 'pending',
+          outcome: {
+            title: isBorrow ? `USDG borrowed against ${q.stockSymbol}` : `${q.stockSymbol} loan ${q.debtAfterUsd === 0 ? 'closed' : 'reduced'}`,
+            value: valueStr,
+            meta: isBorrow ? `${q.usdgAmount} USDG` : `debt now $${q.debtAfterUsd.toFixed(2)}`,
+            activityTitle: headline,
+          },
+          ...( {
+            transactionData: q.steps[q.steps.length - 1],
+            collateralSteps: q.steps,
+            approval: q.approval,
+            routeVia: 'morpho-collateral',
+            fromToken: q.approval?.tokenSymbol ?? q.stockSymbol,
+            toToken: isBorrow ? 'USDG' : `${q.stockSymbol} loan`,
+            amount: q.approval ? (Number(q.approval.amountRaw) / 10 ** q.approval.tokenDecimals).toString() : '0',
+            verified: true,
+            sellTokenAddress: q.approval?.tokenAddress ?? '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+            sellTokenDecimals: q.approval?.tokenDecimals ?? 6,
+          } as object),
+        } as any
+        responseText = `Here's the ${isBorrow ? 'borrow' : 'repayment'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
       }
     }
 

@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-storage'
 import { executeSwap } from '@/lib/execute-swap'
 import { executeUniswapV4Swap } from '@/lib/execute-uniswap-swap'
+import { executeCollateralSequence } from '@/lib/execute-collateral'
 import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
@@ -456,7 +457,7 @@ export function NockApp() {
         // be rejected server-side by Privy. Decline honestly up front rather than
         // letting the user watch a doomed attempt. (Expanding the policy safely —
         // especially constraining the withdraw receiver — is its own follow-up.)
-        if ((action.agent === 'yield' || (action as any).routeVia === 'uniswap-v4') && isUsingDelegatedWallet) {
+        if ((action.agent === 'yield' || (action as any).routeVia === 'uniswap-v4' || (action as any).routeVia === 'morpho-collateral') && isUsingDelegatedWallet) {
           throw new Error(
             'This action needs your connected external wallet — the instant-swap wallet is currently only authorized for 0x swaps. Connect your main wallet and try again.',
           )
@@ -567,10 +568,18 @@ export function NockApp() {
                 sellTokenDecimals,
                 transaction: txData,
               }
-              // Stock trades route through the Uniswap Universal Router (Permit2
-              // settlement) instead of the 0x router — different approval mechanics,
-              // same downstream pipeline.
-              return (action as any).routeVia === 'uniswap-v4'
+              // Executor by route: Morpho collateral actions run an ordered multi-step
+              // sequence; stock trades go through the Uniswap Universal Router (Permit2
+              // settlement); everything else through the 0x router. Same downstream
+              // audit/verify pipeline for all three.
+              return (action as any).routeVia === 'morpho-collateral'
+                ? executeCollateralSequence({
+                    walletClient: freshWalletClient,
+                    publicClient,
+                    approval: (action as any).approval ?? null,
+                    steps: (action as any).collateralSteps ?? [],
+                  })
+                : (action as any).routeVia === 'uniswap-v4'
                 ? executeUniswapV4Swap(executionParams)
                 : executeSwap(executionParams)
             })()
