@@ -11,6 +11,7 @@ import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMa
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
 import { getStockCollateralMarketData, getStockBorrowPositions, buildStockBorrow, buildStockRepay, type StockCollateralQuote } from '@/lib/get-stock-collateral'
+import { getNockGateStatus, gateMessage } from '@/lib/nock-gate'
 import { fetchUniswapStockQuote } from '@/lib/get-uniswap-quote'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getGuardrails } from '@/lib/db/guardrails'
@@ -631,6 +632,20 @@ export async function POST(request: Request) {
             }
             openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
             continue
+          }
+
+          // $NOCK tier gate (dormant until NOCK_TOKEN_ADDRESS is set): the Stock
+          // Token Agent is premium per the one-pager — trades routed through
+          // Uniswap (whichever agent label the model picked) and collateral
+          // actions all pass through here, so this is the chokepoint. Yield and
+          // swaps stay free.
+          if (input.agent === 'stock' || lastSwapQuote?.routeVia === 'uniswap-v4') {
+            const gate = await getNockGateStatus(walletAddress)
+            if (gate.enabled && !gate.holder) {
+              result = { error: gateMessage(gate, 'the Stock Token Agent') }
+              openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
+              continue
+            }
           }
 
           // A swap preview is only real if it's backed by a transaction from a quote
@@ -1260,6 +1275,14 @@ export async function POST(request: Request) {
                   status: p.ltvUtilizationPct >= 80 ? 'AT RISK — flag this to the user' : 'healthy',
                 })),
                 loanMonitoring: 'Open loans are checked on every app load and by a daily server-side sweep; a loan at 80%+ of its liquidation ceiling surfaces in Needs Attention.',
+                nockGate: await getNockGateStatus(walletAddress).then((g) => ({
+                  tierSystemActive: g.enabled,
+                  note: g.enabled
+                    ? (g.holder
+                        ? `Premium agents unlocked — this wallet holds ${g.balance} $NOCK (${g.requiredBalance} required).`
+                        : `Premium agents (Stock Token, Perps) require holding ${g.requiredBalance} $NOCK; this wallet holds ${g.balance}. Swaps and yield are free.`)
+                    : 'All agents are currently free — the $NOCK tier system activates when the token launches.',
+                })),
                 automaticProtections: [
                   'Every proposed action is built from a fresh, live quote — never a reused or guessed number.',
                   'A swap or deposit amount is never invented — Robin always asks the user for an exact amount first.',
@@ -1389,6 +1412,18 @@ export async function POST(request: Request) {
     // quote's own verified numbers, under exactly the same guards propose_action
     // enforces (shared helpers — the two paths cannot drift).
     if (!action && lastSwapQuote?.transaction) {
+      // Same $NOCK gate as propose_action — synthesis must not become the way
+      // around the tier system.
+      if (lastSwapQuote.routeVia === 'uniswap-v4') {
+        const gate = await getNockGateStatus(walletAddress)
+        if (gate.enabled && !gate.holder) {
+          return NextResponse.json({
+            text: `Stock trading is a premium agent unlocked by holding at least ${gate.requiredBalance} $NOCK (this wallet holds ${gate.balance}). Swaps and yield stay free — or acquire $NOCK to unlock the Stock Token Agent.`,
+            action: undefined,
+            bridgeInfo,
+          })
+        }
+      }
       const lastUserMessage = [...messages].reverse().find((m: any) => m.role === 'user')
       const guards = await validateQuotedTrade(lastSwapQuote, lastUserMessage?.text)
       if (!guards.mismatchedTokenWord && !guards.stockImpersonatorWord && !guards.directionMismatch) {
@@ -1443,6 +1478,14 @@ export async function POST(request: Request) {
     // a borrow/repay quote only exists because the user asked to act, so a missing
     // propose_action call must not leave them stuck without a card.
     if (!action && lastCollateralQuote) {
+      const collateralGate = await getNockGateStatus(walletAddress)
+      if (collateralGate.enabled && !collateralGate.holder) {
+        return NextResponse.json({
+          text: `Stock collateral actions are part of the premium Stock Token Agent, unlocked by holding at least ${collateralGate.requiredBalance} $NOCK (this wallet holds ${collateralGate.balance}). Swaps and yield stay free.`,
+          action: undefined,
+          bridgeInfo,
+        })
+      }
       const q = lastCollateralQuote
       const isBorrow = q.kind === 'stock-borrow'
       const usdNum = parseFloat(q.usdgAmount)
