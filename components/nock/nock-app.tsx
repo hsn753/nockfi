@@ -168,8 +168,16 @@ export function NockApp() {
         return [...loanCards, ...withoutLoans]
       })
       setAttention((prev) => {
-        const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-'))
+        const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-') && !a.id.startsWith('loan-event-'))
         const risky = loans.filter((p) => p.ltvUtilizationPct >= 80)
+        const liveSymbols = new Set(risky.map((p) => p.stockSymbol))
+        // Server-persisted events from the monitoring sweep cover what happened
+        // while the app was closed. A live item for the same symbol is fresher and
+        // wins; a persisted event whose loan looks healthy NOW still shows (with
+        // its timestamp) until the sweep resolves it — the user should know the
+        // line was crossed even if the price recovered.
+        type RiskEvent = { stockSymbol: string; ltvUtilizationPct: string; liquidationPriceUsd: string | null; createdAt: string }
+        const events: RiskEvent[] = (data.riskEvents || []).filter((e: RiskEvent) => !liveSymbols.has(e.stockSymbol))
         return [
           ...risky.map((p) => ({
             id: `loan-risk-${p.stockSymbol}`,
@@ -177,6 +185,13 @@ export function NockApp() {
             title: `${p.stockSymbol} loan is close to liquidation`,
             subtitle: `Debt is at ${p.ltvUtilizationPct.toFixed(0)}% of the ceiling — liquidation if ${p.stockSymbol} falls to $${p.liquidationPriceUsd?.toFixed(2) ?? '—'}. Repay some debt or post more collateral.`,
             meta: 'At risk',
+          })),
+          ...events.map((e) => ({
+            id: `loan-event-${e.stockSymbol}`,
+            agent: 'vault' as AgentId,
+            title: `${e.stockSymbol} loan crossed the risk line while you were away`,
+            subtitle: `Hit ${parseFloat(e.ltvUtilizationPct).toFixed(0)}% of the liquidation ceiling on ${new Date(e.createdAt).toLocaleString()}. Check the position and consider repaying or adding collateral.`,
+            meta: 'Review',
           })),
           ...withoutLoanRisk,
         ]

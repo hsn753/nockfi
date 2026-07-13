@@ -1243,16 +1243,28 @@ export async function POST(request: Request) {
           } else {
             try {
               const wallet = await getWalletByAddress(walletAddress)
-              const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
+              const [guardrails, loanPositions] = await Promise.all([
+                wallet ? getGuardrails(wallet.id) : Promise.resolve({ maxUsdPerTransaction: null }),
+                getStockBorrowPositions(walletAddress).catch(() => []),
+              ])
               result = {
                 maxUsdPerTransaction: guardrails.maxUsdPerTransaction,
                 note: guardrails.maxUsdPerTransaction === null
                   ? 'No spend limit is set — any swap or yield deposit amount can be proposed.'
                   : `Proposed swaps and yield deposits over $${guardrails.maxUsdPerTransaction} will be declined before a preview is ever shown.`,
+                openLoans: loanPositions.map((p) => ({
+                  stockSymbol: p.stockSymbol,
+                  debtUsd: p.borrowedUsd,
+                  ltvUtilizationPct: Math.round(p.ltvUtilizationPct),
+                  liquidationPriceUsd: p.liquidationPriceUsd,
+                  status: p.ltvUtilizationPct >= 80 ? 'AT RISK — flag this to the user' : 'healthy',
+                })),
+                loanMonitoring: 'Open loans are checked on every app load and by a daily server-side sweep; a loan at 80%+ of its liquidation ceiling surfaces in Needs Attention.',
                 automaticProtections: [
                   'Every proposed action is built from a fresh, live quote — never a reused or guessed number.',
                   'A swap or deposit amount is never invented — Robin always asks the user for an exact amount first.',
                   'If the user mentions a token that does not match the current quote, the action is refused rather than silently substituted.',
+                  'New stock-collateral borrows are capped below the liquidation ceiling with a built-in safety buffer.',
                 ],
               }
             } catch (err) {

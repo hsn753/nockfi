@@ -110,6 +110,26 @@ export const walletGuardrails = pgTable('wallet_guardrails', {
   uniqueIndex('wallet_guardrails_wallet_idx').on(t.walletId),
 ])
 
+// Written by the loan-monitoring sweep (app/api/cron/monitor-loans) when an open
+// stock-collateral loan crosses the risk threshold, resolved when it comes back
+// under (or closes). Persisted so the warning survives to the user's next visit
+// with the real timestamp — "your loan hit 84% at 3:40 AM" — instead of only
+// existing while the app happens to be open. One OPEN row per wallet+symbol at
+// a time; resolved rows stay as history.
+export const loanRiskEvents = pgTable('loan_risk_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  stockSymbol: text('stock_symbol').notNull(),
+  ltvUtilizationPct: numeric('ltv_utilization_pct').notNull(),
+  liquidationPriceUsd: numeric('liquidation_price_usd'),
+  oraclePriceUsd: numeric('oracle_price_usd'),
+  debtUsd: numeric('debt_usd').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+}, (t) => [
+  index('loan_risk_events_wallet_idx').on(t.walletId, t.createdAt),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {
