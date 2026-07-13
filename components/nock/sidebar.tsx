@@ -220,7 +220,7 @@ export function Sidebar({
                 {shortAddress}
               </p>
               <p className="text-xs text-muted-foreground">
-                <span className="text-primary">{user.draws}</span> draws
+                <span className="text-primary">{user.draws}</span> draws · Season 1 not started
               </p>
             </div>
           </div>
@@ -241,7 +241,7 @@ export function Sidebar({
         {ready && authenticated && (
           <div className="mt-3 px-1">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">{user.season}</span>
+              <span className="text-muted-foreground">{user.season} · starts at $NOCK launch</span>
               <span className="text-muted-foreground">{user.seasonProgress}%</span>
             </div>
             <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-secondary">

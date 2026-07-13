@@ -48,10 +48,12 @@ function Toggle({
   label,
   desc,
   defaultOn,
+  disabled,
 }: {
   label: string
   desc: string
   defaultOn?: boolean
+  disabled?: boolean
 }) {
   const [on, setOn] = useState(!!defaultOn)
   return (
@@ -65,6 +67,7 @@ function Toggle({
         role="switch"
         aria-checked={on}
         aria-label={label}
+        disabled={disabled}
         onClick={() => setOn((v) => !v)}
         className={cn(
           'relative h-5 w-9 shrink-0 rounded-full transition-colors',
@@ -147,20 +150,25 @@ export function SettingsView() {
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Agent preferences
             </h2>
-            <div className="mt-1">
+            <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+              Coming soon — these preferences aren't active yet. Every action currently
+              requires your explicit Confirm, which is the safest default.
+            </p>
+            <div className="mt-1 opacity-50">
               <Toggle
                 label="Auto-confirm safe actions"
                 desc="Let Robin execute low-risk actions without confirmation"
+                disabled
               />
               <Toggle
                 label="Rebalance alerts"
                 desc="Notify me when a vault drifts from its target"
-                defaultOn
+                disabled
               />
               <Toggle
                 label="Better rate alerts"
                 desc="Notify me when the yield agent finds a higher rate"
-                defaultOn
+                disabled
               />
             </div>
           </section>
@@ -186,8 +194,9 @@ export function SettingsView() {
                 />
               </div>
               <p className="mt-2 text-xs text-muted-foreground text-pretty">
-                Earn draws by letting your agents work. Draws convert to rewards
-                at the end of the season.
+                Season 1 begins when $NOCK launches — draws will accrue from your
+                real agent activity and convert to rewards at season end. Nothing
+                accrues yet.
               </p>
             </div>
           </section>

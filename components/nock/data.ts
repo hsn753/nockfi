@@ -143,41 +143,14 @@ export type AttentionItem = {
 
 export const initialMessages: ChatMessage[] = []
 
-export const initialAttention: AttentionItem[] = [
-  {
-    id: 'at-2',
-    agent: 'vault',
-    title: 'Vault drift above target',
-    subtitle: 'Vault agent · balanced strategy is 6% off target',
-    meta: 'Rebalance',
-  },
-]
-
-export const initialPositions: Position[] = [
-  {
-    id: 'p-1',
-    agent: 'vault',
-    title: 'Balanced vault',
-    subtitle: 'Vault agent · multi-strategy',
-    value: '$18,240.00',
-    meta: '+5.1% APY',
-    metaPositive: true,
-  },
-  {
-    id: 'p-2',
-    agent: 'swap',
-    title: 'ETH position',
-    subtitle: 'Swap agent · spot',
-    value: '$11,405.00',
-    meta: '+2.8% today',
-    metaPositive: true,
-  },
-]
+// Attention items and positions are built entirely from real activity at runtime —
+// no seeded demo data. See nock-app.tsx state and the dashboard cards.
 
 
+// Season 1 is dormant until $NOCK launches — zeros are the honest values, not
+// placeholders. The tier system flips on via env var at token launch.
 export const user = {
-  address: '0x815A...1cB5',
-  draws: '1,240',
+  draws: '0',
   season: 'Season 1',
-  seasonProgress: 62,
+  seasonProgress: 0,
 }

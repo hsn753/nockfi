@@ -19,9 +19,7 @@ import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import {
   getAgent,
-  initialAttention,
   initialMessages,
-  initialPositions,
   type ActionPreview,
   type AgentId,
   type AttentionItem,
