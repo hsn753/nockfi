@@ -178,6 +178,33 @@ export type StockCollateralMarket = {
   stockName: string
 }
 
+// Verified baseline, same pattern (and same lesson) as get-stock-tokens' registry
+// baseline: dynamic discovery depends on an unbounded eth_getLogs scan that the
+// production Alchemy RPC rejects (block-range cap) — confirmed live when every
+// borrow attempt failed with "unable to retrieve collateral markets" while local
+// runs against the public RPC worked. Morpho market params are immutable once
+// created, so a once-verified entry can never go stale. Values read from the
+// CreateMarket log and cross-checked against the live oracle/IRM.
+const VERIFIED_MARKET_BASELINE: StockCollateralMarket[] = [
+  {
+    id: '0xf4dff250826a86627545e5c6594b3b249db3ad2ec5eed56c02833d2a67acf445',
+    params: {
+      loanToken: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+      collateralToken: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d',
+      oracle: '0x280855A5BF983bf005f19992C157007930B3de2A',
+      irm: '0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1',
+      lltv: BigInt('770000000000000000'),
+    },
+    stockSymbol: 'TSLA',
+    stockName: 'Tesla',
+  },
+]
+
+// The unbounded log scan goes to the chain's PUBLIC RPC, which allows it — never to
+// RPC_URL (Alchemy), which caps ranges. Everything else (state reads, quotes) stays
+// on RPC_URL.
+const discoveryClient = createPublicClient({ chain: nockChain, transport: http('https://rpc.mainnet.chain.robinhood.com') })
+
 // Morpho markets are immutable once created, so the discovered list only ever grows —
 // cache it and only re-scan periodically to pick up newly created markets.
 let marketCache: { markets: StockCollateralMarket[]; fetchedAt: number } | null = null
@@ -186,28 +213,35 @@ const CACHE_TTL_MS = 10 * 60 * 1000
 export async function getStockCollateralMarkets(): Promise<StockCollateralMarket[]> {
   if (marketCache && Date.now() - marketCache.fetchedAt < CACHE_TTL_MS) return marketCache.markets
 
-  const [logs, stocks] = await Promise.all([
-    rpcClient.getLogs({ address: MORPHO_CORE, event: CREATE_MARKET_EVENT, fromBlock: BigInt(0), toBlock: 'latest' }),
-    getStockTokens(),
-  ])
-  const stockByAddress = new Map(stocks.map((s) => [s.address.toLowerCase(), s]))
+  const markets: StockCollateralMarket[] = [...VERIFIED_MARKET_BASELINE]
+  try {
+    const [logs, stocks] = await Promise.all([
+      discoveryClient.getLogs({ address: MORPHO_CORE, event: CREATE_MARKET_EVENT, fromBlock: BigInt(0), toBlock: 'latest' }),
+      getStockTokens(),
+    ])
+    const stockByAddress = new Map(stocks.map((s) => [s.address.toLowerCase(), s]))
+    const known = new Set(markets.map((m) => m.id.toLowerCase()))
 
-  const markets: StockCollateralMarket[] = []
-  for (const log of logs) {
-    const p = log.args.marketParams
-    if (!p || !log.args.id) continue
-    if (p.loanToken.toLowerCase() !== USDG_ADDRESS.toLowerCase()) continue
-    const stock = stockByAddress.get(p.collateralToken.toLowerCase())
-    if (!stock) continue // not an official stock token — impersonators can't get in
-    markets.push({
-      id: log.args.id,
-      params: {
-        loanToken: p.loanToken, collateralToken: p.collateralToken,
-        oracle: p.oracle, irm: p.irm, lltv: p.lltv,
-      },
-      stockSymbol: stock.symbol,
-      stockName: stock.name,
-    })
+    for (const log of logs) {
+      const p = log.args.marketParams
+      if (!p || !log.args.id) continue
+      if (known.has(log.args.id.toLowerCase())) continue
+      if (p.loanToken.toLowerCase() !== USDG_ADDRESS.toLowerCase()) continue
+      const stock = stockByAddress.get(p.collateralToken.toLowerCase())
+      if (!stock) continue // not an official stock token — impersonators can't get in
+      markets.push({
+        id: log.args.id,
+        params: {
+          loanToken: p.loanToken, collateralToken: p.collateralToken,
+          oracle: p.oracle, irm: p.irm, lltv: p.lltv,
+        },
+        stockSymbol: stock.symbol,
+        stockName: stock.name,
+      })
+    }
+  } catch (err) {
+    // Discovery is enrichment, not a dependency — the verified baseline always works.
+    console.error('[get-stock-collateral] Dynamic market discovery failed, using baseline:', err)
   }
   marketCache = { markets, fetchedAt: Date.now() }
   return markets
