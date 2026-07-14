@@ -154,7 +154,7 @@ function AgentDetail({ id, onBack, onChatWithRobin }: { id: AgentId; onBack: () 
         </button>
         {agent.gated && (
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            Actions unlock with $NOCK at token launch — asking questions is always free.
+            Actions unlock with $NOCK at token launch. Asking questions is always free.
           </p>
         )}
       </div>

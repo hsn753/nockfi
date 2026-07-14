@@ -151,7 +151,7 @@ export function SettingsView() {
               Agent preferences
             </h2>
             <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
-              Coming soon — these preferences aren't active yet. Every action currently
+              Coming soon. These preferences aren't active yet. Every action currently
               requires your explicit Confirm, which is the safest default.
             </p>
             <div className="mt-1 opacity-50">
@@ -194,7 +194,7 @@ export function SettingsView() {
                 />
               </div>
               <p className="mt-2 text-xs text-muted-foreground text-pretty">
-                Season 1 begins when $NOCK launches — draws will accrue from your
+                Season 1 begins when $NOCK launches, and draws will accrue from your
                 real agent activity and convert to rewards at season end. Nothing
                 accrues yet.
               </p>
@@ -282,7 +282,7 @@ function GuardrailsSection() {
         Guardrails
       </h2>
       <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
-        Vault agent enforces this limit on every swap or yield deposit Robin proposes —
+        Vault agent enforces this limit on every swap or yield deposit Robin proposes,
         before you ever see a preview, not just at execution. Applies to both instant
         swaps and your connected wallet.
       </p>
@@ -376,7 +376,7 @@ function InstantSwapsSection() {
       <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
         Skip the per-transaction mobile approval by creating a separate Nock wallet and
         granting Robin permission to swap on your behalf, within the spend limit set below.
-        This is a different address from your connected wallet — you'll need to bridge or
+        This is a different address from your connected wallet, so you'll need to bridge or
         send funds to it separately.
       </p>
 

@@ -148,7 +148,7 @@ function InstantSwapWalletCard() {
           ))}
         </ul>
       ) : (
-        <p className="mt-0.5 text-xs text-muted-foreground">Empty — send funds to it from Settings to use instant swaps.</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">Empty. Send funds to it from Settings to use instant swaps.</p>
       )}
     </div>
   )

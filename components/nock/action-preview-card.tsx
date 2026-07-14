@@ -44,7 +44,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
           <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             <TriangleAlert className="mt-0.5 size-4 shrink-0" strokeWidth={1.75} />
             <p className="leading-relaxed">
-              Unverified token. This is not one of Robinhood's official assets — anyone can deploy a
+              Unverified token. This is not one of Robinhood's official assets. Anyone can deploy a
               token with any name on Robinhood Chain. Double-check the contract address yourself before confirming.
             </p>
           </div>

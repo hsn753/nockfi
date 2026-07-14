@@ -160,7 +160,7 @@ export function NockApp() {
           id: `loan-${p.stockSymbol}`,
           agent: 'stock' as AgentId,
           title: `${p.stockSymbol} loan — ${p.collateralAmount} ${p.stockSymbol} posted`,
-          subtitle: `Debt $${p.borrowedUsd.toFixed(2)} · liquidation at $${p.liquidationPriceUsd?.toFixed(2) ?? '—'}`,
+          subtitle: `Debt $${p.borrowedUsd.toFixed(2)} · liquidation at $${p.liquidationPriceUsd?.toFixed(2) ?? 'n/a'}`,
           value: `$${(p.collateralValueUsd - p.borrowedUsd).toFixed(2)} net`,
           meta: `${p.ltvUtilizationPct.toFixed(0)}% of liquidation ceiling`,
           metaPositive: p.ltvUtilizationPct < 80,
@@ -183,7 +183,7 @@ export function NockApp() {
             id: `loan-risk-${p.stockSymbol}`,
             agent: 'vault' as AgentId,
             title: `${p.stockSymbol} loan is close to liquidation`,
-            subtitle: `Debt is at ${p.ltvUtilizationPct.toFixed(0)}% of the ceiling — liquidation if ${p.stockSymbol} falls to $${p.liquidationPriceUsd?.toFixed(2) ?? '—'}. Repay some debt or post more collateral.`,
+            subtitle: `Debt is at ${p.ltvUtilizationPct.toFixed(0)}% of the ceiling. Liquidation if ${p.stockSymbol} falls to $${p.liquidationPriceUsd?.toFixed(2) ?? 'n/a'}. Repay some debt or post more collateral.`,
             meta: 'At risk',
           })),
           ...events.map((e) => ({
@@ -256,7 +256,7 @@ export function NockApp() {
           {
             id: `${Date.now()}-bridge`,
             role: 'robin',
-            text: `Your bridged funds have arrived on Robinhood Chain — your balance went from about $${pendingBridge.snapshotUsd.toFixed(2)} to $${total.toFixed(2)}. Ready to put it to work whenever you are.`,
+            text: `Your bridged funds have arrived on Robinhood Chain. Your balance went from about $${pendingBridge.snapshotUsd.toFixed(2)} to $${total.toFixed(2)}. Ready to put it to work whenever you are.`,
           },
         ])
       }
@@ -380,7 +380,7 @@ export function NockApp() {
           {
             id: `${Date.now()}-notready`,
             role: 'robin',
-            text: "Still finishing loading your wallet — give it a second and try that again.",
+            text: "Still finishing loading your wallet. Give it a second and try that again.",
           },
         ])
         return
@@ -514,7 +514,7 @@ export function NockApp() {
           throw new Error('No transaction data in action')
         }
         if (!sellTokenAddress || sellTokenDecimals === undefined) {
-          throw new Error('Missing sell token details for this preview — ask for a fresh quote and try again.')
+          throw new Error('Missing sell token details for this preview. Ask for a fresh quote and try again.')
         }
 
         // Stock-trade quotes carry an on-chain deadline (15 min). Confirming a
@@ -524,7 +524,7 @@ export function NockApp() {
         const quoteDeadline = (action as any).quoteDeadline as number | undefined
         if (quoteDeadline && Math.floor(Date.now() / 1000) > quoteDeadline) {
           throw new Error(
-            'This trade preview has expired — quotes are only valid for 15 minutes, and executing an expired one would fail on-chain and still cost gas. Nothing was sent. Ask for a fresh quote and confirm that one.',
+            'This trade preview has expired. Quotes are only valid for 15 minutes, and executing an expired one would fail on-chain and still cost gas. Nothing was sent. Ask for a fresh quote and confirm that one.',
           )
         }
 
@@ -535,7 +535,7 @@ export function NockApp() {
         // especially constraining the withdraw receiver — is its own follow-up.)
         if ((action.agent === 'yield' || (action as any).routeVia === 'uniswap-v4' || (action as any).routeVia === 'morpho-collateral') && isUsingDelegatedWallet) {
           throw new Error(
-            'This action needs your connected external wallet — the instant-swap wallet is currently only authorized for 0x swaps. Connect your main wallet and try again.',
+            'This action needs your connected external wallet. The instant-swap wallet is currently only authorized for 0x swaps. Connect your main wallet and try again.',
           )
         }
 
@@ -598,7 +598,7 @@ export function NockApp() {
         }
 
         if (!publicClient) {
-          throw new Error('Not connected to Robinhood Chain — refresh and try again.')
+          throw new Error('Not connected to Robinhood Chain. Refresh and try again.')
         }
 
         console.log(action.agent === 'yield' ? (isWithdrawal ? 'Executing real withdrawal transaction...' : 'Executing real deposit transaction...') : 'Executing real swap transaction...')
@@ -714,7 +714,7 @@ export function NockApp() {
         // entirely. If there's no hash at all, sendTransaction itself never got that far —
         // that's a real, different failure with nothing on-chain to check.
         if (!result.txHash || result.txHash === '0x') {
-          throw new Error(result.error || 'No transaction hash was returned — the swap may not have been broadcast. Check your holdings before retrying.')
+          throw new Error(result.error || 'No transaction hash was returned. The swap may not have been broadcast. Check your holdings before retrying.')
         }
         const verifyRes = await fetch('/api/verify-tx', {
           method: 'POST',
@@ -723,10 +723,10 @@ export function NockApp() {
         })
         const verifyData = await verifyRes.json()
         if (!verifyData.found) {
-          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may never have actually broadcast, regardless of what the wallet reported — check your real holdings before assuming anything happened, rather than trusting a success or failure message alone.`)
+          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may never have actually broadcast, regardless of what the wallet reported. Check your real holdings before assuming anything happened, rather than trusting a success or failure message alone.`)
         }
         if (verifyData.status !== 'success') {
-          throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}) — nothing was swapped, only gas was spent.`)
+          throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). Nothing was swapped, only gas was spent.`)
         }
 
         console.log(action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal executed! TX Hash:' : 'Deposit executed! TX Hash:') : 'Swap executed! TX Hash:', result.txHash)
