@@ -1,10 +1,20 @@
 allowBuilds:
   '@reown/appkit': true
-  bufferutil: set this to true or false
   esbuild: true
-  keccak: set this to true or false
-  msw: set this to true or false
-  sharp: set this to true or false
-  utf-8-validate: set this to true or false
+  bufferutil: true
+  keccak: true
+  sharp: true
+  utf-8-validate: true
+  msw: false
+
 minimumReleaseAgeExclude:
   - openai@6.46.0
+
+overrides:
+  hono: 4.12.25
+
+onlyBuiltDependencies:
+  - bufferutil
+  - keccak
+  - sharp
+  - utf-8-validate
