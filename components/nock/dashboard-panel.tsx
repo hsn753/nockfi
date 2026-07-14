@@ -57,7 +57,7 @@ function YieldPositionsCard() {
           <Percent className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
           <p className="text-sm text-muted-foreground">Yield positions</p>
         </div>
-        <p className="text-sm font-semibold tabular-nums text-foreground">${total.toFixed(2)}</p>
+        <p className="text-sm font-semibold text-foreground">${total.toFixed(2)}</p>
       </div>
       <ul className="mt-2.5 flex flex-col gap-2">
         {positions.map((p) => (
@@ -68,7 +68,7 @@ function YieldPositionsCard() {
                 {p.apyPct !== null ? `${p.apyPct.toFixed(2)}% APY, live` : 'APY unavailable'}
               </p>
             </div>
-            <p className="shrink-0 text-sm font-medium tabular-nums text-foreground">
+            <p className="shrink-0 text-sm font-medium text-foreground">
               ${p.suppliedUsd.toFixed(2)}
             </p>
           </li>
@@ -134,13 +134,13 @@ function InstantSwapWalletCard() {
           {embedded.delegated ? 'Enabled' : 'Disabled'}
         </span>
       </div>
-      <p className="mt-1.5 text-lg font-semibold tabular-nums text-foreground">${total.toFixed(2)}</p>
+      <p className="mt-1.5 text-lg font-semibold text-foreground">${total.toFixed(2)}</p>
       {held.length > 0 ? (
         <ul className="mt-1 flex flex-col gap-1">
           {held.map((b) => (
             <li key={b.symbol} className="flex items-center justify-between text-xs text-muted-foreground">
               <span>{b.symbol}</span>
-              <span className="tabular-nums">
+              <span>
                 {b.amount}
                 {b.usdValue != null ? ` ($${b.usdValue.toFixed(2)})` : ''}
               </span>
@@ -260,7 +260,7 @@ export function DashboardPanel({
               <div className="pointer-events-none absolute inset-y-0 right-0 w-40 bg-gradient-to-r from-background/95 via-background/40 to-transparent" />
               <div className="relative">
                 <p className="text-sm text-muted-foreground">Portfolio Value</p>
-                <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums text-foreground">
+                <p className="mt-2 text-4xl font-bold tracking-tight text-foreground">
                   {portfolioValue}
                 </p>
                 {weeklyChangePct !== null && (
@@ -338,7 +338,7 @@ export function DashboardPanel({
                       <p className="truncate text-xs text-muted-foreground">{p.subtitle}</p>
                     </div>
                     <div className="shrink-0 text-right">
-                      <p className="text-sm font-semibold tabular-nums text-foreground">{p.value}</p>
+                      <p className="text-sm font-semibold text-foreground">{p.value}</p>
                       <p
                         className={cn(
                           'text-xs font-medium',

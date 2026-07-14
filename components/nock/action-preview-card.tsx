@@ -45,7 +45,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
             </p>
           </div>
         )}
-        <p className="text-[15px] font-semibold leading-snug text-foreground">
+        <p className="font-serif text-lg leading-snug text-foreground">
           {action.action}
         </p>
         <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
@@ -64,7 +64,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
               </span>
               <span
                 className={cn(
-                  'text-lg font-bold tabular-nums leading-none',
+                  'text-lg font-bold leading-none',
                   m.positive ? 'text-primary' : 'text-foreground',
                 )}
               >

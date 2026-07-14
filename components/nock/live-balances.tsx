@@ -108,7 +108,7 @@ function BalanceRow({
         <p className="truncate text-xs text-muted-foreground">{name}</p>
       </div>
       <div className="shrink-0 text-right">
-        <p className="text-sm font-semibold tabular-nums text-foreground">{amount}</p>
+        <p className="text-sm font-semibold text-foreground">{amount}</p>
         <p className="text-xs text-muted-foreground">Price coming soon</p>
       </div>
     </li>

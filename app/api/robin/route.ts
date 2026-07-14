@@ -1382,6 +1382,42 @@ export async function POST(request: Request) {
       }
     }
 
+    // Deterministic SWAP command path — same reliability story as the yield one
+    // above, seen live on the very first message of a session: "swap 5 usdg to eth"
+    // answered with no quote fetched and no card. An unambiguous swap command
+    // between two VERIFIED tokens gets its quote built directly; the swap synthesis
+    // below then turns it into a card with all the usual guards. Anything fuzzier
+    // (memecoins, stocks, dollar-denominated) still goes through the model, which
+    // has the tools to disambiguate.
+    if (!action && !lastSwapQuote?.transaction && walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const m = lastUser?.text.match(
+        /\b(?:swap|convert)\s+([\d,.]+)\s*([a-z]{2,10})\s+(?:to|for|into)\s+([a-z]{2,10})\b/i,
+      )
+      if (m) {
+        const [, rawAmount, rawFrom, rawTo] = m
+        const from = Object.keys(SWAP_TOKENS).find((s) => s.toLowerCase() === rawFrom.toLowerCase())
+        const to = Object.keys(SWAP_TOKENS).find((s) => s.toLowerCase() === rawTo.toLowerCase())
+        if (from && to && from !== to) {
+          try {
+            const quote = await fetchSwapQuote({
+              fromToken: from,
+              toToken: to,
+              amount: rawAmount.replace(/,/g, ''),
+              taker: walletAddress,
+            })
+            if (quote.transaction) {
+              lastSwapQuote = quote
+            } else if (quote.error) {
+              responseText = quote.error
+            }
+          } catch (err) {
+            console.error('[robin] deterministic swap command failed:', err)
+          }
+        }
+      }
+    }
+
     // Deterministic card synthesis — in practice the model sometimes builds a
     // real yield quote (get_yield_deposit_quote / get_yield_withdraw_quote succeeded,
     // a genuine transaction exists) but then never calls propose_action, leaving the
