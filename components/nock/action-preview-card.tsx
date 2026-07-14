@@ -4,6 +4,7 @@ import { Check, Loader2, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getAgent, type ActionPreview } from './data'
 import { AgentIcon } from './agent-icon'
+import { NockMark } from './nock-logo'
 
 type Props = {
   action: ActionPreview
@@ -26,12 +27,15 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
           <AgentIcon agent={action.agent} className="size-3.5" />
         </span>
         <span className="text-xs font-medium text-muted-foreground">{agent.name}</span>
-        {executed && (
-          <span className="ml-auto flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
-            <span className="size-1.5 rounded-full bg-primary" />
-            Active
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-2">
+          {executed && (
+            <span className="flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-primary" />
+              Active
+            </span>
+          )}
+          <NockMark className="size-4" />
+        </span>
       </div>
 
       {/* Action body */}
