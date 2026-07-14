@@ -576,6 +576,7 @@ export async function POST(request: Request) {
     let responseText = ''
     let lastSwapQuote: any = null
     let lastCollateralQuote: StockCollateralQuote | null = null
+    let perpsInfoCalled = false
     let lastYieldQuote:
       | Awaited<ReturnType<typeof buildYieldDeposit>>
       | Awaited<ReturnType<typeof buildMarketSupply>>
@@ -1284,6 +1285,7 @@ export async function POST(request: Request) {
 
         } else if (functionName === 'get_perps_info') {
           const { symbol } = functionArgs as { symbol?: string }
+          perpsInfoCalled = true
           try {
             result = await getPerpsMarkets(symbol)
           } catch (err) {
@@ -1615,6 +1617,35 @@ export async function POST(request: Request) {
           } as object),
         } as any
         responseText = `Here's the ${isBorrow ? 'borrow' : 'repayment'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
+      }
+    }
+
+    // Deterministic perps-data backstop — seen live: asked "i want to test some
+    // perps", the model skipped get_perps_info entirely and INVENTED markets
+    // (BTC quoted at $25,000 against a real $64,882 mark). Any perps-intent
+    // message that ends the turn without the real tool having run gets its reply
+    // replaced with live Lighter data, formatted here from the same numbers the
+    // tool returns — the model cannot be the source of market data.
+    if (!action && !perpsInfoCalled) {
+      const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      // Both sides must look perps-shaped: the user asked about perps AND the
+      // model's reply talks perps (i.e. it answered the topic without the tool).
+      // A passing mention ("forget perps, what do I hold") keeps its real answer.
+      if (
+        lastUser && /\bperps?\b|\bperpetuals?\b|\bfutures\b|\bfunding rate/i.test(lastUser.text) &&
+        /perp|futures|leverage|funding|mark price/i.test(responseText)
+      ) {
+        try {
+          const { markets } = await getPerpsMarkets()
+          if (markets.length > 0) {
+            const lines = markets.slice(0, 5).map((m, i) =>
+              `${i + 1}. **${m.asset}**: mark $${m.markPrice.toLocaleString('en-US', { maximumFractionDigits: m.markPrice < 1 ? 6 : 2 })}, funding ${m.fundingRatePctHourly.toFixed(4)}%/hr, 24h volume $${Math.round(m.dailyVolumeUsd).toLocaleString('en-US')}, up to ${m.maxLeverage}x`,
+            )
+            responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. Opening positions through Nock isn't built yet — perps execution is the last agent under construction — so this is informational for now.`
+          }
+        } catch (err) {
+          console.error('[robin] deterministic perps backstop failed:', err)
+        }
       }
     }
 
