@@ -167,7 +167,7 @@ export function Sidebar({
       </nav>
 
       {/* Chat history */}
-      <div className="min-h-0 flex-1 overflow-y-auto border-t border-border px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <p className="mb-1.5 px-3 text-xs font-medium text-muted-foreground">Chats</p>
         {history.length === 0 ? (
           <p className="px-3 py-2 text-xs text-muted-foreground">No conversations yet.</p>
@@ -205,9 +205,9 @@ export function Sidebar({
       </div>
 
       {/* Wallet chip + season */}
-      <div className="border-t border-border p-3">
+      <div className="p-3">
         {ready && authenticated && shortAddress ? (
-          <div className="flex items-center gap-3 rounded-xl border border-border bg-background/40 px-3 py-3">
+          <div className="flex items-center gap-3 rounded-2xl bg-secondary px-3 py-3">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground">
               <Wallet className="size-4" strokeWidth={1.75} />
             </span>

@@ -51,7 +51,7 @@ function YieldPositionsCard() {
   const total = positions.reduce((sum, p) => sum + p.suppliedUsd, 0)
 
   return (
-    <div className="rounded-3xl border border-border/60 bg-background/50 px-5 py-4">
+    <div className="rounded-3xl bg-secondary px-5 py-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Percent className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
@@ -123,7 +123,7 @@ function InstantSwapWalletCard() {
   const held = balances.filter((b) => parseFloat(String(b.amount).replace(/,/g, '')) > 0)
 
   return (
-    <div className="rounded-3xl border border-border/60 bg-background/50 px-5 py-4">
+    <div className="rounded-3xl bg-secondary px-5 py-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Zap className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
@@ -183,7 +183,7 @@ function GuardrailsCard() {
   if (limit === undefined) return null
 
   return (
-    <div className="rounded-3xl border border-border/60 bg-background/50 px-5 py-4">
+    <div className="rounded-3xl bg-secondary px-5 py-4">
       <div className="flex items-center gap-2">
         <ShieldCheck className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
         <p className="text-sm text-muted-foreground">Vault guardrails</p>
@@ -250,7 +250,7 @@ export function DashboardPanel({
         {tab === 'overview' && (
           <div className="flex flex-col gap-6 p-5">
             {/* Portfolio hero — arrow-nock photo on the right, per the Figma card */}
-            <div className="relative overflow-hidden rounded-3xl border border-border/60 bg-background/50 px-5 py-5">
+            <div className="relative overflow-hidden rounded-3xl bg-secondary px-5 py-5">
               <img
                 src="/brand/arrow-nock.jpg"
                 alt=""
@@ -292,7 +292,7 @@ export function DashboardPanel({
                 )}
               </div>
               {attention.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                <p className="rounded-2xl bg-secondary px-4 py-8 text-center text-sm text-muted-foreground">
                   All caught up.
                 </p>
               ) : (
@@ -300,7 +300,7 @@ export function DashboardPanel({
                   {attention.map((a) => (
                     <li
                       key={a.id}
-                      className="flex items-center gap-3 rounded-xl border border-border/60 bg-background/40 px-4 py-3.5"
+                      className="flex items-center gap-3 rounded-2xl bg-secondary px-4 py-3.5"
                     >
                       <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
                         <AgentIcon agent={a.agent} className="size-4" />
@@ -328,7 +328,7 @@ export function DashboardPanel({
                 {positions.map((p) => (
                   <li
                     key={p.id}
-                    className="flex items-center gap-3 rounded-xl border border-border/60 bg-background/40 px-4 py-3.5"
+                    className="flex items-center gap-3 rounded-2xl bg-secondary px-4 py-3.5"
                   >
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
                       <AgentIcon agent={p.agent} className="size-4" />

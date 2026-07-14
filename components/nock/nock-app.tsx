@@ -893,14 +893,14 @@ export function NockApp() {
     }
     if (activeView === 'activity') {
       return (
-        <div className="flex-1 overflow-hidden rounded-2xl border border-border bg-card">
+        <div className="flex-1 overflow-hidden rounded-3xl bg-card">
           <ActivityView />
         </div>
       )
     }
     if (activeView === 'settings') {
       return (
-        <div className="flex-1 overflow-hidden rounded-2xl border border-border bg-card">
+        <div className="flex-1 overflow-hidden rounded-3xl bg-card">
           <SettingsView />
         </div>
       )
@@ -908,7 +908,7 @@ export function NockApp() {
     // chat / overview / dashboard -> split, each side its own floating card
     return (
       <div className="flex h-full min-h-0 flex-1 gap-3">
-        <div className="min-w-0 flex-1 overflow-hidden rounded-3xl border border-border bg-background">
+        <div className="min-w-0 flex-1 overflow-hidden rounded-3xl bg-background">
           <ChatPanel
             messages={messages}
             onSend={handleSend}
@@ -918,7 +918,7 @@ export function NockApp() {
             isLoading={isRobinLoading}
           />
         </div>
-        <div className="hidden w-72 shrink-0 overflow-hidden rounded-2xl border border-border md:block lg:w-80">
+        <div className="hidden w-72 shrink-0 overflow-hidden rounded-3xl md:block lg:w-80">
           <DashboardPanel
             tab={dashboardTab}
             onTabChange={setDashboardTab}
@@ -988,7 +988,7 @@ export function NockApp() {
     // gaps on a black canvas. Mobile stays full-bleed.
     <div className="flex h-[100dvh] w-full overflow-hidden bg-background text-foreground md:gap-3 md:p-3">
       {/* Desktop sidebar */}
-      <aside className="hidden w-44 shrink-0 overflow-hidden md:block md:rounded-2xl md:border md:border-border lg:w-60">
+      <aside className="hidden w-44 shrink-0 overflow-hidden md:block md:rounded-3xl lg:w-60">
         <Sidebar
           activeView={activeView}
           onNavigate={handleNavigate}

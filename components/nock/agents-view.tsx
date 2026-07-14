@@ -17,7 +17,7 @@ export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) 
       {/* Grid */}
       <div
         className={cn(
-          'min-h-0 flex-1 overflow-y-auto md:rounded-3xl md:border md:border-border md:bg-card',
+          'min-h-0 flex-1 overflow-y-auto md:rounded-3xl md:bg-card',
           selectedAgent && 'hidden md:block',
         )}
       >
@@ -36,10 +36,10 @@ export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) 
               type="button"
               onClick={() => onSelect(a.id)}
               className={cn(
-                'group flex flex-col rounded-xl border bg-card p-4 text-left transition-colors hover:bg-secondary/50',
+                'group flex flex-col rounded-2xl bg-secondary p-4 text-left transition-colors hover:bg-secondary/70',
                 selectedAgent === a.id
-                  ? 'border-foreground/20'
-                  : 'border-border',
+                  ? 'ring-1 ring-primary/40'
+                  : '',
               )}
             >
               <div className="flex items-center gap-2.5">
@@ -85,7 +85,7 @@ export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) 
 function AgentDetail({ id, onBack, onChatWithRobin }: { id: AgentId; onBack: () => void; onChatWithRobin: () => void }) {
   const agent = getAgent(id)
   return (
-    <div className="flex min-h-0 w-full flex-col overflow-y-auto bg-card md:w-96 md:shrink-0 md:rounded-3xl md:border md:border-border">
+    <div className="flex min-h-0 w-full flex-col overflow-y-auto bg-card md:w-96 md:shrink-0 md:rounded-3xl">
       <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
         <button
           type="button"
@@ -118,7 +118,7 @@ function AgentDetail({ id, onBack, onChatWithRobin }: { id: AgentId; onBack: () 
         </div>
 
         {agent.gated && (
-          <div className="mt-4 flex items-start gap-2 rounded-xl border border-border bg-secondary/60 px-3 py-2.5 text-xs text-muted-foreground">
+          <div className="mt-4 flex items-start gap-2 rounded-2xl bg-secondary px-3 py-2.5 text-xs text-muted-foreground">
             <Lock className="mt-0.5 size-3.5 shrink-0" strokeWidth={2} />
             <p className="text-pretty">
               Requires $NOCK. Hold $NOCK to unlock this agent and its actions.

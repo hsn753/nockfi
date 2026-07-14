@@ -135,7 +135,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
     // floating card surface on desktop (see nock-app's panel wrappers).
     <div className="flex h-full min-h-0 flex-col bg-background md:bg-transparent">
       {/* Header */}
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-5 md:px-6">
+      <header className="flex h-16 shrink-0 items-center gap-3 px-5 md:px-6">
         <RobinAvatar className="size-9" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
@@ -176,7 +176,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
           {messages.map((m) =>
             m.role === 'user' ? (
               <div key={m.id} className="flex justify-end">
-                <div className="max-w-[82%] rounded-2xl rounded-br-md border border-border bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
+                <div className="max-w-[82%] rounded-2xl rounded-br-md bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
                   {renderMessageText(m.text)}
                 </div>
               </div>
@@ -184,7 +184,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
               <div key={m.id} className="flex gap-3">
                 <RobinAvatar className="mt-1 size-8 shrink-0" />
                 <div className="min-w-0 max-w-[88%]">
-                  <div className="rounded-2xl rounded-tl-md border border-border bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground">
+                  <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground">
                     {renderMessageText(m.text)}
                   </div>
                   {m.action && (
@@ -200,7 +200,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
           {isLoading && (
             <div className="flex gap-3">
               <RobinAvatar className="mt-1 size-8 shrink-0" />
-              <div className="rounded-2xl rounded-tl-md border border-border bg-card px-4 py-4">
+              <div className="rounded-2xl rounded-tl-md bg-card px-4 py-4">
                 <div className="flex items-center gap-1.5">
                   <span className="size-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.3s]" />
                   <span className="size-2 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.15s]" />
@@ -217,10 +217,8 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
         <div className="mx-auto flex max-w-2xl items-end gap-2.5">
           <div
             className={cn(
-              'flex flex-1 items-center rounded-3xl border bg-background px-4 py-2.5 transition-colors',
-              isLoading
-                ? 'border-border opacity-50'
-                : 'border-border focus-within:border-primary/50',
+              'flex flex-1 items-center rounded-3xl bg-secondary px-4 py-2.5 transition-colors',
+              isLoading && 'opacity-50',
             )}
           >
             <textarea
@@ -247,9 +245,9 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
             disabled={!value.trim() || isLoading}
             aria-label="Send message"
             className={cn(
-              'flex size-12 shrink-0 items-center justify-center rounded-3xl border border-border bg-background transition-colors',
+              'flex size-12 shrink-0 items-center justify-center rounded-3xl bg-secondary transition-colors',
               value.trim() && !isLoading
-                ? 'text-foreground hover:border-primary/50'
+                ? 'text-foreground hover:bg-secondary/70'
                 : 'text-muted-foreground',
             )}
           >
