@@ -249,22 +249,24 @@ export function DashboardPanel({
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === 'overview' && (
           <div className="flex flex-col gap-6 p-5">
-            {/* Portfolio hero — arrow-nock photo on the right, per the Figma card */}
-            <div className="relative overflow-hidden rounded-3xl bg-secondary px-5 py-5">
+            {/* Portfolio hero — black card with the arrow-nock photo bleeding off the
+                right, per the Figma. Card bg is #02050a (matches the photo's own black
+                background) so the image blends seamlessly with no seam. */}
+            <div className="relative overflow-hidden rounded-3xl bg-background px-5 py-6">
               <img
                 src="/brand/arrow-nock.jpg"
                 alt=""
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-y-0 right-0 h-full w-28 object-cover"
+                className="pointer-events-none absolute -right-2 top-1/2 h-[130%] w-40 -translate-y-1/2 object-contain object-right"
               />
-              <div className="pointer-events-none absolute inset-y-0 right-0 w-40 bg-gradient-to-r from-background/95 via-background/40 to-transparent" />
+              <div className="pointer-events-none absolute inset-y-0 left-0 w-2/3 bg-gradient-to-r from-background via-background/90 to-transparent" />
               <div className="relative">
                 <p className="text-sm text-muted-foreground">Portfolio Value</p>
-                <p className="mt-2 text-4xl font-bold tracking-tight text-foreground">
+                <p className="mt-2 font-serif text-4xl tracking-tight text-foreground">
                   {portfolioValue}
                 </p>
                 {weeklyChangePct !== null && (
-                  <p className={cn('mt-1.5 text-sm font-medium', weeklyChangePct >= 0 ? 'text-primary' : 'text-red-400')}>
+                  <p className={cn('mt-2 text-sm font-medium', weeklyChangePct >= 0 ? 'text-primary' : 'text-red-400')}>
                     {weeklyChangePct >= 0 ? '+' : ''}
                     {weeklyChangePct.toFixed(1)}% this week
                   </p>
