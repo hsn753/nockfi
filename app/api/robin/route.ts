@@ -129,13 +129,18 @@ async function computeQuotedTradeValue(lastSwapQuote: any): Promise<string> {
 // was exceeded, or null if the action is allowed.
 async function getExceededSpendLimit(walletAddress: string | undefined, outcomeValue: string): Promise<number | null> {
   if (!walletAddress) return null
-  const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
-  if (isNaN(outcomeValueNum)) return null
   const wallet = await getWalletByAddress(walletAddress)
   const guardrails = wallet ? await getGuardrails(wallet.id) : { maxUsdPerTransaction: null }
-  return guardrails.maxUsdPerTransaction !== null && outcomeValueNum > guardrails.maxUsdPerTransaction
-    ? guardrails.maxUsdPerTransaction
-    : null
+  const limit = guardrails.maxUsdPerTransaction
+  // No limit set → unlimited, allowed.
+  if (limit === null) return null
+  const outcomeValueNum = parseFloat(outcomeValue.replace(/[^0-9.]/g, ''))
+  // A limit IS set but this trade can't be priced (e.g. outcomeValue is
+  // 'Value unavailable' for an unverified, unpriced memecoin sell). Fail CLOSED —
+  // block it. Previously NaN returned null ("allowed"), so any unpriced sell of any
+  // size slipped past the ceiling entirely, which defeats the spend limit.
+  if (isNaN(outcomeValueNum)) return limit
+  return outcomeValueNum > limit ? limit : null
 }
 
 function buildSystemPrompt(walletAddress?: string): string {

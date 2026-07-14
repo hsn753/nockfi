@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createPublicClient, http, isHash } from 'viem'
 import { nockChain } from '@/lib/chain'
 import { updateTransactionVerification } from '@/lib/db/transactions'
+import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,12 +15,46 @@ export const dynamic = 'force-dynamic'
 // The client-side receipt wait that produced that false success cannot be trusted alone
 // for a claim this consequential — this endpoint is the real check the client must pass
 // before telling a user their swap executed.
+// Await the audit write but never let it change the verification RESPONSE. A DB error
+// here must not flip a real on-chain success into a "not_found" (the outer catch does
+// exactly that), so each write is isolated in its own try/catch. We await rather than
+// fire-and-forget because on Vercel serverless, work left pending after the response is
+// returned is not guaranteed to run — the function can be frozen — which silently drops
+// the audit write for fast confirmations.
+async function safeUpdateVerification(
+  txHash: string,
+  status: 'success' | 'reverted' | 'not_found',
+  blockNumber?: string,
+): Promise<void> {
+  try {
+    await updateTransactionVerification(txHash, status, blockNumber)
+  } catch (err) {
+    console.error('[verify-tx] Could not update transaction audit log:', err)
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null)
-  const { txHash } = (body ?? {}) as { txHash?: string }
+  const { txHash, walletAddress } = (body ?? {}) as { txHash?: string; walletAddress?: string }
 
   if (!txHash || !isHash(txHash)) {
     return NextResponse.json({ error: 'A valid txHash is required.' }, { status: 400 })
+  }
+
+  // This endpoint writes to the transactions audit table (verify_status), so it must be
+  // authenticated — previously it was open, letting any caller overwrite arbitrary audit
+  // rows by hash and probe which hashes exist. Require a valid Privy identity token bound
+  // to the wallet the caller claims (same check every other authenticated route uses).
+  if (!walletAddress) {
+    return NextResponse.json({ error: 'walletAddress is required.' }, { status: 400 })
+  }
+  try {
+    await requireAuthenticatedWallet(req, walletAddress)
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return NextResponse.json({ error: err.message }, { status: err.status })
+    }
+    return NextResponse.json({ error: 'Authentication failed.' }, { status: 401 })
   }
 
   const rpcUrl = process.env.RPC_URL
@@ -37,11 +72,8 @@ export async function POST(req: NextRequest) {
     // the database in permanent agreement with what the user was actually told, since
     // this endpoint is already the app's sole authority on success/revert/not-found.
     // A missing row (nothing logged yet, or DB not provisioned) is a real, harmless
-    // no-op, not an error — never let an audit-logging side effect break the actual
-    // verification response this endpoint exists to give.
-    updateTransactionVerification(txHash, status, receipt.blockNumber.toString()).catch((err) => {
-      console.error('[verify-tx] Could not update transaction audit log:', err)
-    })
+    // no-op, not an error.
+    await safeUpdateVerification(txHash, status, receipt.blockNumber.toString())
 
     return NextResponse.json({
       found: true,
@@ -51,9 +83,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     // getTransactionReceipt throws if the hash isn't found (not yet mined, or never
     // broadcast at all) - both are real "not confirmed" states, not errors to hide.
-    updateTransactionVerification(txHash, 'not_found').catch((dbErr) => {
-      console.error('[verify-tx] Could not update transaction audit log:', dbErr)
-    })
+    await safeUpdateVerification(txHash, 'not_found')
     return NextResponse.json({ found: false, status: 'not_found' })
   }
 }

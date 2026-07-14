@@ -13,15 +13,18 @@ import { recordPortfolioSnapshot } from '@/lib/db/portfolio-snapshots'
 // only monitoring that runs while nobody has the app open; the client still does
 // its own live check on every load, which is fresher for whoever is present.
 //
-// Vercel invokes this with `Authorization: Bearer ${CRON_SECRET}` when that env
-// var is set — set it, since without it any caller can trigger a sweep (harmless
-// but wasteful: this route reads public chain state and writes only risk rows).
+// Vercel invokes this with `Authorization: Bearer ${CRON_SECRET}` — CRON_SECRET must
+// be set in the project env (Vercel auto-injects the bearer for scheduled runs). This
+// endpoint fails CLOSED: if the secret is missing/misconfigured, or the bearer doesn't
+// match, we refuse. Previously, an unset CRON_SECRET skipped the check entirely, so any
+// caller could trigger this per-wallet sweep (maxDuration 300, loops every wallet) — a
+// cost/DoS amplification vector. Never let a missing config silently disable auth.
 
 export const maxDuration = 300
 
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET
-  if (secret && req.headers.get('authorization') !== `Bearer ${secret}`) {
+  if (!secret || req.headers.get('authorization') !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

@@ -319,6 +319,11 @@ export function NockApp() {
   // handleLoose's declaration below.
   const handleLooseRef = useRef<((actionId: string) => Promise<void>) | null>(null)
 
+  // Action ids currently mid-execution. A card can be confirmed from two places at once
+  // (the Confirm button and typing "confirm"/"loose"), or double-tapped — without this
+  // guard the same swap could be broadcast twice. One in-flight execution per card.
+  const executingActionsRef = useRef<Set<string>>(new Set())
+
   const handleSend = useCallback(
     async (text: string) => {
       const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
@@ -464,6 +469,13 @@ export function NockApp() {
   }, [])
 
   const handleLoose = useCallback(async (actionId: string) => {
+    // Reject a duplicate confirm for a card already executing (button + typed "confirm",
+    // or a fast double-tap). Released at the two exit points below: the early !action
+    // return, and the end of the callback (the real-execution branch is fully awaited
+    // before then, so the slot is held for the entire broadcast+verify window).
+    if (executingActionsRef.current.has(actionId)) return
+    executingActionsRef.current.add(actionId)
+
     // Enter confirming state.
     setMessages((prev) =>
       prev.map((m) =>
@@ -481,6 +493,7 @@ export function NockApp() {
 
     if (!action) {
       console.error('Action not found:', actionId)
+      executingActionsRef.current.delete(actionId)
       return
     }
 
@@ -718,8 +731,11 @@ export function NockApp() {
         }
         const verifyRes = await fetch('/api/verify-tx', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ txHash: result.txHash }),
+          headers: {
+            'Content-Type': 'application/json',
+            'x-privy-identity-token': identityToken || '',
+          },
+          body: JSON.stringify({ txHash: result.txHash, walletAddress }),
         })
         const verifyData = await verifyRes.json()
         if (!verifyData.found) {
@@ -851,6 +867,11 @@ export function NockApp() {
         })
       }, 1200)
     }
+
+    // Release the in-flight slot. The real-execution branch above is fully awaited by
+    // the time we get here, so the slot was held for the entire broadcast+verify window;
+    // the mock branch's setTimeout is fire-and-forget and carries no double-send risk.
+    executingActionsRef.current.delete(actionId)
   }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress])
 
   handleLooseRef.current = handleLoose
