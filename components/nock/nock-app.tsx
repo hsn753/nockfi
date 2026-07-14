@@ -908,7 +908,7 @@ export function NockApp() {
     // chat / overview / dashboard -> split, each side its own floating card
     return (
       <div className="flex h-full min-h-0 flex-1 gap-3">
-        <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-border bg-card">
+        <div className="min-w-0 flex-1 overflow-hidden rounded-3xl border border-border bg-background">
           <ChatPanel
             messages={messages}
             onSend={handleSend}
