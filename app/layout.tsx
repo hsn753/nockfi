@@ -1,20 +1,35 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
-import { Inter, Geist_Mono, Instrument_Serif } from 'next/font/google'
+import { Geist_Mono } from 'next/font/google'
+import localFont from 'next/font/local'
 import { Providers } from '@/lib/providers'
 import './globals.css'
 
-const inter = Inter({ variable: '--font-inter', subsets: ['latin'] })
 const geistMono = Geist_Mono({
   variable: '--font-geist-mono',
   subsets: ['latin'],
 })
-// The display serif for the wordmark, hero, and section headings — matches the
-// brand's Draw/Loose serif in the design.
-const instrumentSerif = Instrument_Serif({
-  variable: '--font-instrument-serif',
-  weight: '400',
-  subsets: ['latin'],
+// Brand UI sans from the Figma file — Helvetica Now Display (licensed TTFs
+// supplied by design, served locally).
+const helveticaNow = localFont({
+  variable: '--font-helvetica-now',
+  src: [
+    { path: './fonts/HelveticaNowDisplay-Light.ttf', weight: '300', style: 'normal' },
+    { path: './fonts/HelveticaNowDisplay-Regular.ttf', weight: '400', style: 'normal' },
+    { path: './fonts/HelveticaNowDisplay-RegIta.ttf', weight: '400', style: 'italic' },
+    { path: './fonts/HelveticaNowDisplay-Medium.ttf', weight: '500', style: 'normal' },
+    { path: './fonts/HelveticaNowDisplay-Bold.ttf', weight: '700', style: 'normal' },
+    { path: './fonts/HelveticaNowDisplay-ExtraBold.ttf', weight: '800', style: 'normal' },
+  ],
+})
+// The display serif for the wordmark, hero, and section headings — Merriweather,
+// matching the Figma screens ("Hey, I'm Robin…", card titles, wordmark).
+const merriweather = localFont({
+  variable: '--font-merriweather',
+  src: [
+    { path: './fonts/Merriweather-Variable.ttf', weight: '300 900', style: 'normal' },
+    { path: './fonts/Merriweather-Italic-Variable.ttf', weight: '300 900', style: 'italic' },
+  ],
 })
 
 export const metadata: Metadata = {
@@ -40,7 +55,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${inter.variable} ${geistMono.variable} ${instrumentSerif.variable} bg-background`}
+      className={`dark ${helveticaNow.variable} ${geistMono.variable} ${merriweather.variable} bg-background`}
     >
       <body className="font-sans antialiased">
         <Providers>

@@ -110,6 +110,19 @@ export const walletGuardrails = pgTable('wallet_guardrails', {
   uniqueIndex('wallet_guardrails_wallet_idx').on(t.walletId),
 ])
 
+// One row per wallet per daily sweep — the history behind the dashboard's
+// "+x% this week" line. Only ever written with REAL computed totals; the UI
+// hides the line entirely until enough history exists (never a fabricated
+// percentage, per the Figma card).
+export const portfolioSnapshots = pgTable('portfolio_snapshots', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  totalUsd: numeric('total_usd').notNull(),
+  takenAt: timestamp('taken_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('portfolio_snapshots_wallet_idx').on(t.walletId, t.takenAt),
+])
+
 // Written by the loan-monitoring sweep (app/api/cron/monitor-loans) when an open
 // stock-collateral loan crosses the risk threshold, resolved when it comes back
 // under (or closes). Persisted so the warning survives to the user's next visit

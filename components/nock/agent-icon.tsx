@@ -1,12 +1,14 @@
-import { Coins, TrendingUp, ArrowLeftRight, Vault, CandlestickChart } from 'lucide-react'
+import { Coins, CandlestickChart, ArrowLeftRight, SquareActivity, SquareX } from 'lucide-react'
 import type { AgentId } from './data'
 
+// Icon set matched to the Figma sidebar: candlesticks for Perps, chart-square
+// for Tokenized Stocks, X-square for Vault.
 const map = {
   yield: Coins,
-  perps: TrendingUp,
+  perps: CandlestickChart,
   swap: ArrowLeftRight,
-  stock: CandlestickChart,
-  vault: Vault,
+  stock: SquareActivity,
+  vault: SquareX,
 } as const
 
 export function AgentIcon({

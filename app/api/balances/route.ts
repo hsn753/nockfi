@@ -4,6 +4,7 @@ import { fetchWalletBalances } from '@/lib/get-balances'
 import { getStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getUnresolvedRiskEvents } from '@/lib/db/loan-risk'
+import { getWeeklyBaseline } from '@/lib/db/portfolio-snapshots'
 
 export async function GET(req: NextRequest) {
   const raw = req.nextUrl.searchParams.get('address')
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest) {
     // dashboard's portfolio number silently drops by the full collateral value
     // the moment a loan opens. Best-effort: a collateral read failure must not
     // take down the balances everything else depends on.
-    const [balances, collateralPositions, riskEvents] = await Promise.all([
+    const [balances, collateralPositions, riskEvents, weeklyBaseline] = await Promise.all([
       fetchWalletBalances(raw),
       getStockBorrowPositions(raw).catch((err) => {
         console.error('[/api/balances] Collateral positions fetch failed:', err)
@@ -33,8 +34,24 @@ export async function GET(req: NextRequest) {
         console.error('[/api/balances] Risk events fetch failed:', err)
         return []
       }),
+      // Real weekly baseline from the daily snapshot history (null until at
+      // least one day-old snapshot exists — the UI hides the line rather than
+      // ever inventing a percentage).
+      (async () => {
+        const wallet = await getWalletByAddress(raw)
+        return wallet ? getWeeklyBaseline(wallet.id) : null
+      })().catch(() => null),
     ])
-    return NextResponse.json({ balances, collateralPositions, riskEvents })
+
+    const currentTotal =
+      balances.reduce((s, b) => s + (b.usdValue ?? 0), 0) +
+      collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+    const weeklyChangePct =
+      weeklyBaseline !== null && weeklyBaseline > 0
+        ? ((currentTotal - weeklyBaseline) / weeklyBaseline) * 100
+        : null
+
+    return NextResponse.json({ balances, collateralPositions, riskEvents, weeklyChangePct })
   } catch (err) {
     console.error('[/api/balances] Error:', err)
     return NextResponse.json({ error: 'Failed to fetch balances from the chain' }, { status: 500 })

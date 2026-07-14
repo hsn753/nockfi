@@ -131,7 +131,9 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    // bg inherits from the parent: full-bleed background on mobile, the
+    // floating card surface on desktop (see nock-app's panel wrappers).
+    <div className="flex h-full min-h-0 flex-col bg-background md:bg-transparent">
       {/* Header */}
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-5 md:px-6">
         <RobinAvatar className="size-9" />

@@ -206,6 +206,9 @@ type Props = {
   attention: AttentionItem[]
   positions: Position[]
   portfolioValue: string
+  // Real week-over-week change from daily snapshots; null = not enough history
+  // yet, and the line is simply not rendered (never a fabricated percentage).
+  weeklyChangePct: number | null
 }
 
 const tabs: { id: DashTab; label: string }[] = [
@@ -220,6 +223,7 @@ export function DashboardPanel({
   attention,
   positions,
   portfolioValue,
+  weeklyChangePct,
 }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
@@ -245,12 +249,27 @@ export function DashboardPanel({
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === 'overview' && (
           <div className="flex flex-col gap-6 p-5">
-            {/* Portfolio hero */}
-            <div className="rounded-2xl border border-border/60 bg-background/50 px-5 py-5">
-              <p className="text-sm text-muted-foreground">Portfolio Value</p>
-              <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums text-foreground">
-                {portfolioValue}
-              </p>
+            {/* Portfolio hero — arrow-nock photo on the right, per the Figma card */}
+            <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-background/50 px-5 py-5">
+              <img
+                src="/brand/arrow-nock.jpg"
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 right-0 h-full w-28 object-cover"
+              />
+              <div className="pointer-events-none absolute inset-y-0 right-0 w-40 bg-gradient-to-r from-background/95 via-background/40 to-transparent" />
+              <div className="relative">
+                <p className="text-sm text-muted-foreground">Portfolio Value</p>
+                <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums text-foreground">
+                  {portfolioValue}
+                </p>
+                {weeklyChangePct !== null && (
+                  <p className={cn('mt-1.5 text-sm font-medium', weeklyChangePct >= 0 ? 'text-primary' : 'text-red-400')}>
+                    {weeklyChangePct >= 0 ? '+' : ''}
+                    {weeklyChangePct.toFixed(1)}% this week
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Yield positions */}

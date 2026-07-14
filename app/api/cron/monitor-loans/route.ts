@@ -3,6 +3,8 @@ import { getDb } from '@/lib/db/client'
 import { wallets } from '@/lib/db/schema'
 import { getAllStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { syncLoanRiskEvents } from '@/lib/db/loan-risk'
+import { fetchWalletBalances } from '@/lib/get-balances'
+import { recordPortfolioSnapshot } from '@/lib/db/portfolio-snapshots'
 
 // Scheduled sweep (vercel.json crons) over every wallet this app has ever seen:
 // reads each one's live stock-collateral positions and reconciles persisted risk
@@ -38,6 +40,7 @@ export async function GET(req: NextRequest) {
     const allPositions = await getAllStockBorrowPositions(allWallets.map((w) => w.address))
     const checked = allWallets.length
 
+    let snapshots = 0
     for (const w of allWallets) {
       try {
         const positions = allPositions.get(w.address.toLowerCase()) ?? []
@@ -45,12 +48,24 @@ export async function GET(req: NextRequest) {
         const r = await syncLoanRiskEvents(w.id, positions)
         opened += r.opened
         resolved += r.resolved
+
+        // Daily portfolio snapshot — the real history behind the dashboard's
+        // "+x% this week" line. Wallet balances + collateral net of debt, the
+        // same formula the dashboard total uses. Best-effort per wallet.
+        try {
+          const balances = await fetchWalletBalances(w.address as `0x${string}`)
+          const walletUsd = balances.reduce((s, b) => s + (b.usdValue ?? 0), 0)
+          const netCollateral = positions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+          if (await recordPortfolioSnapshot(w.id, walletUsd + netCollateral)) snapshots++
+        } catch (err) {
+          console.error(`[monitor-loans] Snapshot failed for ${w.address}:`, err)
+        }
       } catch (err) {
         console.error(`[monitor-loans] Sync failed for ${w.address}:`, err)
       }
     }
 
-    const summary = { checked, withLoans, eventsOpened: opened, eventsResolved: resolved }
+    const summary = { checked, withLoans, eventsOpened: opened, eventsResolved: resolved, snapshots }
     console.log('[monitor-loans] Sweep complete:', summary)
     return NextResponse.json(summary)
   } catch (err) {

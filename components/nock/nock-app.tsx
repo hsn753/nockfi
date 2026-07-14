@@ -114,6 +114,7 @@ export function NockApp() {
   const [positions, setPositions] = useState<Position[]>([])
   const [addedValue, setAddedValue] = useState(0)
   const [realPortfolioValue, setRealPortfolioValue] = useState(0)
+  const [weeklyChangePct, setWeeklyChangePct] = useState<number | null>(null)
   const [pendingBridge, setPendingBridge] = useState<PendingBridge | null>(null)
 
   const fetchPortfolioValue = useCallback(async (): Promise<number | null> => {
@@ -197,6 +198,9 @@ export function NockApp() {
       })
 
       setRealPortfolioValue(total)
+      // Real week-over-week change from daily snapshots — null (line hidden)
+      // until at least one day of history exists.
+      setWeeklyChangePct(typeof data.weeklyChangePct === 'number' ? data.weeklyChangePct : null)
       return total
     } catch (err) {
       console.error('[Nock] Error fetching portfolio value:', err)
@@ -888,15 +892,23 @@ export function NockApp() {
       )
     }
     if (activeView === 'activity') {
-      return <ActivityView />
+      return (
+        <div className="flex-1 overflow-hidden rounded-2xl border border-border bg-card">
+          <ActivityView />
+        </div>
+      )
     }
     if (activeView === 'settings') {
-      return <SettingsView />
+      return (
+        <div className="flex-1 overflow-hidden rounded-2xl border border-border bg-card">
+          <SettingsView />
+        </div>
+      )
     }
-    // chat / overview / dashboard -> split
+    // chat / overview / dashboard -> split, each side its own floating card
     return (
-      <div className="flex h-full min-h-0 flex-1">
-        <div className="min-w-0 flex-1">
+      <div className="flex h-full min-h-0 flex-1 gap-3">
+        <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-border bg-card">
           <ChatPanel
             messages={messages}
             onSend={handleSend}
@@ -906,13 +918,14 @@ export function NockApp() {
             isLoading={isRobinLoading}
           />
         </div>
-        <div className="hidden w-72 shrink-0 border-l border-border md:block lg:w-80">
+        <div className="hidden w-72 shrink-0 overflow-hidden rounded-2xl border border-border md:block lg:w-80">
           <DashboardPanel
             tab={dashboardTab}
             onTabChange={setDashboardTab}
             attention={attention}
             positions={positions}
             portfolioValue={portfolioValue}
+            weeklyChangePct={weeklyChangePct}
           />
         </div>
       </div>
@@ -942,6 +955,7 @@ export function NockApp() {
             attention={attention}
             positions={positions}
             portfolioValue={portfolioValue}
+            weeklyChangePct={weeklyChangePct}
           />
         )
       default:
@@ -970,9 +984,11 @@ export function NockApp() {
             : 'Robin'
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-background text-foreground">
+    // Desktop is the Figma "floating panels" composition: rounded cards with
+    // gaps on a black canvas. Mobile stays full-bleed.
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-background text-foreground md:gap-3 md:p-3">
       {/* Desktop sidebar */}
-      <aside className="hidden w-44 shrink-0 border-r border-border md:block lg:w-60">
+      <aside className="hidden w-44 shrink-0 overflow-hidden md:block md:rounded-2xl md:border md:border-border lg:w-60">
         <Sidebar
           activeView={activeView}
           onNavigate={handleNavigate}
