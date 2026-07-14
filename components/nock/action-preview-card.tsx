@@ -20,7 +20,7 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
   const isUnverifiedToken = (action as any).verified === false
 
   return (
-    <div className={cn('mt-4 overflow-hidden rounded-2xl border bg-card', isUnverifiedToken ? 'border-destructive/50' : 'border-border/70')}>
+    <div className={cn('mt-4 overflow-hidden rounded-3xl border bg-card', isUnverifiedToken ? 'border-destructive/50' : 'border-border/70')}>
       {/* Agent chip */}
       <div className="flex items-center gap-2 px-5 pt-5">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">

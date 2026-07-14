@@ -213,11 +213,11 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
       </div>
 
       {/* Input */}
-      <div className="shrink-0 border-t border-border bg-background px-5 py-4 md:px-6">
+      <div className="shrink-0 bg-background px-5 py-4 md:px-6">
         <div className="mx-auto flex max-w-2xl items-end gap-2.5">
           <div
             className={cn(
-              'flex flex-1 items-center rounded-2xl border bg-card px-4 py-2.5 transition-colors',
+              'flex flex-1 items-center rounded-3xl border bg-background px-4 py-2.5 transition-colors',
               isLoading
                 ? 'border-border opacity-50'
                 : 'border-border focus-within:border-primary/50',
@@ -247,10 +247,10 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
             disabled={!value.trim() || isLoading}
             aria-label="Send message"
             className={cn(
-              'flex size-12 shrink-0 items-center justify-center rounded-2xl transition-colors',
+              'flex size-12 shrink-0 items-center justify-center rounded-3xl border border-border bg-background transition-colors',
               value.trim() && !isLoading
-                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                : 'bg-secondary text-muted-foreground',
+                ? 'text-foreground hover:border-primary/50'
+                : 'text-muted-foreground',
             )}
           >
             <Send className="size-4" strokeWidth={2} />

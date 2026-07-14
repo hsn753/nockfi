@@ -17,7 +17,7 @@ export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) 
       {/* Grid */}
       <div
         className={cn(
-          'min-h-0 flex-1 overflow-y-auto md:rounded-2xl md:border md:border-border md:bg-card',
+          'min-h-0 flex-1 overflow-y-auto md:rounded-3xl md:border md:border-border md:bg-card',
           selectedAgent && 'hidden md:block',
         )}
       >
@@ -85,7 +85,7 @@ export function AgentsView({ selectedAgent, onSelect, onChatWithRobin }: Props) 
 function AgentDetail({ id, onBack, onChatWithRobin }: { id: AgentId; onBack: () => void; onChatWithRobin: () => void }) {
   const agent = getAgent(id)
   return (
-    <div className="flex min-h-0 w-full flex-col overflow-y-auto bg-card md:w-96 md:shrink-0 md:rounded-2xl md:border md:border-border">
+    <div className="flex min-h-0 w-full flex-col overflow-y-auto bg-card md:w-96 md:shrink-0 md:rounded-3xl md:border md:border-border">
       <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
         <button
           type="button"

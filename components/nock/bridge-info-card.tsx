@@ -5,7 +5,7 @@ import type { BridgeInfo } from './data'
 
 export function BridgeInfoCard({ bridgeInfo }: { bridgeInfo: BridgeInfo }) {
   return (
-    <div className="mt-4 overflow-hidden rounded-2xl border border-border/70 bg-card">
+    <div className="mt-4 overflow-hidden rounded-3xl border border-border/70 bg-card">
       <div className="px-5 pt-5">
         <p className="text-[15px] font-semibold leading-snug text-foreground">
           Bridge {bridgeInfo.sourceChain} to Robinhood Chain
