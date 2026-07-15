@@ -78,7 +78,12 @@ const ACTION_SETTLE_ALL = 0x0c
 const ACTION_TAKE_ALL = 0x0f
 
 const SWAP_GAS_LIMIT = '600000'
-const SLIPPAGE_BPS = BigInt(100) // 1%
+// 0.5%. minOut is derived from the exact on-chain V4Quoter output (best.amountOut), so
+// this tolerance only ever absorbs price MOVEMENT during the ~15-min quote window — not
+// execution slippage, which measured ~0% on real trades up to $190 (quoted vs realized
+// on-chain were identical to 6 decimals). 50 bps stays far above anything observed while
+// halving worst-case adverse-movement / MEV exposure vs the old 1%.
+const SLIPPAGE_BPS = BigInt(50) // 0.5%
 const DEADLINE_SECONDS = 15 * 60
 
 const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
