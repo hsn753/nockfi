@@ -39,10 +39,15 @@ function YieldPositionsCard() {
         .catch(() => {})
     }
     load()
-    const interval = setInterval(load, 60_000)
+    // Skip polling while the tab is backgrounded — a large share of "idle users" have the
+    // tab hidden, so this is a big load cut at scale. Refresh immediately on return.
+    const interval = setInterval(() => { if (!document.hidden) load() }, 60_000)
+    const onVisible = () => { if (!document.hidden) load() }
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       cancelled = true
       clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [ready, authenticated, address])
 
@@ -110,10 +115,15 @@ function InstantSwapWalletCard() {
         .catch(() => {})
     }
     load()
-    const interval = setInterval(load, 60_000)
+    // Skip polling while the tab is backgrounded — a large share of "idle users" have the
+    // tab hidden, so this is a big load cut at scale. Refresh immediately on return.
+    const interval = setInterval(() => { if (!document.hidden) load() }, 60_000)
+    const onVisible = () => { if (!document.hidden) load() }
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       cancelled = true
       clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [ready, authenticated, embedded?.address])
 

@@ -1,5 +1,6 @@
 import { createPublicClient, http, erc20Abi, formatUnits } from 'viem'
 import { nockChain } from './chain'
+import { getReadClient } from './rpc'
 import { getReferencePrices } from './get-prices'
 import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from './get-swap-quote'
 import { getStockTokens } from './get-stock-tokens'
@@ -34,19 +35,11 @@ function usdValueFor(raw: bigint, decimals: number, price: number | undefined): 
 }
 
 export async function fetchWalletBalances(address: `0x${string}`): Promise<BalanceEntry[]> {
-  const rpcUrl = process.env.RPC_URL
-  if (!rpcUrl) {
-    console.error('[get-balances] RPC_URL not configured')
-    throw new Error('RPC_URL not configured')
-  }
-
-  console.log('[get-balances] Using RPC:', rpcUrl.substring(0, 30) + '...')
-  console.log('[get-balances] Fetching balances for:', address)
-
-  const client = createPublicClient({
-    chain: nockChain,
-    transport: http(rpcUrl),
-  })
+  // Shared, retry+fallback client (see lib/rpc.ts) — this is the hottest read path in the
+  // app; rebuilding a client per request and having no fallback was a scale liability. The
+  // client falls back to the public Robinhood RPC when RPC_URL is unset, so there's no
+  // longer a hard RPC_URL requirement here.
+  const client = getReadClient()
 
   try {
     const [[ethRaw, ...erc20Results], prices, stockEntries] = await Promise.all([

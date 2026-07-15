@@ -6,6 +6,7 @@ import { getWalletByAddress } from '@/lib/db/wallets'
 import { getUnresolvedRiskEvents } from '@/lib/db/loan-risk'
 import { getWeeklyBaseline } from '@/lib/db/portfolio-snapshots'
 import { withRateLimit } from '@/lib/api-guard'
+import { cached } from '@/lib/cache'
 
 export const GET = withRateLimit('balances', 60, 10_000, handleGET)
 
@@ -17,44 +18,37 @@ async function handleGET(req: NextRequest) {
   }
 
   try {
-    // Collateral positions ride along with balances: stock posted as loan
-    // collateral is still the user's asset (net of debt) — without it the
-    // dashboard's portfolio number silently drops by the full collateral value
-    // the moment a loan opens. Best-effort: a collateral read failure must not
-    // take down the balances everything else depends on.
-    const [balances, collateralPositions, riskEvents, weeklyBaseline] = await Promise.all([
-      fetchWalletBalances(raw),
-      getStockBorrowPositions(raw).catch((err) => {
-        console.error('[/api/balances] Collateral positions fetch failed:', err)
-        return []
-      }),
-      // Unresolved risk events persisted by the monitoring sweep — the "your loan
-      // crossed the threshold while you were away" record, timestamped. Best-effort.
-      (async () => {
-        const wallet = await getWalletByAddress(raw)
-        return wallet ? getUnresolvedRiskEvents(wallet.id) : []
-      })().catch((err) => {
-        console.error('[/api/balances] Risk events fetch failed:', err)
-        return []
-      }),
-      // Real weekly baseline from the daily snapshot history (null until at
-      // least one day-old snapshot exists — the UI hides the line rather than
-      // ever inventing a percentage).
-      (async () => {
-        const wallet = await getWalletByAddress(raw)
-        return wallet ? getWeeklyBaseline(wallet.id) : null
-      })().catch(() => null),
-    ])
+    // 15s per-wallet cache. This is the heaviest read (a ~50-token multicall + collateral
+    // + DB) and the dashboard polls it every 60s per user — caching collapses repeated
+    // polls (and any unauth amplification) for the same wallet to one refresh per 15s.
+    const data = await cached(`balances:${raw.toLowerCase()}`, 15_000, async () => {
+      // Resolve the wallet row once (it was previously fetched twice in one request).
+      const wallet = await getWalletByAddress(raw).catch(() => null)
+      // Collateral positions ride along with balances: stock posted as loan collateral is
+      // still the user's asset (net of debt). Best-effort — a read failure here must not
+      // take down the balances everything else depends on.
+      const [balances, collateralPositions, riskEvents, weeklyBaseline] = await Promise.all([
+        fetchWalletBalances(raw),
+        getStockBorrowPositions(raw).catch((err) => {
+          console.error('[/api/balances] Collateral positions fetch failed:', err)
+          return []
+        }),
+        wallet ? getUnresolvedRiskEvents(wallet.id).catch(() => []) : Promise.resolve([]),
+        wallet ? getWeeklyBaseline(wallet.id).catch(() => null) : Promise.resolve(null),
+      ])
 
-    const currentTotal =
-      balances.reduce((s, b) => s + (b.usdValue ?? 0), 0) +
-      collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
-    const weeklyChangePct =
-      weeklyBaseline !== null && weeklyBaseline > 0
-        ? ((currentTotal - weeklyBaseline) / weeklyBaseline) * 100
-        : null
+      const currentTotal =
+        balances.reduce((s, b) => s + (b.usdValue ?? 0), 0) +
+        collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+      const weeklyChangePct =
+        weeklyBaseline !== null && weeklyBaseline > 0
+          ? ((currentTotal - weeklyBaseline) / weeklyBaseline) * 100
+          : null
 
-    return NextResponse.json({ balances, collateralPositions, riskEvents, weeklyChangePct })
+      return { balances, collateralPositions, riskEvents, weeklyChangePct }
+    })
+
+    return NextResponse.json(data)
   } catch (err) {
     console.error('[/api/balances] Error:', err)
     return NextResponse.json({ error: 'Failed to fetch balances from the chain' }, { status: 500 })

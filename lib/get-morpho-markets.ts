@@ -1,5 +1,7 @@
 import { createPublicClient, http, formatUnits, parseUnits, encodeFunctionData } from 'viem'
 import { nockChain } from './chain'
+import { getReadClient } from './rpc'
+import { cached } from './cache'
 
 // Morpho Blue core on Robinhood Chain — found by tracing the Steakhouse vault's
 // liquidityAdapter() (MorphoMarketV1AdapterV2 at 0x44abc1d6ccff2696d98890b92e2157af242179c2)
@@ -150,7 +152,7 @@ const IRM_ABI = [
   },
 ] as const
 
-const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
+const rpcClient = getReadClient()
 
 const SECONDS_PER_YEAR = 365 * 24 * 3600
 
@@ -185,6 +187,10 @@ async function readMarketState(key: MorphoMarketKey) {
 }
 
 export async function getMorphoMarketData(): Promise<MorphoMarketData[]> {
+  // Market state/APY is identical for every user, so cache it briefly — collapses the
+  // 60s-per-user yield poll (~12 RPC reads each) to one refresh per 30s total instead of
+  // scaling RPC load with user count.
+  return cached('morpho-market-data', 30_000, async () => {
   const keys = Object.keys(MORPHO_MARKETS) as MorphoMarketKey[]
   return Promise.all(keys.map(async (key) => {
     const m = MORPHO_MARKETS[key]
@@ -219,6 +225,7 @@ export async function getMorphoMarketData(): Promise<MorphoMarketData[]> {
       availableLiquidityUsd: supply - borrow,
     }
   }))
+  })
 }
 
 export type MorphoPosition = {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { getUserMarketPositions, getMorphoMarketData } from '@/lib/get-morpho-markets'
 import { withRateLimit } from '@/lib/api-guard'
+import { cached } from '@/lib/cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,19 +18,24 @@ async function handleGET(req: NextRequest) {
   }
 
   try {
-    const [positions, markets] = await Promise.all([
-      getUserMarketPositions(address),
-      getMorphoMarketData(),
-    ])
-    // Sub-cent dust remainders (share-rounding leftovers after a full withdrawal)
-    // would otherwise show as "$0.00" rows forever.
-    const withApy = positions
-      .filter((p) => p.suppliedUsd >= 0.01)
-      .map((p) => ({
-        ...p,
-        apyPct: markets.find((m) => m.key === p.market)?.supplyApyPct ?? null,
-      }))
-    return NextResponse.json({ positions: withApy })
+    // 20s per-wallet cache — polled every 60s per user; caching collapses the poll to one
+    // refresh per 20s (and the shared market APYs are already cached in getMorphoMarketData).
+    const data = await cached(`yield-positions:${address.toLowerCase()}`, 20_000, async () => {
+      const [positions, markets] = await Promise.all([
+        getUserMarketPositions(address),
+        getMorphoMarketData(),
+      ])
+      // Sub-cent dust remainders (share-rounding leftovers after a full withdrawal)
+      // would otherwise show as "$0.00" rows forever.
+      const withApy = positions
+        .filter((p) => p.suppliedUsd >= 0.01)
+        .map((p) => ({
+          ...p,
+          apyPct: markets.find((m) => m.key === p.market)?.supplyApyPct ?? null,
+        }))
+      return { positions: withApy }
+    })
+    return NextResponse.json(data)
   } catch (err) {
     console.error('[yield-positions] Error:', err)
     return NextResponse.json({ error: 'Could not read positions from the chain.' }, { status: 500 })
