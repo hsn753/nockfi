@@ -28,13 +28,20 @@ import {
   type NavView,
   type Position,
 } from './data'
+import dynamic from 'next/dynamic'
 import { Sidebar } from './sidebar'
 import { ChatPanel } from './chat-panel'
 import { DashboardPanel } from './dashboard-panel'
-import { AgentsView } from './agents-view'
-import { ActivityView } from './activity-view'
-import { SettingsView } from './settings-view'
 import { BottomNav } from './bottom-nav'
+
+// Agents / Activity / Settings are only reachable by switching views (chat is the default),
+// so code-split them out of the initial bundle — the browser downloads and parses their JS
+// only when the user actually opens one, shrinking first-load work. Client-only (ssr:false)
+// since they all rely on wallet hooks; a light fallback shows during the (usually instant) fetch.
+const viewFallback = () => <div className="flex-1" />
+const AgentsView = dynamic(() => import('./agents-view').then((m) => m.AgentsView), { ssr: false, loading: viewFallback })
+const ActivityView = dynamic(() => import('./activity-view').then((m) => m.ActivityView), { ssr: false, loading: viewFallback })
+const SettingsView = dynamic(() => import('./settings-view').then((m) => m.SettingsView), { ssr: false, loading: viewFallback })
 
 // Portfolio value calculation - will be real once we have price feeds
 const PORTFOLIO_BASE = 0

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { ShieldCheck, Percent, Zap } from 'lucide-react'
 import { usePrivy, useWallets, getIdentityToken } from '@privy-io/react-auth'
 import { cn } from '@/lib/utils'
+import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
 import { type AttentionItem, type Position } from './data'
 import { AgentIcon } from './agent-icon'
 import { LiveBalances } from './live-balances'
@@ -290,8 +291,8 @@ export function DashboardPanel({
             {/* Yield positions */}
             <YieldPositionsCard />
 
-            {/* Instant-swap wallet */}
-            <InstantSwapWalletCard />
+            {/* Instant-swap wallet — hidden until the next version (see lib/feature-flags.ts) */}
+            {INSTANT_SWAPS_ENABLED && <InstantSwapWalletCard />}
 
             {/* Guardrails */}
             <GuardrailsCard />
