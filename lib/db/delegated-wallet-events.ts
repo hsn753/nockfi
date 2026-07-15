@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm'
 import { getDb } from './client'
 import { delegatedWalletEvents } from './schema'
 import { upsertWallet } from './wallets'
@@ -25,4 +26,18 @@ export async function logDelegatedWalletEvent(input: LogDelegatedWalletEventInpu
     policyId: input.policyId,
     eventType: input.eventType,
   })
+}
+
+// The Privy walletIds ever registered for a given embedded address, from the auth-guarded
+// delegation log above. execute-delegated-swap uses this to bind the walletId it signs with
+// to the *authenticated* wallet: the caller can only sign a walletId they themselves
+// registered, never an arbitrary one supplied in the request body (which would otherwise
+// let an authenticated user drive signing on someone else's delegated wallet).
+export async function getRegisteredWalletIds(embeddedAddress: string): Promise<string[]> {
+  const db = getDb()
+  const rows = await db
+    .select({ privyWalletId: delegatedWalletEvents.privyWalletId })
+    .from(delegatedWalletEvents)
+    .where(eq(delegatedWalletEvents.embeddedAddress, embeddedAddress.toLowerCase()))
+  return [...new Set(rows.map((r) => r.privyWalletId))]
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { isAddress, parseUnits } from 'viem'
 import { executeDelegatedTransaction } from '@/lib/privy-server'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
+import { getRegisteredWalletIds } from '@/lib/db/delegated-wallet-events'
 
 export const dynamic = 'force-dynamic'
 
@@ -51,6 +52,20 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     if (err instanceof AuthError) return NextResponse.json({ error: err.message }, { status: err.status })
     throw err
+  }
+
+  // Auth above binds the *address* to the caller, but Privy signs by walletId (the address
+  // is just the viem account label) — so an authenticated user could otherwise pass a
+  // victim's walletId and have the server sign on the victim's delegated wallet, capped only
+  // by the Privy policy. Bind walletId to the caller too: it must be one this same address
+  // registered through the auth-guarded delegation flow. Fail closed if it isn't (or if the
+  // wallet was never delegated), so we never sign a walletId the authenticated user doesn't own.
+  const registered = await getRegisteredWalletIds(address)
+  if (!registered.includes(walletId)) {
+    return NextResponse.json(
+      { error: 'This walletId is not a delegated instant-swap wallet registered to your account.' },
+      { status: 403 },
+    )
   }
 
   try {
