@@ -56,7 +56,27 @@ export function NockApp() {
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const { wallets } = useWallets()
-  const { user: privyUser, ready: privyReady } = usePrivy()
+  const { user: privyUser, ready: privyReady, getAccessToken } = usePrivy()
+
+  // Fetch a usable Privy identity token, refreshing the session first. Privy refreshes the
+  // identity token alongside the access token, so calling getAccessToken() forces a refresh
+  // when the cached identity token has gone stale/expired — the cause of a valid, still-
+  // logged-in session intermittently sending an empty token (one request succeeds, the next
+  // fails "missing identity token"). Retries briefly to ride out the async refresh. Returns
+  // null only when the session genuinely can't produce a token (then: reconnect).
+  const getFreshIdentityToken = useCallback(async (): Promise<string | null> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await getAccessToken().catch(() => {}) // forces a session/token refresh if needed
+        const token = await getIdentityToken()
+        if (token) return token
+      } catch {
+        /* retry */
+      }
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    return null
+  }, [getAccessToken])
   const publicClient = usePublicClient()
 
   // Privy's own wallet.chainId (CAIP-2, e.g. "eip155:4663") is the authoritative source
@@ -419,16 +439,10 @@ export function NockApp() {
         // usable token for an already-connected session, causing every authenticated
         // request to fail with "missing identity token" even right after a hard refresh.
         // getIdentityToken() is Privy's own async getter for exactly this use case.
-        // getIdentityToken can return null (or throw) when the Privy session is stale — most
-        // commonly right after the app's Privy project changed, which silently invalidates
-        // every existing session until the user reconnects. Don't let that surface as a
-        // generic "something went wrong"; guide them to the actual fix.
-        let identityToken: string | null = null
-        try {
-          identityToken = await getIdentityToken()
-        } catch {
-          identityToken = null
-        }
+        // Refresh + retry so a stale/expired identity token on a still-valid session doesn't
+        // intermittently fail the request (one message works, the next says "missing token").
+        // Only truly returns null when the session genuinely can't produce a token.
+        const identityToken = await getFreshIdentityToken()
 
         const res = await fetch('/api/robin', {
           method: 'POST',
@@ -539,10 +553,9 @@ export function NockApp() {
     const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield' || action.agent === 'stock'
     if (isRealExecutionAgent && (activeWallet || delegatedWallet)) {
       try {
-        // Fetched fresh (not from the reactive useIdentityToken() hook, verified against prod
-        // to not reliably reflect a usable token for an already-connected session) and
-        // reused for both requests below.
-        const identityToken = await getIdentityToken()
+        // Refresh + retry (see getFreshIdentityToken) so a stale token doesn't intermittently
+        // break execution the same way it broke chat. Reused for both requests below.
+        const identityToken = await getFreshIdentityToken()
 
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
