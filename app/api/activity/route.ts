@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { formatUnits, isAddress } from 'viem'
+import { withRateLimit } from '@/lib/api-guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -51,7 +52,9 @@ function describeTransaction(tx: BlockscoutTx, address: string): { label: string
   return { label: isFromMe ? 'Sent transaction' : 'Contract interaction', detail: '' }
 }
 
-export async function GET(req: NextRequest) {
+export const GET = withRateLimit('activity', 60, 10_000, handleGET)
+
+async function handleGET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !isAddress(address)) {
     return NextResponse.json({ error: 'A valid address is required.' }, { status: 400 })

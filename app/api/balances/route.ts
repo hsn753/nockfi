@@ -5,8 +5,11 @@ import { getStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getUnresolvedRiskEvents } from '@/lib/db/loan-risk'
 import { getWeeklyBaseline } from '@/lib/db/portfolio-snapshots'
+import { withRateLimit } from '@/lib/api-guard'
 
-export async function GET(req: NextRequest) {
+export const GET = withRateLimit('balances', 60, 10_000, handleGET)
+
+async function handleGET(req: NextRequest) {
   const raw = req.nextUrl.searchParams.get('address')
 
   if (!raw || !isAddress(raw)) {

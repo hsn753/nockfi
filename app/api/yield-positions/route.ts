@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { getUserMarketPositions, getMorphoMarketData } from '@/lib/get-morpho-markets'
+import { withRateLimit } from '@/lib/api-guard'
 
 export const dynamic = 'force-dynamic'
 
 // Live on-chain yield positions for the dashboard's yield card — same public-read
 // pattern as /api/balances (positions are public chain state keyed by address; no
 // auth needed for reads, unlike the write/quote routes).
-export async function GET(req: NextRequest) {
+export const GET = withRateLimit('yield-positions', 60, 10_000, handleGET)
+
+async function handleGET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !isAddress(address)) {
     return NextResponse.json({ error: 'A valid address is required.' }, { status: 400 })

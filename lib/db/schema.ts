@@ -143,6 +143,21 @@ export const loanRiskEvents = pgTable('loan_risk_events', {
   index('loan_risk_events_wallet_idx').on(t.walletId, t.createdAt),
 ])
 
+// Fleet-wide rate-limit counters. One row per (limiter name, client ip, time window);
+// the window start is encoded in the key so a new window is simply a new row. An atomic
+// INSERT ... ON CONFLICT DO UPDATE count = count + 1 RETURNING count gives an accurate
+// shared counter across every Vercel instance AND the self-hosted `next start` origin —
+// necessary because this Next 16 + Turbopack runtime does not persist in-process module
+// state across requests, so an in-memory limiter never accumulates. Stale rows are swept
+// by the loan-monitor cron (cleanupRateLimits).
+export const rateLimits = pgTable('rate_limits', {
+  key: text('key').primaryKey(), // `${name}:${ip}:${windowStartMs}`
+  count: integer('count').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('rate_limits_created_idx').on(t.createdAt),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {

@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { fetchSwapQuote } from '@/lib/get-swap-quote'
+import { withRateLimit } from '@/lib/api-guard'
 
-export async function GET(req: NextRequest) {
+export const GET = withRateLimit('swap-quote', 30, 10_000, handleGET)
+
+async function handleGET(req: NextRequest) {
   const { searchParams } = req.nextUrl
   const fromToken = searchParams.get('fromToken')
   const toToken   = searchParams.get('toToken')

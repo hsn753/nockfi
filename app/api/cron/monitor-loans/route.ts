@@ -6,6 +6,7 @@ import { getAllStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { syncLoanRiskEvents } from '@/lib/db/loan-risk'
 import { fetchWalletBalances } from '@/lib/get-balances'
 import { recordPortfolioSnapshot } from '@/lib/db/portfolio-snapshots'
+import { cleanupRateLimits } from '@/lib/db/rate-limit'
 
 // Scheduled sweep (vercel.json crons) over every wallet this app has ever seen:
 // reads each one's live stock-collateral positions and reconciles persisted risk
@@ -68,6 +69,13 @@ export async function GET(req: NextRequest) {
       } catch (err) {
         console.error(`[monitor-loans] Sync failed for ${w.address}:`, err)
       }
+    }
+
+    // Sweep rate-limit rows from windows that have long since closed (best-effort).
+    try {
+      await cleanupRateLimits(60 * 60 * 1000, Date.now())
+    } catch (err) {
+      console.error('[monitor-loans] Rate-limit cleanup failed:', err)
     }
 
     const summary = { checked, withLoans, eventsOpened: opened, eventsResolved: resolved, snapshots }

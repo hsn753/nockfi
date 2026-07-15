@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
 import { isAddress, formatUnits } from 'viem'
+import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
 import { getReferencePrices } from '@/lib/get-prices'
@@ -526,7 +527,9 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ]
 
-export async function POST(request: Request) {
+export const POST = withRateLimit('robin', 20, 10_000, handlePOST)
+
+async function handlePOST(request: Request) {
   try {
     if (!process.env.OPENAI_API_KEY) {
       console.error('[robin] Missing OPENAI_API_KEY')
