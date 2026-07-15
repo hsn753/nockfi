@@ -419,7 +419,16 @@ export function NockApp() {
         // usable token for an already-connected session, causing every authenticated
         // request to fail with "missing identity token" even right after a hard refresh.
         // getIdentityToken() is Privy's own async getter for exactly this use case.
-        const identityToken = await getIdentityToken()
+        // getIdentityToken can return null (or throw) when the Privy session is stale — most
+        // commonly right after the app's Privy project changed, which silently invalidates
+        // every existing session until the user reconnects. Don't let that surface as a
+        // generic "something went wrong"; guide them to the actual fix.
+        let identityToken: string | null = null
+        try {
+          identityToken = await getIdentityToken()
+        } catch {
+          identityToken = null
+        }
 
         const res = await fetch('/api/robin', {
           method: 'POST',
@@ -427,12 +436,27 @@ export function NockApp() {
           body: JSON.stringify({ messages: history, walletAddress }),
         })
 
-        const { text: replyText, action, bridgeInfo, suggestions } = (await res.json()) as {
+        const data = (await res.json().catch(() => null)) as {
           text: string
           action?: ActionPreview
           bridgeInfo?: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number }
           suggestions?: string[]
+        } | null
+
+        if (!res.ok || !data) {
+          // 401/403 = the session isn't valid (e.g. stale after the Privy migration). Tell the
+          // user to reconnect rather than showing an opaque error. The server's own message is
+          // already user-friendly, so prefer it when present.
+          const authProblem = res.status === 401 || res.status === 403
+          const msg = data?.text
+            || (authProblem
+              ? 'Your session has expired. Please disconnect and reconnect your wallet, then try again.'
+              : 'Something went wrong. Please try again.')
+          setMessages((prev) => [...prev, { id: `${Date.now()}-r`, role: 'robin', text: msg }])
+          return
         }
+
+        const { text: replyText, action, bridgeInfo, suggestions } = data
 
         const replyMsg: ChatMessage = {
           id: `${Date.now()}-r`,
