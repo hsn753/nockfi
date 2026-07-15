@@ -1428,6 +1428,41 @@ async function handlePOST(request: Request) {
       }
     }
 
+    // Deterministic STOCK-REPAY / close command path — the highest-stakes reliability
+    // gap of all: failing to build a repay card traps a user's own collateral. Seen
+    // live: gpt-4o-mini read "repay all to TSLA" as a swap and built no card, leaving the
+    // user unable to close their loan. If the latest message is an unambiguous repay /
+    // close / reclaim intent for a stock the user actually has a position in, build the
+    // quote directly; the collateral synthesis below then turns it into a card. buildStock-
+    // Repay handles both partial (an amount) and full ('all' — repays the exact live debt
+    // AND returns the collateral), including the zero-debt "just reclaim collateral" case.
+    if (!action && !lastCollateralQuote && walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const text = lastUser?.text ?? ''
+      if (/\b(repay|close|pay\s*off|reclaim|settle)\b/i.test(text)) {
+        try {
+          const positions = await getStockBorrowPositions(walletAddress)
+          const named = positions.find((p) => new RegExp(`\\b${p.stockSymbol}\\b`, 'i').test(text))
+          const target = named ?? (positions.length === 1 ? positions[0] : undefined)
+          if (target) {
+            const amtMatch = text.match(/\$?\s*(\d[\d,.]*)/)
+            // 'all' unless the user gave a specific number and didn't also say all/everything/close.
+            const full = !amtMatch || /\b(all|everything|entire|full|in\s*full|close|pay\s*off)\b/i.test(text)
+            const repayArg = full ? 'all' : amtMatch![1].replace(/,/g, '')
+            const quote = await buildStockRepay(walletAddress, target.stockSymbol, repayArg)
+            if (!('error' in quote)) {
+              lastCollateralQuote = quote
+              lastSwapQuote = null
+            } else {
+              responseText = quote.error
+            }
+          }
+        } catch (err) {
+          console.error('[robin] deterministic repay command failed:', err)
+        }
+      }
+    }
+
     // Deterministic card synthesis — in practice the model sometimes builds a
     // real yield quote (get_yield_deposit_quote / get_yield_withdraw_quote succeeded,
     // a genuine transaction exists) but then never calls propose_action, leaving the
