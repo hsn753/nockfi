@@ -829,8 +829,14 @@ export function NockApp() {
         // of dumping the raw viem stack (request args, calldata, contract call, docs link),
         // which read as a scary failure for a deliberate "not now".
         const isRejection = /reject|denied|user denied|declin|cancell?ed|user\s*rejected/i.test(rawMessage)
+        // The RPC (Alchemy) rate-limits under rapid trading and throws "Rate Limit Hit /
+        // Too many requests / 429". That's a transient network-busy state, not a failed
+        // trade — surface it as such, not as the raw provider error.
+        const isRateLimit = /rate limit|too many requests|\b429\b/i.test(rawMessage)
         const friendlyMessage = isRejection
           ? `You declined the ${actionNoun.toLowerCase()} in your wallet, so nothing happened and no funds moved. Press Confirm on the card whenever you're ready to try again.`
+          : isRateLimit
+          ? `The network is briefly busy and rate-limited the request, so nothing happened and no funds moved. Wait a few seconds, then press Confirm to try again.`
           : isTimeout
           ? `Your wallet didn't respond in time. This usually means a connected mobile wallet (like the Robinhood app over WalletConnect) either missed the approval notification or the session went stale. Check your phone for a pending approval, or try disconnecting and reconnecting your wallet, then attempt the ${actionNoun.toLowerCase()} again.`
           : `${actionNoun} failed: ${rawMessage}. Please try again.`

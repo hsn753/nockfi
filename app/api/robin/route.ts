@@ -589,7 +589,14 @@ async function handlePOST(request: Request) {
 
     const openaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: buildSystemPrompt(walletAddress) },
-      ...messages.map((m) => ({
+      // Only the recent window of the conversation goes to the model. Seen live: after a
+      // few action cards in one chat, gpt-4o-mini — given a long history full of its own
+      // "I've prepared a buy..." confirmations — starts REPLAYING that text, fabricating
+      // quote numbers from context instead of calling get_swap_quote, so no real card gets
+      // built (a fresh chat worked because it had no such history). A recent window keeps
+      // it grounded and calling tools; the deterministic command paths below still read the
+      // full `messages` array, so exact commands work regardless of window size.
+      ...messages.slice(-12).map((m) => ({
         role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
         content: m.text,
       })),
@@ -1721,12 +1728,15 @@ async function handlePOST(request: Request) {
       /has been (executed|withdrawn|completed|processed)|executed successfully|withdrawn successfully|(withdrawal|swap|deposit|transaction) (was|is now) (successful|complete)|funds have been (withdrawn|moved|transferred)/i.test(
         responseText,
       )
-    // "Press Confirm on the card" is legitimate when a pending card from an earlier
-    // turn is still on screen (the client history carries each message's action), so
-    // only treat the claim as false when no card exists anywhere — this turn or prior.
-    const priorPendingCard = Array.isArray(messages) && (messages as any[]).some(
-      (m) => m?.role === 'robin' && m?.action?.status === 'pending',
-    )
+    // "Press Confirm on the card" is legitimate when the MOST RECENT card is still
+    // pending (the user can act on it). Previously this scanned the whole history for any
+    // pending card — so once a long chat contained one stale pending card, the guard was
+    // suppressed forever, letting the model claim "press Confirm" for brand-new actions it
+    // never actually built. Only the latest card can be what "press Confirm" refers to.
+    const lastRobinCard = Array.isArray(messages)
+      ? [...(messages as any[])].reverse().find((m) => m?.role === 'robin' && m?.action)?.action
+      : undefined
+    const priorPendingCard = lastRobinCard?.status === 'pending'
     const claimsCardExists =
       !action &&
       !priorPendingCard &&
