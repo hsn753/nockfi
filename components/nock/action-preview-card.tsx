@@ -61,14 +61,16 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
           {action.metrics.map((m) => (
             <div
               key={m.label}
-              className="flex flex-col gap-1 rounded-xl bg-secondary/60 px-3 py-3.5"
+              className="flex min-w-0 flex-col gap-1 rounded-xl bg-secondary/60 px-3 py-3.5"
             >
               <span className="text-[11px] leading-none text-muted-foreground">
                 {m.label}
               </span>
               <span
                 className={cn(
-                  'text-lg font-bold leading-none',
+                  // break-all so a long unverified-token contract address wraps inside the
+                  // box instead of bleeding across the card (seen on memecoin swaps).
+                  'break-all text-lg font-bold leading-tight',
                   m.positive ? 'text-primary' : 'text-foreground',
                 )}
               >
