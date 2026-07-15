@@ -11,6 +11,9 @@ import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
+import { resolvePerpsGeo } from '@/lib/geo-gate'
+import { PERPS_ENABLED } from '@/lib/feature-flags'
+import { executePerpsOrder } from '@/lib/lighter-execute'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
 import { getStockCollateralMarketData, getStockBorrowPositions, buildStockBorrow, buildStockRepay, type StockCollateralQuote } from '@/lib/get-stock-collateral'
 import { getNockGateStatus, gateMessage } from '@/lib/nock-gate'
@@ -254,7 +257,7 @@ When the user wants to withdraw supplied USDG:
 3. Call get_yield_withdraw_quote with the amount and market. If it errors (no position, amount too large, or the market lacks idle liquidity right now), relay the real reason plainly — the liquidity case is a real, temporary market condition, not a bug.
 4. If it returns a real transaction, call propose_action for the yield agent with the real numbers.
 
-When the user asks to actually open a perps position: call get_perps_info to show them the real current market data (mark price, funding, open interest, max leverage), then tell them plainly that opening a position isn't executable through Nock yet — this is real, live market data from Lighter for informational purposes only right now. Never call propose_action for the perps agent under any circumstances yet, even if they explicitly ask to open a position — there is no real order-placement flow behind it yet.
+When the user asks to actually open a perps position: first call get_perps_info to get the real current market data (mark price, funding, max leverage). Then call propose_action for the perps agent, INCLUDING the structured 'perps' object (symbol, side, marginUsd, leverage, markPrice) built from that live data. The system applies a jurisdiction + eligibility gate and returns an instruction in the tool result — follow it exactly. It may tell you: perps aren't available in the user's region (say so plainly — it's a regulatory restriction, not a bug — and offer what Nock does support for them: tokenized stocks for market exposure, token swaps, and yield); OR that execution is launching soon (present the live Lighter data as informational and say opening a position is coming soon for eligible regions). Only ever report a position as actually opened if the tool result explicitly says the order was placed — never fabricate a fill or confirmation.
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
@@ -295,6 +298,15 @@ type ProposeActionInput = {
     meta: string
     activityTitle: string
     activityAmount?: string
+  }
+  // Structured order params, required when agent is 'perps' — the execution adapter needs
+  // these explicitly rather than parsing them back out of the display strings.
+  perps?: {
+    symbol: string
+    side: 'long' | 'short'
+    marginUsd: number
+    leverage: number
+    markPrice: number
   }
 }
 
@@ -434,7 +446,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_perps_info',
-      description: 'Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter\'s own live margin requirement). Scoped to crypto/memecoin markets only. Opening a position through this app is not built yet — say so plainly if the user asks to actually open one. Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.',
+      description: 'Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter\'s own live margin requirement). Scoped to crypto/memecoin markets only. Opening a position is gated (region + eligibility) and launching soon for eligible regions — propose_action handles that gate. Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.',
       parameters: {
         type: 'object',
         properties: {
@@ -546,6 +558,18 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               activityAmount: { type: 'string', description: 'Optional amount shown in the activity row' },
             },
             required: ['title', 'value', 'meta', 'activityTitle'],
+          },
+          perps: {
+            type: 'object',
+            description: "REQUIRED when agent is 'perps': the structured order parameters, taken from the live get_perps_info data. Omit for all other agents.",
+            properties: {
+              symbol: { type: 'string', description: 'Perp market symbol, e.g. "ETH"' },
+              side: { type: 'string', enum: ['long', 'short'] },
+              marginUsd: { type: 'number', description: 'Margin to post, in USD' },
+              leverage: { type: 'number', description: 'Leverage multiple, e.g. 3' },
+              markPrice: { type: 'number', description: 'Current mark price from get_perps_info' },
+            },
+            required: ['symbol', 'side', 'marginUsd', 'leverage', 'markPrice'],
           },
         },
         required: ['agent', 'action', 'detail', 'metrics', 'outcome'],
@@ -661,18 +685,50 @@ async function handlePOST(request: Request) {
         if (functionName === 'propose_action') {
           const input = functionArgs as ProposeActionInput
 
-          // Hard backstop, not just a prompt instruction — get_perps_info now returns
-          // real market data (mark price, funding, OI), but there is no real order-
-          // placement flow wired up yet (Lighter uses off-chain order matching with its
-          // own sub-account/API-key signing scheme, not a plain on-chain tx). Without
-          // this, the model could build a preview card from real numbers that
-          // handleLoose's still-fully-mocked fallback would then fake-execute with a
-          // checkmark — real data plus a fake execution path is worse than the old fake
-          // stub data it replaced.
+          // Perps gating — the chokepoint where a real perps order would be born. Three
+          // gates, in order: (1) jurisdiction, (2) the live-execution flag, (3) the execution
+          // adapter's own guards. A restricted region is refused even before the flag, so the
+          // honest regional message shows regardless of whether perps is live anywhere.
           if (input.agent === 'perps') {
-            result = {
-              error: 'Perps positions are not executable through Nock yet — do not propose an action for this. Present the real market data from get_perps_info directly and tell the user opening a position is informational-only for now.',
+            const geo = await resolvePerpsGeo(request)
+
+            if (geo.source !== 'unknown' && !geo.allowed) {
+              // Known restricted region (e.g. US/Canada) — regulatory, not a bug.
+              result = {
+                error: `Perps are not available in the user's region (${geo.country}). This is a regulatory restriction (CFTC in the US, CSA in Canada), not a technical limit — do NOT propose the action. Tell the user plainly, and offer what Nock does support for them instead: tokenized stocks for real market exposure, token swaps, and yield.`,
+              }
+            } else if (!PERPS_ENABLED) {
+              // Not live yet — present the real data, promise nothing we can't do.
+              result = {
+                error: 'Perps execution is not live yet (final compliance sign-off pending). Present the live Lighter market data from get_perps_info and tell the user that opening a position is launching soon for eligible regions — do not propose the action.',
+              }
+            } else if (!geo.allowed) {
+              // Flag on, but region undetermined — cannot confirm eligibility, so refuse.
+              result = {
+                error: "Could not verify the user's region, so a perps position can't be opened right now. Present the market data and ask them to try again shortly — do not propose the action.",
+              }
+            } else if (!input.perps) {
+              result = { error: "Missing structured perps order parameters. Call get_perps_info first, then include the 'perps' object in propose_action." }
+            } else {
+              // Eligible region + live flag: run the order through the execution adapter. On
+              // today's deploy the flag is off, so this branch is unreachable in prod; even if
+              // flipped on, the adapter refuses until the executor service is provisioned.
+              const exec = await executePerpsOrder(
+                {
+                  walletAddress: walletAddress || '',
+                  symbol: input.perps.symbol,
+                  side: input.perps.side,
+                  marginUsd: input.perps.marginUsd,
+                  leverage: input.perps.leverage,
+                  markPrice: input.perps.markPrice,
+                },
+                geo,
+              )
+              result = exec.ok
+                ? { ok: true, orderId: exec.orderId, avgPrice: exec.avgPrice, baseFilled: exec.baseFilled, notionalUsd: exec.notionalUsd }
+                : { error: `Perps order was not placed: ${exec.error} Present the market data and explain plainly — do not fake a confirmation.` }
             }
+
             openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
             continue
           }
@@ -1783,7 +1839,7 @@ async function handlePOST(request: Request) {
             const lines = markets.slice(0, 5).map((m, i) =>
               `${i + 1}. **${m.asset}**: mark $${m.markPrice.toLocaleString('en-US', { maximumFractionDigits: m.markPrice < 1 ? 6 : 2 })}, funding ${m.fundingRatePctHourly != null ? `${m.fundingRatePctHourly.toFixed(4)}%/hr` : 'n/a'}, 24h volume $${Math.round(m.dailyVolumeUsd).toLocaleString('en-US')}${m.maxLeverage != null ? `, up to ${m.maxLeverage}x` : ''}`,
             )
-            responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. Opening positions through Nock isn't built yet — perps execution is the last agent under construction — so this is informational for now.`
+            responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. Opening a position is launching soon for eligible regions — for now this is informational.`
           }
         } catch (err) {
           console.error('[robin] deterministic perps backstop failed:', err)

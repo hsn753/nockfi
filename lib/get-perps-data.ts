@@ -111,6 +111,6 @@ export async function getPerpsMarkets(symbol?: string): Promise<{ markets: PerpM
 
   return {
     markets,
-    note: 'Real live data from Lighter (mainnet.zklighter.elliot.ai) — a separate perps exchange that accepts Robinhood Chain assets (USDG) as margin. Funding is hourly. Opening a position is not executable through Nock yet, this is informational only. Only crypto/memecoin markets are shown here, even though Lighter also lists stock, index, forex, and commodity perpetuals.',
+    note: 'Real live data from Lighter (mainnet.zklighter.elliot.ai) — a separate perps exchange that accepts Robinhood Chain assets (USDG) as margin. Funding is hourly. Opening a position is region-gated and launching soon for eligible jurisdictions, so this is informational for now. Only crypto/memecoin markets are shown here, even though Lighter also lists stock, index, forex, and commodity perpetuals.',
   }
 }
