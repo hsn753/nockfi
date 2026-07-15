@@ -28,6 +28,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid sellToken.address' }, { status: 400 })
   }
 
+  // The delegated (instant-swap) path only ever executes 0x swaps: the Privy session
+  // policy restricts the signer to the 0x AllowanceHolder router, and the client declines
+  // every non-0x route for delegated wallets. Enforce the same target allowlist here so
+  // the server never signs a delegated transaction to any other contract — independent of
+  // the Privy policy being correctly configured. `data` is still opaque, but a swap can
+  // only move funds via this router, and the sellToken approval below is granted to it.
+  // Address verified on-chain (docs/ARCHITECTURE.md).
+  const ZEROX_ALLOWANCE_HOLDER = '0x0000000000001fF3684f28c67538d4D072C22734'
+  if (transaction.to.toLowerCase() !== ZEROX_ALLOWANCE_HOLDER.toLowerCase()) {
+    return NextResponse.json(
+      { error: 'Delegated execution is restricted to the 0x swap router.' },
+      { status: 400 },
+    )
+  }
+
   // Confirmed real gap before this check existed: anyone who knew a walletId+address
   // pair could ask this server to sign a transaction against it, constrained only by
   // the Privy spend-policy cap, not by any check that the caller actually owns it.

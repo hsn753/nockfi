@@ -729,20 +729,45 @@ export function NockApp() {
         if (!result.txHash || result.txHash === '0x') {
           throw new Error(result.error || 'No transaction hash was returned. The swap may not have been broadcast. Check your holdings before retrying.')
         }
-        const verifyRes = await fetch('/api/verify-tx', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-privy-identity-token': identityToken || '',
-          },
-          body: JSON.stringify({ txHash: result.txHash, walletAddress }),
-        })
-        const verifyData = await verifyRes.json()
+        // Independent verification, with retry. A just-broadcast tx can be briefly
+        // invisible to our RPC (propagation/indexing lag). Treating that transient
+        // not-found as a failure — and reverting the card to a re-confirmable state —
+        // is exactly what invited duplicate sends. So retry a few times; and if it
+        // still can't be seen, park the card (leave it in its non-actionable confirming
+        // state) and keep the in-flight lock held for this action id so it can NEVER be
+        // re-sent, rather than reverting to pending. A reverted tx, by contrast, is a
+        // definitive negative and is safe to surface as a normal failure.
+        const shortHash = `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}`
+        let verifyData: { found?: boolean; status?: string } = {}
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 2500))
+          const verifyRes = await fetch('/api/verify-tx', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-privy-identity-token': identityToken || '',
+            },
+            body: JSON.stringify({ txHash: result.txHash, walletAddress }),
+          })
+          verifyData = await verifyRes.json()
+          if (verifyData.found) break
+        }
         if (!verifyData.found) {
-          throw new Error(`Couldn't confirm this transaction on Robinhood Chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). It may never have actually broadcast, regardless of what the wallet reported. Check your real holdings before assuming anything happened, rather than trusting a success or failure message alone.`)
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-verifying`,
+              role: 'robin',
+              text: `Your transaction is still being confirmed on Robinhood Chain (tx: ${shortHash}). It may just be finalizing. Check your holdings in a moment — do NOT send this again, or it could execute twice.`,
+            },
+          ])
+          fetchPortfolioValue()
+          // Return WITHOUT releasing the in-flight lock for this action id: the tx may
+          // well have landed, so this card must never be re-executed.
+          return
         }
         if (verifyData.status !== 'success') {
-          throw new Error(`Transaction reverted on-chain (tx: ${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}). Nothing was swapped, only gas was spent.`)
+          throw new Error(`Transaction reverted on-chain (tx: ${shortHash}). Nothing was swapped, only gas was spent.`)
         }
 
         console.log(action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal executed! TX Hash:' : 'Deposit executed! TX Hash:') : 'Swap executed! TX Hash:', result.txHash)
