@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import { isAddress, formatUnits } from 'viem'
+import { isAddress, formatUnits, erc20Abi } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
-import { fetchSwapQuote, SWAP_TOKENS } from '@/lib/get-swap-quote'
+import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
+import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
@@ -1456,6 +1457,58 @@ async function handlePOST(request: Request) {
             }
           } catch (err) {
             console.error('[robin] deterministic swap command failed:', err)
+          }
+        }
+      }
+    }
+
+    // Deterministic "sell/swap ALL my <token>" path. "Sell all" should sell the exact full
+    // held quantity — but two things broke that: (1) the displayed balance is rounded
+    // (0.001152622 shows as 0.001153), so quoting the display amount OVER-sells and reverts,
+    // and (2) you can't sell 100% of native ETH because you still need ETH for gas. So read
+    // the EXACT raw balance on-chain here and, for ETH, leave a gas reserve. Verified
+    // SWAP_TOKENS only (ETH/WETH/USDG/NOCK); anything else falls through to the model.
+    if (!action && !lastSwapQuote?.transaction && walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const sellAll = (lastUser?.text ?? '').match(
+        /\b(?:sell|swap|convert)\s+all\s+(?:(?:of\s+)?my\s+)?([a-z]{2,10})(?:\s+(?:to|for|into)\s+([a-z]{2,10}))?/i,
+      )
+      if (sellAll) {
+        const fromSym = sellAll[1].toUpperCase()
+        const toSym = (sellAll[2] || 'USDG').toUpperCase()
+        const fromTok = SWAP_TOKENS[fromSym]
+        if (fromTok && fromSym !== toSym) {
+          try {
+            const client = getReadClient()
+            let raw: bigint
+            if (fromTok.address.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()) {
+              raw = await client.getBalance({ address: walletAddress as `0x${string}` })
+              // Gas reserve: can't sell 100% of the native token you pay gas in. ~0.0002
+              // ETH headroom (real swap gas seen ~0.00004; keep a safe buffer for drift).
+              const GAS_RESERVE = BigInt('200000000000000')
+              raw = raw > GAS_RESERVE ? raw - GAS_RESERVE : BigInt(0)
+            } else {
+              raw = (await client.readContract({
+                address: fromTok.address as `0x${string}`,
+                abi: erc20Abi,
+                functionName: 'balanceOf',
+                args: [walletAddress as `0x${string}`],
+              })) as bigint
+            }
+            if (raw > BigInt(0)) {
+              const quote = await fetchSwapQuote({
+                fromToken: fromSym,
+                toToken: toSym,
+                amount: formatUnits(raw, fromTok.decimals),
+                taker: walletAddress,
+              })
+              if (quote.transaction) lastSwapQuote = quote
+              else if (quote.error) responseText = quote.error
+            } else {
+              responseText = `You don't have any ${fromSym} available to sell right now${fromSym === 'ETH' ? ' after reserving a little for gas' : ''}.`
+            }
+          } catch (err) {
+            console.error('[robin] deterministic sell-all failed:', err)
           }
         }
       }
