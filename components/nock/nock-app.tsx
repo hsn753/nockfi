@@ -58,24 +58,28 @@ export function NockApp() {
   const { wallets } = useWallets()
   const { user: privyUser, ready: privyReady, authenticated: privyAuthed, getAccessToken } = usePrivy()
 
-  // Fetch a usable Privy identity token, refreshing the session first. Privy refreshes the
-  // identity token alongside the access token, so calling getAccessToken() forces a refresh
-  // when the cached identity token has gone stale/expired — the cause of a valid, still-
-  // logged-in session intermittently sending an empty token (one request succeeds, the next
-  // fails "missing identity token"). Retries briefly to ride out the async refresh. Returns
-  // null only when the session genuinely can't produce a token (then: reconnect).
-  const getFreshIdentityToken = useCallback(async (): Promise<string | null> => {
-    for (let attempt = 0; attempt < 3; attempt++) {
+  // Fetch the Privy tokens for an authenticated request. The ACCESS token is the reliable one
+  // — always available for a logged-in session — and the server verifies it. The identity
+  // token is best-effort: it's an opt-in Privy feature the current app doesn't issue (returns
+  // null), so we send it when present but never depend on it. getAccessToken() also refreshes
+  // the session, so this doubles as the refresh.
+  const getAuthTokens = useCallback(async (): Promise<{ accessToken: string | null; identityToken: string | null }> => {
+    let accessToken: string | null = null
+    for (let attempt = 0; attempt < 3 && !accessToken; attempt++) {
       try {
-        await getAccessToken().catch(() => {}) // forces a session/token refresh if needed
-        const token = await getIdentityToken()
-        if (token) return token
+        accessToken = await getAccessToken()
       } catch {
         /* retry */
       }
-      await new Promise((r) => setTimeout(r, 250))
+      if (!accessToken) await new Promise((r) => setTimeout(r, 250))
     }
-    return null
+    let identityToken: string | null = null
+    try {
+      identityToken = await getIdentityToken()
+    } catch {
+      identityToken = null
+    }
+    return { accessToken, identityToken }
   }, [getAccessToken])
   const publicClient = usePublicClient()
 
@@ -442,19 +446,14 @@ export function NockApp() {
         // Refresh + retry so a stale/expired identity token on a still-valid session doesn't
         // intermittently fail the request (one message works, the next says "missing token").
         // Only truly returns null when the session genuinely can't produce a token.
-        const identityToken = await getFreshIdentityToken()
-
-        // TEMP DIAGNOSTIC — pin down why the identity token is null when a wallet is
-        // connected: is the user Privy-authenticated? does the access token come back?
-        const accessTokenProbe = await getAccessToken().catch(() => null)
-        const authDiag = `authed=${privyAuthed};access=${!!accessTokenProbe};id=${!!identityToken};wallets=${wallets.length}`
+        const { identityToken, accessToken } = await getAuthTokens()
 
         const res = await fetch('/api/robin', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Privy-Identity-Token': identityToken ?? '',
-            'X-Nock-Auth-Diag': authDiag,
+            'X-Privy-Access-Token': accessToken ?? '',
           },
           body: JSON.stringify({ messages: history, walletAddress }),
         })
@@ -562,9 +561,9 @@ export function NockApp() {
     const isRealExecutionAgent = action.agent === 'swap' || action.agent === 'yield' || action.agent === 'stock'
     if (isRealExecutionAgent && (activeWallet || delegatedWallet)) {
       try {
-        // Refresh + retry (see getFreshIdentityToken) so a stale token doesn't intermittently
-        // break execution the same way it broke chat. Reused for both requests below.
-        const identityToken = await getFreshIdentityToken()
+        // Access token (reliable) + best-effort identity token; the server accepts either.
+        // Reused for all the authenticated requests below.
+        const { identityToken, accessToken } = await getAuthTokens()
 
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
@@ -679,7 +678,7 @@ export function NockApp() {
           ? await (async () => {
               const res = await fetch('/api/execute-delegated-swap', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+                headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '', 'X-Privy-Access-Token': accessToken ?? '' },
                 body: JSON.stringify({
                   walletId: (delegatedWallet as any).id,
                   address: delegatedWallet.address,
@@ -748,7 +747,7 @@ export function NockApp() {
         try {
           await fetch('/api/transactions/log-submission', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+            headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '', 'X-Privy-Access-Token': accessToken ?? '' },
             body: JSON.stringify({
               txHash: result.txHash,
               walletAddress,
@@ -806,6 +805,7 @@ export function NockApp() {
             headers: {
               'Content-Type': 'application/json',
               'x-privy-identity-token': identityToken || '',
+              'x-privy-access-token': accessToken || '',
             },
             body: JSON.stringify({ txHash: result.txHash, walletAddress }),
           })
