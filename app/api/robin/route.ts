@@ -1495,6 +1495,15 @@ async function handlePOST(request: Request) {
                 args: [walletAddress as `0x${string}`],
               })) as bigint
             }
+            // Truncate to 6 decimals. The card shows and the client's balance pre-flight
+            // re-parses a 6dp amount; the full-precision balance rounds UP at 6dp (e.g.
+            // 3305.3107577… → 3305.310758), which then exceeds the real balance and the
+            // swap fails "not enough". Rounding DOWN keeps the amount ≤ balance (sub-6dp
+            // dust left behind is negligible).
+            if (fromTok.decimals > 6) {
+              const scale = BigInt(10) ** BigInt(fromTok.decimals - 6)
+              raw = (raw / scale) * scale
+            }
             if (raw > BigInt(0)) {
               const quote = await fetchSwapQuote({
                 fromToken: fromSym,
