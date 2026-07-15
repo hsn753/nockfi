@@ -300,6 +300,7 @@ export type StockBorrowPosition = {
   stockSymbol: string
   collateralAmount: string // stock units
   collateralValueUsd: number // at the market oracle's price
+  oraclePriceUsd: number // the observed market oracle price (USD per stock unit)
   borrowedUsd: number
   // borrowed / (collateral value × LLTV): 100% = liquidatable now.
   ltvUtilizationPct: number
@@ -367,6 +368,7 @@ export async function getAllStockBorrowPositions(addresses: string[]): Promise<M
         stockSymbol: live.m.stockSymbol,
         collateralAmount: collateralUnits.toLocaleString('en-US', { maximumFractionDigits: 8 }),
         collateralValueUsd,
+        oraclePriceUsd: live.priceUsd,
         borrowedUsd,
         ltvUtilizationPct: maxDebtUsd > 0 ? (borrowedUsd / maxDebtUsd) * 100 : 0,
         liquidationPriceUsd: collateralUnits > 0 && borrowedUsd > 0

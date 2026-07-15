@@ -112,8 +112,18 @@ async function fetchVerifiedRegistry(): Promise<{ symbol: string; name: string; 
         try {
           const addrRes = await fetch(`${BLOCKSCOUT_BASE}/addresses/${c.address_hash}`)
           if (!addrRes.ok) continue
-          const addr = (await addrRes.json()) as { creator_address_hash?: string }
+          const addr = (await addrRes.json()) as { creator_address_hash?: string; token?: { decimals?: string } }
           if (addr.creator_address_hash?.toLowerCase() === OFFICIAL_STOCK_DEPLOYER.toLowerCase()) {
+            // The app's stock math assumes 18 decimals everywhere (STOCK_DECIMALS in
+            // get-stock-collateral, and the 18 in get-balances). Every official Robinhood
+            // token is 18, so the baseline is safe — but guard the discovery path anyway:
+            // if a new listing ever reports different decimals, skip it instead of
+            // silently mis-valuing its balance and collateral. (Metadata comes free with
+            // the creator-check fetch — no extra call.)
+            if (addr.token?.decimals !== undefined && addr.token.decimals !== '18') {
+              console.warn(`[stock-tokens] Skipping discovered ${c.symbol} (${c.address_hash}): ${addr.token.decimals} decimals, expected 18`)
+              continue
+            }
             discovered.push({
               symbol: c.symbol!,
               name: c.name!.replace(NAME_SUFFIX, '').trim(),

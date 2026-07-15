@@ -53,7 +53,9 @@ export async function syncLoanRiskEvents(
         stockSymbol: pos.stockSymbol,
         ltvUtilizationPct: pos.ltvUtilizationPct.toFixed(2),
         liquidationPriceUsd: pos.liquidationPriceUsd?.toFixed(2) ?? null,
-        oraclePriceUsd: (pos.collateralValueUsd / Math.max(parseFloat(pos.collateralAmount.replace(/,/g, '')), 1e-18)).toFixed(2),
+        // Store the observed oracle price directly, not a value reconstructed by dividing
+        // collateralValueUsd by a display-formatted (comma-grouped, 8dp-truncated) amount.
+        oraclePriceUsd: pos.oraclePriceUsd.toFixed(2),
         debtUsd: pos.borrowedUsd.toFixed(2),
       })
       opened++
