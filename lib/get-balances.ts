@@ -13,7 +13,7 @@ export type BalanceEntry = {
 }
 
 const TOKEN_NAMES: Record<string, string> = {
-  WETH: 'Wrapped Ether', USDG: 'USDG',
+  WETH: 'Wrapped Ether', USDG: 'USDG', NOCK: 'Nock Finance',
 }
 
 // Same verified mainnet token set the swap agent uses (see get-swap-quote.ts), minus native ETH

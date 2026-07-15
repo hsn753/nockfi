@@ -17,6 +17,11 @@ export const SWAP_TOKENS: Record<string, { address: string; decimals: number }> 
   ETH:  { address: NATIVE_ETH_ADDRESS, decimals: 18 },
   WETH: { address: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', decimals: 18 },
   USDG: { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
+  // $NOCK — the project's OFFICIAL token (on-chain name "Nock Finance", 18 decimals,
+  // verified on-chain). Whitelisted here so it's treated as a first-class verified asset:
+  // no unverified warning, canonical resolution (impersonator NOCKs exist), tracked in
+  // holdings (get-balances derives its token list from this map), and shown as "NOCK".
+  NOCK: { address: '0x1b27fF6e68A2fd6490543b17C996c109E64eb432', decimals: 18 },
 }
 
 export type SwapQuoteResult = {
@@ -49,18 +54,29 @@ export type SwapQuoteResult = {
 const decimalsCache = new Map<string, number>()
 const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
 
-async function resolveToken(input: string): Promise<{ address: string; decimals: number; verified: boolean } | null> {
+async function resolveToken(input: string): Promise<{ address: string; decimals: number; verified: boolean; symbol: string } | null> {
   const known = SWAP_TOKENS[input.toUpperCase()]
-  if (known) return { ...known, verified: true }
+  if (known) return { ...known, verified: true, symbol: input.toUpperCase() }
 
   if (!isAddress(input)) return null
+
+  // A verified token passed by its ADDRESS is still that verified token — this is what
+  // makes the official NOCK resolve as verified "NOCK" whether the user types the symbol
+  // or the contract address, and keeps cards showing "NOCK" instead of the raw 0x….
+  const byAddress = Object.entries(SWAP_TOKENS).find(
+    ([, t]) => t.address.toLowerCase() === input.toLowerCase(),
+  )
+  if (byAddress) {
+    return { address: byAddress[1].address, decimals: byAddress[1].decimals, verified: true, symbol: byAddress[0] }
+  }
+
   const cached = decimalsCache.get(input.toLowerCase())
-  if (cached !== undefined) return { address: input, decimals: cached, verified: false }
+  if (cached !== undefined) return { address: input, decimals: cached, verified: false, symbol: input }
 
   try {
     const decimals = await rpcClient.readContract({ address: input as `0x${string}`, abi: erc20Abi, functionName: 'decimals' })
     decimalsCache.set(input.toLowerCase(), decimals)
-    return { address: input, decimals, verified: false }
+    return { address: input, decimals, verified: false, symbol: input }
   } catch {
     return null
   }
@@ -178,11 +194,11 @@ export async function fetchSwapQuote({
   const rateStr = rate.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 4 })
 
   return {
-    fromSymbol: sell.verified ? fromToken.toUpperCase() : sell.address,
-    toSymbol: buy.verified ? toToken.toUpperCase() : buy.address,
+    fromSymbol: sell.symbol,
+    toSymbol: buy.symbol,
     fromAmount: fromAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
     toAmount: toAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
-    exchangeRate: `1 ${fromToken.toUpperCase()} = ${rateStr} ${toToken.toUpperCase()}`,
+    exchangeRate: `1 ${sell.symbol} = ${rateStr} ${buy.symbol}`,
     liquidityAvailable: true,
     transaction: data.transaction ?? null,
     verified: bothVerified,
