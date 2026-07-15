@@ -4,14 +4,18 @@ import { nockChain } from './chain'
 // $NOCK token gating for the premium agents (Perps and Stock Token, per the
 // one-pager; Yield and Swap stay free so onboarding is never blocked).
 //
-// Entirely env-driven and DORMANT BY DEFAULT: with NOCK_TOKEN_ADDRESS unset,
-// every agent is free and nothing anywhere changes — so this ships safely before
-// the token exists, and launch day is an env flip, not a deploy:
-//   NOCK_TOKEN_ADDRESS   the official $NOCK ERC-20 on Robinhood Chain
-//   NOCK_GATE_MIN_TOKENS minimum whole-token balance to unlock (default 1)
+// DISABLED BY DEFAULT and flipped on with a SINGLE env var — no code deploy, no
+// address to remember (it defaults to the official $NOCK below):
+//   NOCK_GATE_ENABLED=true   ← the one switch. Unset/anything-else = off, all agents free.
+//   NOCK_TOKEN_ADDRESS       optional override of the gate token (defaults to OFFICIAL_NOCK)
+//   NOCK_GATE_MIN_TOKENS     minimum whole-token balance to unlock (default 1)
 //
 // The check is server-side in the Robin route (the only place actions are born),
 // never client-side where it could be bypassed.
+
+// The project's official $NOCK token — the gate defaults to this, so turning gating on is
+// just NOCK_GATE_ENABLED=true (no need to paste the contract address anywhere).
+const OFFICIAL_NOCK_ADDRESS = '0x1b27fF6e68A2fd6490543b17C996c109E64eb432'
 
 const rpcClient = createPublicClient({ chain: nockChain, transport: http(process.env.RPC_URL) })
 
@@ -29,10 +33,13 @@ const CACHE_TTL_MS = 30 * 1000
 const cache = new Map<string, { status: NockGateStatus; expiresAt: number }>()
 
 export async function getNockGateStatus(walletAddress: string | undefined): Promise<NockGateStatus> {
-  const tokenAddress = process.env.NOCK_TOKEN_ADDRESS
+  const enabled = process.env.NOCK_GATE_ENABLED === 'true'
+  const tokenAddress = process.env.NOCK_TOKEN_ADDRESS || OFFICIAL_NOCK_ADDRESS
   const required = process.env.NOCK_GATE_MIN_TOKENS || '1'
 
-  if (!tokenAddress) {
+  // Off by default: every agent is free until NOCK_GATE_ENABLED=true is set. Flipping it
+  // on takes effect immediately (env change + restart), no code deploy.
+  if (!enabled) {
     return { enabled: false, holder: true, balance: '0', requiredBalance: required }
   }
   if (!walletAddress) {

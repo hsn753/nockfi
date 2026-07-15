@@ -78,7 +78,10 @@ export const agents: Agent[] = [
       'Verify every contract against the official issuer before quoting',
       'Live on-chain prices from real trading, never estimates',
     ],
-    gated: false,
+    // $NOCK-gated (premium), matching the server gate and the marketing site. The gate
+    // is dormant by default, so the badge reads as the tier ("unlocks with $NOCK") until
+    // NOCK_GATE_ENABLED is turned on; asking questions is always free.
+    gated: true,
     status: 'active',
   },
   {
