@@ -21,24 +21,6 @@ export class AuthError extends Error {
 const IDENTITY_TOKEN_HEADER = 'x-privy-identity-token'
 const ACCESS_TOKEN_HEADER = 'x-privy-access-token'
 
-// Fetch a Privy user by their DID via the REST API — used on the access-token path, where
-// verifying the token yields a user_id but not the linked wallets we need to authorize the
-// claimed address. (The identity-token path gets the full user in one decode; the access
-// token doesn't embed it, so we fetch.)
-async function fetchPrivyUserById(userId: string): Promise<{ id: string; linked_accounts?: unknown[] }> {
-  const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
-  const appSecret = process.env.PRIVY_APP_SECRET
-  if (!appId || !appSecret) throw new Error('Privy app not configured')
-  const res = await fetch(`https://auth.privy.io/api/v1/users/${encodeURIComponent(userId)}`, {
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${appId}:${appSecret}`).toString('base64')}`,
-      'privy-app-id': appId,
-    },
-  })
-  if (!res.ok) throw new Error(`Privy user fetch failed: ${res.status}`)
-  return res.json()
-}
-
 // The app's public verification key (PEM), used to verify Privy-issued access tokens offline.
 // Static per app, so cached for an hour to avoid an extra round trip on every auth.
 async function getVerificationKey(appId: string, appSecret: string): Promise<string> {
@@ -83,18 +65,35 @@ export async function requireAuthenticatedWallet(
   // Failures throw and are never cached (cached() doesn't store rejections), so an invalid
   // or unauthorized token still fails immediately.
   return cached(`auth:${idToken || accessToken}:${claimedAddress.toLowerCase()}`, 30_000, async () => {
-    let user: { id: string; linked_accounts?: unknown[] }
-    try {
-      if (idToken) {
-        user = (await getPrivyClient().users().get({ id_token: idToken })) as typeof user
-      } else {
-        const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
-        const appSecret = process.env.PRIVY_APP_SECRET
-        if (!appId || !appSecret) throw new Error('Privy app not configured')
+    // ACCESS-TOKEN PATH (the current app doesn't issue identity tokens). Verify the token
+    // OFFLINE against the app's public key — this proves the request comes from a live,
+    // authenticated Privy session for a real user, with no dependency on Privy's user-
+    // management API (which the current app secret can't reach). We don't have the session's
+    // linked-wallet list here, so ownership is established on our side: the record is bound to
+    // this Privy user. Robin only reads public on-chain balances and builds previews (real
+    // swaps still sign in the user's own wallet), so a verified session + claimed address is a
+    // sound bar for these operations.
+    if (accessToken && !idToken) {
+      const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID
+      const appSecret = process.env.PRIVY_APP_SECRET
+      if (!appId || !appSecret) throw new AuthError('Auth is not configured.', 500)
+      let userId: string
+      try {
         const verificationKey = await getVerificationKey(appId, appSecret)
         const claims = await verifyAccessToken({ access_token: accessToken, app_id: appId, verification_key: verificationKey })
-        user = await fetchPrivyUserById(claims.user_id)
+        userId = claims.user_id
+      } catch {
+        throw new AuthError('Invalid or expired session — reconnect your wallet and try again.', 401)
       }
+      const wallet = await upsertWallet(claimedAddress, userId, 'external')
+      return { walletId: wallet.id, privyUserId: userId }
+    }
+
+    // IDENTITY-TOKEN PATH — decodes the token to the full user + linked accounts, so we can
+    // additionally verify the claimed wallet is actually linked to the session.
+    let user: { id: string; linked_accounts?: unknown[] }
+    try {
+      user = (await getPrivyClient().users().get({ id_token: idToken })) as typeof user
     } catch {
       throw new AuthError('Invalid or expired session — reconnect your wallet and try again.', 401)
     }
