@@ -6,6 +6,7 @@ import { usePublicClient } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits, createWalletClient, custom } from 'viem'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
 import {
   localChatStorage,
   type ConversationSummary,
@@ -84,6 +85,10 @@ export function NockApp() {
   // the unfunded embedded wallet instead of whatever wallet they'd actually connected —
   // showing $0 even when the connected wallet plainly held funds.
   const delegatedWallet = useMemo(() => {
+    // Instant Swaps is hidden/disabled until the next version (lib/feature-flags.ts). With it
+    // off, never detect a delegated wallet, so every swap routes through normal external
+    // signing (per-transaction approval) even for anyone who enabled it before it was hidden.
+    if (!INSTANT_SWAPS_ENABLED) return undefined
     const match = privyUser?.linkedAccounts?.find(
       (a: any) => a.type === 'wallet' && a.walletClientType === 'privy' && a.chainType === 'ethereum' && a.delegated,
     ) as { address: string; id?: string } | undefined

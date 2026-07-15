@@ -6,6 +6,7 @@ import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
 import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
 import { user } from './data'
 
 // There's no wallet extension UI for the embedded instant-swap wallet the way there is
@@ -144,7 +145,9 @@ export function SettingsView() {
 
           {ready && authenticated && <GuardrailsSection />}
 
-          {ready && authenticated && <InstantSwapsSection />}
+          {/* Instant Swaps is hidden until the next version (see lib/feature-flags.ts) —
+              not part of the current public spec. Component kept, just not rendered. */}
+          {INSTANT_SWAPS_ENABLED && ready && authenticated && <InstantSwapsSection />}
 
           <section className="mt-4 rounded-xl border border-border bg-card p-4">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">

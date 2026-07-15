@@ -3,6 +3,7 @@ import { isAddress, parseUnits } from 'viem'
 import { executeDelegatedTransaction } from '@/lib/privy-server'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getRegisteredWalletIds } from '@/lib/db/delegated-wallet-events'
+import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +12,13 @@ export const dynamic = 'force-dynamic'
 // popup, no mobile approval — the Privy-side policy (see /api/admin/setup-session-policy)
 // is what actually constrains what this can do, same as any other signer.
 export async function POST(req: NextRequest) {
+  // Instant Swaps is disabled until the next version (lib/feature-flags.ts). Refuse the
+  // delegated-signing path entirely so the feature is unusable even by a direct API call,
+  // not just hidden in the UI.
+  if (!INSTANT_SWAPS_ENABLED) {
+    return NextResponse.json({ error: 'Instant swaps are not available.' }, { status: 404 })
+  }
+
   const body = await req.json().catch(() => null)
   const { walletId, address, transaction, sellToken } = (body ?? {}) as {
     walletId?: string
