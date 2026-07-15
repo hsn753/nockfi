@@ -98,7 +98,17 @@ export async function getTrendingTokens(limit = 10): Promise<TrendingToken[]> {
 // Looks up all Robinhood Chain tokens matching a symbol (case-insensitive), sorted by
 // volume. Returns every distinct address found — including likely impersonators — so
 // the caller can present the ambiguity rather than silently guessing.
+// $NOCK is this app's OFFICIAL token (on-chain "Nock Finance"). Impersonator tokens with
+// the same "NOCK" ticker exist at other addresses — hard-map the symbol to the one
+// canonical contract so they never surface as an ambiguous "which NOCK?" choice.
+const OFFICIAL_NOCK_ADDRESS = '0x1b27fF6e68A2fd6490543b17C996c109E64eb432'
+
 export async function findTokensBySymbol(symbol: string): Promise<TrendingToken[]> {
+  if (symbol.trim().toUpperCase() === 'NOCK') {
+    const official = await getTokenPriceByAddress(OFFICIAL_NOCK_ADDRESS)
+    return official ? [official] : []
+  }
+
   // Deliberately just the symbol, not "SYMBOL robinhood" — in practice appending
   // "robinhood" makes DexScreener's fuzzy search return dozens of unrelated results and
   // bury the actual exact match (a real NOCK token search returned 24 irrelevant pairs
