@@ -1085,10 +1085,7 @@ export function NockApp() {
           >
             <Menu className="size-5" strokeWidth={1.75} />
           </button>
-          <span className="text-base font-semibold tracking-tight">
-            <span className="text-foreground">N</span>
-            <span className="text-primary">ock</span>
-          </span>
+          <span className="font-sans text-base font-semibold tracking-tight text-foreground">Nock</span>
           <span className="ml-auto text-sm text-muted-foreground">
             {mobileTitle}
           </span>

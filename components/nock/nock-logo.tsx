@@ -26,7 +26,7 @@ export function NockLogo({ className, markClassName }: { className?: string; mar
   return (
     <span className={cn('flex items-center gap-2', className)}>
       <NockMark className={cn('size-7', markClassName)} />
-      <span className="font-serif text-xl font-semibold tracking-tight text-foreground">Nock</span>
+      <span className="font-sans text-xl font-semibold tracking-tight text-foreground">Nock</span>
     </span>
   )
 }
