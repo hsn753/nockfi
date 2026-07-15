@@ -15,6 +15,17 @@ const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const USDG_DECIMALS = 6
 const STOCK_DECIMALS = 18
 
+// Display-formatted stock amount for the action card: max 8 fractional digits, no
+// grouping (so it stays parseFloat-safe for the card's USD math), and the '0' sentinel
+// ("no collateral moved") is preserved. Raw formatUnits was leaking full 18-decimal
+// precision into the card — e.g. "0.024831507686786802 TSLA" instead of "0.02483151".
+function fmtStockUnits(raw: bigint): string {
+  return Number(formatUnits(raw, STOCK_DECIMALS)).toLocaleString('en-US', {
+    maximumFractionDigits: 8,
+    useGrouping: false,
+  })
+}
+
 const CREATE_MARKET_EVENT = parseAbiItem(
   'event CreateMarket(bytes32 indexed id, (address loanToken, address collateralToken, address oracle, address irm, uint256 lltv) marketParams)',
 )
@@ -521,7 +532,7 @@ export async function buildStockBorrow(
     approval: postRaw > BigInt(0)
       ? { tokenAddress: m.params.collateralToken, tokenSymbol: m.stockSymbol, tokenDecimals: STOCK_DECIMALS, amountRaw: postRaw.toString(), spender: MORPHO_CORE }
       : null,
-    collateralDelta: formatUnits(postRaw, STOCK_DECIMALS),
+    collateralDelta: postRaw > BigInt(0) ? fmtStockUnits(postRaw) : '0',
     usdgAmount: formatUnits(borrowAssets, USDG_DECIMALS),
     borrowApyPct: marketData?.borrowApyPct ?? 0,
     oraclePriceUsd: live.priceUsd,
@@ -562,7 +573,7 @@ export async function buildStockRepay(
         live.gasPrice,
       )],
       approval: null,
-      collateralDelta: formatUnits(collateralRaw, STOCK_DECIMALS),
+      collateralDelta: fmtStockUnits(collateralRaw),
       usdgAmount: '0',
       borrowApyPct: 0,
       oraclePriceUsd: live.priceUsd,
@@ -627,7 +638,7 @@ export async function buildStockRepay(
     stockSymbol: m.stockSymbol,
     steps,
     approval: { tokenAddress: m.params.loanToken, tokenSymbol: 'USDG', tokenDecimals: USDG_DECIMALS, amountRaw: approvalRaw.toString(), spender: MORPHO_CORE },
-    collateralDelta: isFullRepay ? formatUnits(collateralRaw, STOCK_DECIMALS) : '0',
+    collateralDelta: isFullRepay ? fmtStockUnits(collateralRaw) : '0',
     usdgAmount: repaidUsdStr,
     borrowApyPct: 0,
     oraclePriceUsd: live.priceUsd,

@@ -8,6 +8,7 @@ type BalanceEntry = {
   symbol: string
   name: string
   amount: string
+  usdValue?: number | null
 }
 
 export function LiveBalances() {
@@ -80,10 +81,21 @@ export function LiveBalances() {
     )
   }
 
+  if (balances.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center px-6 py-24 text-center">
+        <p className="text-sm font-medium text-foreground">No balances yet</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Tokens you hold on Robinhood Chain will show up here.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <ul className="flex flex-col gap-1 p-4">
       {balances.map((b) => (
-        <BalanceRow key={b.symbol} symbol={b.symbol} name={b.name} amount={b.amount} />
+        <BalanceRow key={b.symbol} symbol={b.symbol} name={b.name} amount={b.amount} usdValue={b.usdValue} />
       ))}
     </ul>
   )
@@ -93,10 +105,12 @@ function BalanceRow({
   symbol,
   name,
   amount,
+  usdValue,
 }: {
   symbol: string
   name: string
   amount: string
+  usdValue?: number | null
 }) {
   return (
     <li className="flex items-center gap-3 rounded-xl px-3 py-3.5 hover:bg-background/40">
@@ -109,7 +123,11 @@ function BalanceRow({
       </div>
       <div className="shrink-0 text-right">
         <p className="text-sm font-semibold text-foreground">{amount}</p>
-        <p className="text-xs text-muted-foreground">Price coming soon</p>
+        <p className="text-xs text-muted-foreground">
+          {usdValue != null
+            ? `$${usdValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : 'Price unavailable'}
+        </p>
       </div>
     </li>
   )

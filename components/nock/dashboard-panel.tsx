@@ -120,7 +120,10 @@ function InstantSwapWalletCard() {
   if (!embedded || !balances) return null
 
   const total = balances.reduce((sum, b) => sum + (b.usdValue ?? 0), 0)
-  const held = balances.filter((b) => parseFloat(String(b.amount).replace(/,/g, '')) > 0)
+  // Strip every non-numeric char (commas AND the "<" in the backend's "<0.0001" dust
+  // formatting) before parsing — `replace(/,/g,'')` left "<0.0001" as NaN, so held dust
+  // rows were silently dropped and the card fell through to its empty state.
+  const held = balances.filter((b) => parseFloat(String(b.amount).replace(/[^0-9.]/g, '')) > 0)
 
   return (
     <div className="rounded-3xl bg-secondary px-5 py-4">
@@ -130,7 +133,7 @@ function InstantSwapWalletCard() {
           <p className="text-sm text-muted-foreground">Instant-swap wallet</p>
         </div>
         <span className="flex items-center gap-1 text-xs text-muted-foreground">
-          <span className={cn('size-1.5 rounded-full', embedded.delegated ? 'bg-primary' : 'bg-secondary')} />
+          <span className={cn('size-1.5 rounded-full', embedded.delegated ? 'bg-primary' : 'bg-muted-foreground')} />
           {embedded.delegated ? 'Enabled' : 'Disabled'}
         </span>
       </div>
