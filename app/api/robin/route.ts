@@ -595,7 +595,7 @@ async function handlePOST(request: Request) {
       walletAddress?: string
     }
 
-    console.log('[robin] Wallet address received:', walletAddress, 'has identity token:', !!request.headers.get('x-privy-identity-token'))
+    console.log('[robin] Wallet address received:', walletAddress, 'has identity token:', !!request.headers.get('x-privy-identity-token'), '| diag:', request.headers.get('x-nock-auth-diag') || 'none')
 
     // Confirmed real gap before this check existed: walletAddress was accepted as a
     // plain, unverified client-supplied value — anyone could ask for holdings/quotes

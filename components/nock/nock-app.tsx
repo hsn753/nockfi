@@ -56,7 +56,7 @@ export function NockApp() {
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const { wallets } = useWallets()
-  const { user: privyUser, ready: privyReady, getAccessToken } = usePrivy()
+  const { user: privyUser, ready: privyReady, authenticated: privyAuthed, getAccessToken } = usePrivy()
 
   // Fetch a usable Privy identity token, refreshing the session first. Privy refreshes the
   // identity token alongside the access token, so calling getAccessToken() forces a refresh
@@ -444,9 +444,18 @@ export function NockApp() {
         // Only truly returns null when the session genuinely can't produce a token.
         const identityToken = await getFreshIdentityToken()
 
+        // TEMP DIAGNOSTIC — pin down why the identity token is null when a wallet is
+        // connected: is the user Privy-authenticated? does the access token come back?
+        const accessTokenProbe = await getAccessToken().catch(() => null)
+        const authDiag = `authed=${privyAuthed};access=${!!accessTokenProbe};id=${!!identityToken};wallets=${wallets.length}`
+
         const res = await fetch('/api/robin', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Privy-Identity-Token': identityToken ?? '',
+            'X-Nock-Auth-Diag': authDiag,
+          },
           body: JSON.stringify({ messages: history, walletAddress }),
         })
 
