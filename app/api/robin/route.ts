@@ -121,9 +121,20 @@ async function computeQuotedTradeValue(lastSwapQuote: any): Promise<string> {
     if (match?.priceUsd != null) fromPrice = match.priceUsd
   }
   const fromAmountNum = parseFloat(String(lastSwapQuote.fromAmount).replace(/,/g, ''))
-  return fromPrice !== undefined && !isNaN(fromAmountNum)
-    ? `$${(fromAmountNum * fromPrice).toFixed(2)}`
-    : 'Value unavailable'
+  if (fromPrice !== undefined && !isNaN(fromAmountNum)) {
+    return `$${(fromAmountNum * fromPrice).toFixed(2)}`
+  }
+  // Fall back to the RECEIVE side. Selling an unpriced token (e.g. an unverified memecoin
+  // like NOCK) FOR a token we can price (USDG ≈ $1, ETH...) means the output value IS the
+  // trade's USD value. Without this, "sell 3000 NOCK for USDG" priced as 'Value
+  // unavailable' and the spend-limit guard then blocked a ~$9 trade as if it were over a
+  // $500 limit. Never invent a price — but the received USDG is a real, verified figure.
+  const toPrice = prices[(lastSwapQuote.toSymbol || '').toUpperCase()]
+  const toAmountNum = parseFloat(String(lastSwapQuote.toAmount ?? '').replace(/,/g, ''))
+  if (toPrice !== undefined && !isNaN(toAmountNum)) {
+    return `$${(toAmountNum * toPrice).toFixed(2)}`
+  }
+  return 'Value unavailable'
 }
 
 // Vault Agent spend-limit check for money leaving the wallet. Returns the limit that
@@ -1572,7 +1583,9 @@ async function handlePOST(request: Request) {
         const outcomeValue = await computeQuotedTradeValue(lastSwapQuote)
         const exceededLimit = await getExceededSpendLimit(walletAddress, outcomeValue)
         if (exceededLimit !== null) {
-          responseText = `That trade is worth about ${outcomeValue}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
+          responseText = outcomeValue.toLowerCase().includes('unavailable')
+            ? `I couldn't confirm this trade's dollar value (an unpriced token on both sides), and you have a $${exceededLimit} per-transaction spend limit set — so I won't prepare it. Raise or remove the limit in Settings to allow unpriced trades.`
+            : `That trade is worth about ${outcomeValue}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
         } else {
           const isStock = lastSwapQuote.routeVia === 'uniswap-v4'
           const isBuy = isStock && String(lastSwapQuote.fromSymbol).toUpperCase() === 'USDG'
