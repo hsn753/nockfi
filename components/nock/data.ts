@@ -128,7 +128,7 @@ export type BridgeInfo = {
 
 export type ChatMessage =
   | { id: string; role: 'user'; text: string }
-  | { id: string; role: 'robin'; text: string; action?: ActionPreview; bridgeInfo?: BridgeInfo }
+  | { id: string; role: 'robin'; text: string; action?: ActionPreview; bridgeInfo?: BridgeInfo; suggestions?: string[] }
 
 export type Position = {
   id: string

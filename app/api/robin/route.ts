@@ -144,6 +144,21 @@ async function getExceededSpendLimit(walletAddress: string | undefined, outcomeV
   return outcomeValueNum > limit ? limit : null
 }
 
+// When Robin can't act yet (the request needs to be clearer, or a guard fired), attach a
+// few ready-to-use commands the user can tap. They're phrased in the exact short form the
+// tools and deterministic command paths reliably understand, so tapping one always does
+// something — the fix for users getting stuck guessing the format the AI expects.
+function buildSuggestions(lastUserText: string): string[] {
+  const t = (lastUserText || '').toLowerCase()
+  if (/\b(repay|close|pay\s*off|reclaim|settle|loan|debt|owe)\b/.test(t)) return ['repay all', 'close my loan']
+  if (/\b(borrow|against|collateral|leverage)\b/.test(t)) return ['borrow 2 USDG against TSLA']
+  if (/\b(withdraw|unstake|pull\s*out|take\s*out)\b/.test(t)) return ['withdraw 5 USDG from syrupUSDG']
+  if (/\b(lend|earn|yield|apy|deposit|supply|interest)\b/.test(t)) return ['lend 10 USDG to syrupUSDG', 'what yield can I earn?']
+  if (/\b(buy|sell)\b/.test(t)) return ['buy $5 of TSLA', 'swap 5 USDG for ETH']
+  if (/\b(swap|convert|trade|exchange)\b/.test(t)) return ['swap 5 USDG for ETH']
+  return ['what do I hold?', 'what can you do?']
+}
+
 function buildSystemPrompt(walletAddress?: string): string {
   const walletLine = walletAddress
     ? `The user's connected wallet address on Robinhood Chain is ${walletAddress}.`
@@ -1729,7 +1744,15 @@ async function handlePOST(request: Request) {
         "I wasn't able to prepare that action correctly — no preview card was actually created, so there's nothing to confirm yet. Ask me again (for example: \"withdraw 5 USDG from the syrupUSDG market\") and I'll build a fresh preview."
     }
 
-    return NextResponse.json({ text: responseText || fallback, action, bridgeInfo })
+    // No card produced (a clarification, an info answer, or a guard fired) → offer
+    // tappable next-step commands the user can act on immediately, tailored to what they
+    // just asked about. When a card WAS built, the card is the next step, so no chips.
+    const lastUserText = (Array.isArray(messages) ? [...messages] : [])
+      .reverse()
+      .find((m: any) => m?.role === 'user')?.text ?? ''
+    const suggestions = !action && !bridgeInfo ? buildSuggestions(lastUserText) : undefined
+
+    return NextResponse.json({ text: responseText || fallback, action, bridgeInfo, ...(suggestions ? { suggestions } : {}) })
   } catch (err) {
     console.error('[robin] API error:', err)
     const errorMessage = err instanceof Error ? err.message : 'Unknown error'

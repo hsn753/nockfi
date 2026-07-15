@@ -173,7 +173,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
             </div>
           )}
 
-          {messages.map((m) =>
+          {messages.map((m, idx) =>
             m.role === 'user' ? (
               <div key={m.id} className="flex justify-end">
                 <div className="max-w-[82%] rounded-2xl rounded-br-md bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
@@ -191,6 +191,24 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
                     <ActionPreviewCard action={m.action} onDraw={onDraw} onLoose={onLoose} />
                   )}
                   {m.bridgeInfo && <BridgeInfoCard bridgeInfo={m.bridgeInfo} />}
+                  {/* Tappable next-step commands — only on the latest message, and only
+                      when there's no action card (the card is itself the next step). Each
+                      chip is a command the tools reliably understand, so tapping always acts. */}
+                  {m.suggestions && m.suggestions.length > 0 && !m.action && idx === messages.length - 1 && (
+                    <div className="mt-2.5 flex flex-wrap gap-2">
+                      {m.suggestions.map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => !isLoading && onSend(s)}
+                          disabled={isLoading}
+                          className="rounded-full border border-secondary bg-secondary/40 px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-secondary disabled:opacity-50"
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ),

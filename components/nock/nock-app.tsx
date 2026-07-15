@@ -415,10 +415,11 @@ export function NockApp() {
           body: JSON.stringify({ messages: history, walletAddress }),
         })
 
-        const { text: replyText, action, bridgeInfo } = (await res.json()) as {
+        const { text: replyText, action, bridgeInfo, suggestions } = (await res.json()) as {
           text: string
           action?: ActionPreview
           bridgeInfo?: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number }
+          suggestions?: string[]
         }
 
         const replyMsg: ChatMessage = {
@@ -427,6 +428,7 @@ export function NockApp() {
           text: replyText,
           ...(action ? { action } : {}),
           ...(bridgeInfo ? { bridgeInfo } : {}),
+          ...(suggestions && suggestions.length ? { suggestions } : {}),
         }
 
         setMessages((prev) => [...prev, replyMsg])
@@ -823,7 +825,13 @@ export function NockApp() {
         console.error(`${actionNoun} execution failed:`, error)
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
         const isTimeout = /timeout/i.test(rawMessage)
-        const friendlyMessage = isTimeout
+        // A user declining the wallet prompt is not an error — surface it plainly instead
+        // of dumping the raw viem stack (request args, calldata, contract call, docs link),
+        // which read as a scary failure for a deliberate "not now".
+        const isRejection = /reject|denied|user denied|declin|cancell?ed|user\s*rejected/i.test(rawMessage)
+        const friendlyMessage = isRejection
+          ? `You declined the ${actionNoun.toLowerCase()} in your wallet, so nothing happened and no funds moved. Press Confirm on the card whenever you're ready to try again.`
+          : isTimeout
           ? `Your wallet didn't respond in time. This usually means a connected mobile wallet (like the Robinhood app over WalletConnect) either missed the approval notification or the session went stale. Check your phone for a pending approval, or try disconnecting and reconnecting your wallet, then attempt the ${actionNoun.toLowerCase()} again.`
           : `${actionNoun} failed: ${rawMessage}. Please try again.`
         setMessages((prev) => [
