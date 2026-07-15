@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { checkAdminAuth } from '@/lib/internal-auth'
 import { SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 
 export const dynamic = 'force-dynamic'
@@ -28,11 +29,12 @@ const SWAP_TOKEN_ADDRESSES = Object.values(SWAP_TOKENS)
 // Fails closed: if ADMIN_SETUP_TOKEN isn't configured, this refuses rather than silently
 // staying open.
 export async function POST(req: NextRequest) {
-  const adminToken = process.env.ADMIN_SETUP_TOKEN
-  if (!adminToken) {
+  // Fail CLOSED (constant-time). Also enforced at the edge in middleware.ts — kept here
+  // too so the handler is safe on its own, independent of middleware.
+  if (!process.env.ADMIN_SETUP_TOKEN) {
     return NextResponse.json({ error: 'ADMIN_SETUP_TOKEN not configured — refusing to run.' }, { status: 500 })
   }
-  if (req.headers.get('x-admin-token') !== adminToken) {
+  if (!checkAdminAuth(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

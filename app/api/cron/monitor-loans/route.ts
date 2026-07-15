@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { checkCronAuth } from '@/lib/internal-auth'
 import { getDb } from '@/lib/db/client'
 import { wallets } from '@/lib/db/schema'
 import { getAllStockBorrowPositions } from '@/lib/get-stock-collateral'
@@ -23,8 +24,9 @@ import { recordPortfolioSnapshot } from '@/lib/db/portfolio-snapshots'
 export const maxDuration = 300
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET
-  if (!secret || req.headers.get('authorization') !== `Bearer ${secret}`) {
+  // Fail CLOSED (constant-time). Also enforced at the edge in middleware.ts — kept here
+  // too so the handler is safe on its own, independent of middleware.
+  if (!checkCronAuth(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
