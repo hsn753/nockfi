@@ -1501,7 +1501,9 @@ async function handlePOST(request: Request) {
             // swap fails "not enough". Rounding DOWN keeps the amount ≤ balance (sub-6dp
             // dust left behind is negligible).
             if (fromTok.decimals > 6) {
-              const scale = BigInt(10) ** BigInt(fromTok.decimals - 6)
+              // 10^(decimals-6) as a bigint, built via string to avoid the ** operator
+              // (which the TS target transpiles to Math.pow and breaks on bigint).
+              const scale = BigInt('1' + '0'.repeat(fromTok.decimals - 6))
               raw = (raw / scale) * scale
             }
             if (raw > BigInt(0)) {
