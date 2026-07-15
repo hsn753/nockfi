@@ -46,14 +46,16 @@ export type PerpMarket = {
   markPrice: number
   indexPrice: number
   // Hourly rate, as a percentage — Lighter pays funding every hour (per their docs),
-  // unlike the common 8h convention on many other perps venues.
-  fundingRatePctHourly: number
+  // unlike the common 8h convention on many other perps venues. Null when Lighter
+  // doesn't return a funding entry for this market (never fabricated as 0).
+  fundingRatePctHourly: number | null
   openInterest: number
   dailyVolumeUsd: number
   priceChange24hPct: number
   // Derived from Lighter's own live default_initial_margin_fraction, not guessed —
-  // e.g. a fraction of 500 (5%) means 20x max leverage.
-  maxLeverage: number
+  // e.g. a fraction of 500 (5%) means 20x max leverage. Null when the fraction is
+  // missing or zero (never Infinity from a divide-by-zero).
+  maxLeverage: number | null
 }
 
 const DEFAULT_MARKET_LIMIT = 15
@@ -95,11 +97,16 @@ export async function getPerpsMarkets(symbol?: string): Promise<{ markets: PerpM
     asset: m.symbol,
     markPrice: Number(m.mark_price),
     indexPrice: Number(m.index_price),
-    fundingRatePctHourly: (fundingByMarketId.get(m.market_id) ?? 0) * 100,
+    fundingRatePctHourly: fundingByMarketId.has(m.market_id)
+      ? (fundingByMarketId.get(m.market_id) as number) * 100
+      : null,
     openInterest: m.open_interest,
     dailyVolumeUsd: m.daily_quote_token_volume,
     priceChange24hPct: m.daily_price_change,
-    maxLeverage: Math.round(10000 / m.default_initial_margin_fraction),
+    maxLeverage:
+      m.default_initial_margin_fraction > 0
+        ? Math.round(10000 / m.default_initial_margin_fraction)
+        : null,
   }))
 
   return {

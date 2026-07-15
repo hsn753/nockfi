@@ -1647,7 +1647,7 @@ async function handlePOST(request: Request) {
           const { markets } = await getPerpsMarkets()
           if (markets.length > 0) {
             const lines = markets.slice(0, 5).map((m, i) =>
-              `${i + 1}. **${m.asset}**: mark $${m.markPrice.toLocaleString('en-US', { maximumFractionDigits: m.markPrice < 1 ? 6 : 2 })}, funding ${m.fundingRatePctHourly.toFixed(4)}%/hr, 24h volume $${Math.round(m.dailyVolumeUsd).toLocaleString('en-US')}, up to ${m.maxLeverage}x`,
+              `${i + 1}. **${m.asset}**: mark $${m.markPrice.toLocaleString('en-US', { maximumFractionDigits: m.markPrice < 1 ? 6 : 2 })}, funding ${m.fundingRatePctHourly != null ? `${m.fundingRatePctHourly.toFixed(4)}%/hr` : 'n/a'}, 24h volume $${Math.round(m.dailyVolumeUsd).toLocaleString('en-US')}${m.maxLeverage != null ? `, up to ${m.maxLeverage}x` : ''}`,
             )
             responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. Opening positions through Nock isn't built yet — perps execution is the last agent under construction — so this is informational for now.`
           }
