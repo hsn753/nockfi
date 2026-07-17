@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="description" content="Nock API Reference — partner integration docs.">
+<title>Nock API Reference</title>
+<style>
+  :root{
+    --bg:#0a0c0b; --sidebar:#0c0f0e; --panel:#111514; --code:#0e1211; --raise:#161b19;
+    --line:#1e2321; --line-soft:#171b1a;
+    --tx:#e9efeb; --tx-dim:#9fada6; --tx-mute:#69756f;
+    --lime:#c3f53c; --lime-dim:#9bc730; --teal:#5eead4; --blue:#7aa2f7;
+    --req:#e0b64a; --get:#c3f53c; --post:#7aa2f7;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,monospace;
+    --sans:"Helvetica Neue",-apple-system,system-ui,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0;background:var(--bg);color:var(--tx);font-family:var(--sans);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased;}
+  a{color:var(--lime);text-decoration:none;} a:hover{text-decoration:underline;}
+  code{font-family:var(--mono);}
+
+  .layout{display:flex;align-items:flex-start;}
+  /* Sidebar */
+  .sidebar{width:270px;flex:none;position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--sidebar);border-right:1px solid var(--line);padding:1.6rem 1.1rem 3rem;}
+  .brand{display:flex;align-items:center;gap:.6rem;margin:0 .4rem 1.6rem;}
+  .brand svg{width:26px;height:26px;color:var(--lime);}
+  .brand b{font-size:1.15rem;font-weight:700;letter-spacing:-.01em;}
+  .brand span{font-family:var(--mono);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--tx-mute);border:1px solid var(--line);border-radius:5px;padding:.1rem .35rem;margin-left:.1rem;}
+  .navgroup{font-family:var(--mono);font-size:.64rem;letter-spacing:.13em;text-transform:uppercase;color:var(--tx-mute);margin:1.3rem .4rem .4rem;}
+  .nav a{display:flex;align-items:center;gap:.5rem;padding:.32rem .5rem;border-radius:7px;color:var(--tx-dim);font-size:.86rem;}
+  .nav a:hover{background:var(--panel);color:var(--tx);text-decoration:none;}
+  .nav a .verb{font-family:var(--mono);font-size:.6rem;font-weight:700;color:var(--get);width:26px;flex:none;}
+  .nav a code{font-family:var(--mono);font-size:.78rem;color:inherit;}
+
+  /* Content */
+  .content{flex:1;min-width:0;max-width:860px;margin:0 auto;padding:2.6rem clamp(1.1rem,4vw,3rem) 6rem;}
+  .doc-head h1{font-size:clamp(1.7rem,4vw,2.3rem);font-weight:700;letter-spacing:-.02em;margin:0 0 .5rem;}
+  .doc-head p{color:var(--tx-dim);max-width:60ch;margin:0 0 1rem;}
+  .meta-row{display:flex;flex-wrap:wrap;gap:.5rem;margin:1.2rem 0 0;}
+  .meta{font-family:var(--mono);font-size:.72rem;color:var(--tx-dim);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:.35rem .6rem;}
+  .meta b{color:var(--lime);font-weight:600;}
+
+  h2.grouptitle{font-size:.72rem;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--lime-dim);margin:3.2rem 0 0;padding-top:1.4rem;border-top:1px solid var(--line);}
+  section.block{margin-top:2rem;scroll-margin-top:1.5rem;}
+  section.block > p.lead{color:var(--tx-dim);margin:.2rem 0 1.2rem;}
+  h3.ep{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:0 0 .3rem;font-size:1.15rem;}
+  .verb-badge{font-family:var(--mono);font-size:.68rem;font-weight:700;letter-spacing:.03em;padding:.24rem .5rem;border-radius:6px;background:rgba(195,245,60,.12);color:var(--get);}
+  .verb-badge.post{background:rgba(122,162,247,.14);color:var(--post);}
+  .ep-path{font-family:var(--mono);font-size:.98rem;color:var(--tx);}
+  .exec{font-family:var(--mono);font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;color:var(--lime);border:1px solid rgba(195,245,60,.4);border-radius:999px;padding:.15rem .5rem;}
+  section.block > p.desc{color:var(--tx-dim);margin:.5rem 0 1.1rem;}
+
+  .subhead{font-family:var(--mono);font-size:.66rem;letter-spacing:.11em;text-transform:uppercase;color:var(--tx-mute);margin:1.4rem 0 .5rem;}
+  table.params{width:100%;border-collapse:collapse;font-size:.86rem;}
+  table.params th{text-align:left;font-family:var(--mono);font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-mute);font-weight:500;padding:.4rem .7rem;border-bottom:1px solid var(--line);}
+  table.params td{padding:.55rem .7rem;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--tx-dim);}
+  table.params tr:last-child td{border-bottom:none;}
+  table.params td.name{font-family:var(--mono);color:var(--teal);white-space:nowrap;}
+  .type{font-family:var(--mono);font-size:.8rem;color:var(--tx-mute);}
+  .req{font-family:var(--mono);font-size:.68rem;color:var(--req);}
+  .opt{font-family:var(--mono);font-size:.68rem;color:var(--tx-mute);}
+  .noparams{font-size:.85rem;color:var(--tx-mute);font-style:italic;}
+
+  .codewrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:.4rem;background:var(--code);}
+  .codewrap .cw-head{display:flex;align-items:center;justify-content:space-between;padding:.4rem .8rem;border-bottom:1px solid var(--line);background:var(--panel);}
+  .cw-head span{font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--tx-mute);}
+  pre{margin:0;padding:.85rem 1rem;overflow-x:auto;}
+  pre code{font-size:.8rem;line-height:1.7;color:var(--tx-dim);white-space:pre;}
+  .k{color:var(--teal);} .s{color:var(--lime-dim);} .c{color:var(--tx-mute);} .n{color:#e0b64a;} .fl{color:var(--tx-mute);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr;}}
+
+  .note{border:1px solid var(--line);border-left:2px solid var(--lime);background:linear-gradient(90deg,rgba(195,245,60,.05),transparent);border-radius:8px;padding:.9rem 1.1rem;margin:1.4rem 0;font-size:.9rem;color:var(--tx-dim);}
+  .note b{color:var(--tx);}
+  p code,td code,li code{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:.06rem .34rem;font-size:.84em;color:var(--tx);}
+
+  footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);color:var(--tx-mute);font-size:.8rem;}
+
+  .menu-btn{display:none;}
+  @media(max-width:860px){
+    .sidebar{display:none;}
+    .content{margin:0;}
+  }
+
+  /* print / PDF */
+  @media print {
+    .sidebar{display:none!important;}
+    .content{margin:0;max-width:100%;padding:1.2rem 1.4rem;}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    .codewrap,section.block,table.params{break-inside:avoid;}
+    a{color:var(--lime);}
+    @page{margin:14mm;}
+  }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 80 80" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M80 53.3335V26.6665C80 11.9998 68.0002 0 53.3335 0H48.9355C48.1979 0 47.6 0.597938 47.6 1.33553V14.725C47.6 15.0803 47.7416 15.4209 47.9934 15.6715L64.3266 31.9285C64.5784 32.1791 64.72 32.5197 64.72 32.875L64.72 50.6957C64.72 51.8856 63.2814 52.4814 62.4401 51.6401L32.7912 21.9912C32.5407 21.7407 32.4 21.401 32.4 21.0468L32.4 1.33553C32.4 0.59794 31.8021 0 31.0645 0H26.6665C11.9998 0 0 11.9998 0 26.6665V53.3335C0 68.0002 11.9998 80 26.6665 80H31.0645C31.8021 80 32.4 79.4021 32.4 78.6645V65.275C32.4 64.9197 32.2584 64.5791 32.0066 64.3285L15.6734 48.0715C15.4216 47.8209 15.28 47.4803 15.28 47.125V29.3043C15.28 28.1144 16.7186 27.5186 17.5599 28.3599L47.2088 58.0088C47.4593 58.2593 47.6 58.599 47.6 58.9532L47.6 78.6644C47.6 79.402 48.1979 79.9999 48.9355 79.9999H53.3335C68.0002 79.9999 80 68.0002 80 53.3335Z"/></svg>
+      <b>Nock</b><span>API</span>
+    </div>
+    <nav class="nav">
+      <a href="#introduction"><span class="verb" style="color:var(--tx-mute)">·</span>Introduction</a>
+      <a href="#authentication"><span class="verb" style="color:var(--tx-mute)">·</span>Authentication</a>
+      <div class="navgroup">Swap</div>
+      <a href="#swap-quote"><span class="verb">GET</span><code>/swap/quote</code></a>
+      <div class="navgroup">Yield</div>
+      <a href="#yield-markets"><span class="verb">GET</span><code>/yield/markets</code></a>
+      <a href="#yield-positions"><span class="verb">GET</span><code>/yield/positions</code></a>
+      <a href="#yield-deposit"><span class="verb">GET</span><code>/yield/deposit</code></a>
+      <div class="navgroup">Tokenized stocks</div>
+      <a href="#stocks"><span class="verb">GET</span><code>/stocks</code></a>
+      <a href="#stocks-quote"><span class="verb">GET</span><code>/stocks/quote</code></a>
+      <div class="navgroup">Lending</div>
+      <a href="#collateral-markets"><span class="verb">GET</span><code>/collateral/markets</code></a>
+      <a href="#collateral-positions"><span class="verb">GET</span><code>/collateral/positions</code></a>
+      <a href="#collateral-borrow"><span class="verb">GET</span><code>/collateral/borrow</code></a>
+      <div class="navgroup">Perps</div>
+      <a href="#perps-markets"><span class="verb">GET</span><code>/perps/markets</code></a>
+      <div class="navgroup">Vault &amp; portfolio</div>
+      <a href="#vault-guardrails"><span class="verb">GET</span><code>/vault/guardrails</code></a>
+      <a href="#portfolio"><span class="verb">GET</span><code>/portfolio</code></a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="doc-head" id="introduction">
+      <h1>Nock API Reference</h1>
+      <p>The Nock API gives partners programmatic access to the Nock agents on Robinhood Chain — swaps, yield, tokenized stocks, stock-backed lending, and perps. Read live market data, or build a transaction and sign it yourself. Nock never holds your keys.</p>
+      <div class="meta-row">
+        <div class="meta">Base URL&nbsp;&nbsp;<b>https://app.nockfi.io/api/v1</b></div>
+        <div class="meta">Chain&nbsp;&nbsp;<b>Robinhood Chain (4663)</b></div>
+        <div class="meta">Auth&nbsp;&nbsp;<b>API key</b></div>
+      </div>
+      <div class="note" style="margin-top:1.4rem"><b>Custody model.</b> Every endpoint is read-only on our side. Endpoints that create an action return an <b>unsigned transaction</b> (or an ordered list of them); your application signs and broadcasts. Keys, approvals, and enforcement stay entirely with you.</div>
+    </div>
+
+    <h2 class="grouptitle" id="authentication">Authentication</h2>
+    <section class="block">
+      <p class="lead">Every request must carry your API key. Requests without a valid key return <code>401</code> — no endpoint is public.</p>
+      <p>Pass your key in the <code>x-api-key</code> header (or <code>Authorization: Bearer &lt;key&gt;</code>). We issue one key per partner and store only its hash. Requests are rate-limited per key; contact us to raise limits.</p>
+      <div class="codewrap"><div class="cw-head"><span>Request</span><span>cURL</span></div>
+<pre><code><span class="fl">curl</span> https://app.nockfi.io/api/v1/yield/markets \
+  <span class="fl">-H</span> <span class="s">"x-api-key: npk_live_your_key_here"</span></code></pre></div>
+    </section>
+
+    <!-- ============ SWAP ============ -->
+    <h2 class="grouptitle">Swap Agent</h2>
+    <section class="block" id="swap-quote">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/swap/quote</span><span class="exec">Executable</span></h3>
+      <p class="desc">Returns the best-price route between two tokens on Robinhood Chain (routed via 0x), including an unsigned transaction to execute the swap. Every quote carries a <code>verified</code> flag — <code>false</code> means at least one token is an unvetted/impersonator contract.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">fromToken</td><td class="type">string</td><td class="req">required</td><td>Token to sell — a symbol (<code>USDG</code>) or a contract address.</td></tr>
+        <tr><td class="name">toToken</td><td class="type">string</td><td class="req">required</td><td>Token to buy — symbol or contract address.</td></tr>
+        <tr><td class="name">amount</td><td class="type">string</td><td class="req">required</td><td>Human amount of <code>fromToken</code>, e.g. <code>"100"</code>.</td></tr>
+        <tr><td class="name">taker</td><td class="type">string</td><td class="opt">optional</td><td>Wallet that will sign the transaction. Include it to get an executable <code>transaction</code>.</td></tr>
+      </tbody></table>
+      <div class="grid2">
+        <div><div class="subhead">Request</div>
+        <div class="codewrap"><div class="cw-head"><span>GET</span><span>cURL</span></div>
+<pre><code><span class="fl">curl</span> <span class="s">"…/v1/swap/quote?fromToken=USDG\
+&amp;toToken=NOCK&amp;amount=100\
+&amp;taker=0x6690…Aab1"</span> \
+  <span class="fl">-H</span> <span class="s">"x-api-key: npk_live_…"</span></code></pre></div></div>
+        <div><div class="subhead">Response <span style="color:var(--tx-mute)">200</span></div>
+        <div class="codewrap"><div class="cw-head"><span>JSON</span><span></span></div>
+<pre><code>{
+  <span class="k">"fromSymbol"</span>: <span class="s">"USDG"</span>,
+  <span class="k">"toSymbol"</span>: <span class="s">"NOCK"</span>,
+  <span class="k">"toAmount"</span>: <span class="s">"5404.03"</span>,
+  <span class="k">"exchangeRate"</span>: <span class="s">"1 USDG = 540.4 NOCK"</span>,
+  <span class="k">"liquidityAvailable"</span>: <span class="n">true</span>,
+  <span class="k">"verified"</span>: <span class="n">true</span>,
+  <span class="k">"sellTokenAddress"</span>: <span class="s">"0x5fc5…d168"</span>,
+  <span class="k">"sellTokenDecimals"</span>: <span class="n">6</span>,
+  <span class="k">"transaction"</span>: {
+    <span class="k">"to"</span>: <span class="s">"0x0000…2734"</span>,
+    <span class="k">"data"</span>: <span class="s">"0x…"</span>,
+    <span class="k">"value"</span>: <span class="s">"0"</span>, <span class="k">"gas"</span>: <span class="s">"250000"</span>
+  }
+}</code></pre></div></div>
+      </div>
+    </section>
+
+    <!-- ============ YIELD ============ -->
+    <h2 class="grouptitle">Yield Agent</h2>
+    <section class="block" id="yield-markets">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/yield/markets</span></h3>
+      <p class="desc">Lists the available lending / vault markets with live APY, TVL, and risk label (Morpho, Steakhouse).</p>
+      <div class="subhead">Query parameters</div>
+      <p class="noparams">None.</p>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{ <span class="k">"markets"</span>: [
+  { <span class="k">"name"</span>: <span class="s">"Steakhouse USDG"</span>, <span class="k">"assetSymbol"</span>: <span class="s">"USDG"</span>,
+    <span class="k">"apy"</span>: <span class="n">4.2</span>, <span class="k">"totalAssetsUsd"</span>: <span class="n">1250000</span>,
+    <span class="k">"risk"</span>: <span class="s">"…"</span>, <span class="k">"protocol"</span>: <span class="s">"Morpho"</span>, <span class="k">"address"</span>: <span class="s">"0x…"</span> }
+] }</code></pre></div>
+    </section>
+
+    <section class="block" id="yield-positions">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/yield/positions</span></h3>
+      <p class="desc">A wallet's live supply positions with current APY.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Wallet address to read positions for.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{ <span class="k">"positions"</span>: [ { <span class="k">"market"</span>: <span class="s">"…"</span>, <span class="k">"suppliedUsd"</span>: <span class="n">100</span>, <span class="k">"apyPct"</span>: <span class="n">4.2</span> } ] }</code></pre></div>
+    </section>
+
+    <section class="block" id="yield-deposit">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/yield/deposit</span><span class="exec">Executable</span></h3>
+      <p class="desc">"Put money to work." Builds the unsigned deposit transaction into the yield vault. Sign and broadcast it to execute. Returns a <code>422</code> with a plain-English reason if the vault can't accept the deposit.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Depositing wallet.</td></tr>
+        <tr><td class="name">amount</td><td class="type">string</td><td class="req">required</td><td>USDG amount to deposit, e.g. <code>"100"</code>.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{
+  <span class="k">"transaction"</span>: { <span class="k">"to"</span>: <span class="s">"0x…vault"</span>, <span class="k">"data"</span>: <span class="s">"0x…"</span>, <span class="k">"value"</span>: <span class="s">"0"</span>, <span class="k">"gas"</span>: <span class="s">"300000"</span> },
+  <span class="k">"vaultSymbol"</span>: <span class="s">"…"</span>, <span class="k">"sharesPreview"</span>: <span class="s">"…"</span>, <span class="k">"amount"</span>: <span class="s">"100"</span>
+}</code></pre></div>
+    </section>
+
+    <!-- ============ STOCKS ============ -->
+    <h2 class="grouptitle">Tokenized stocks</h2>
+    <section class="block" id="stocks">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/stocks</span></h3>
+      <p class="desc">The verified tokenized-equity universe (AAPL, TSLA, NVDA, SPY, …), each checked against Robinhood's official issuer.</p>
+      <div class="subhead">Query parameters</div>
+      <p class="noparams">None.</p>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{ <span class="k">"stocks"</span>: [ { <span class="k">"symbol"</span>: <span class="s">"TSLA"</span>, <span class="k">"name"</span>: <span class="s">"Tesla"</span>, <span class="k">"address"</span>: <span class="s">"0x…"</span>, <span class="k">"priceUsd"</span>: <span class="n">385.4</span> } ] }</code></pre></div>
+    </section>
+
+    <section class="block" id="stocks-quote">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/stocks/quote</span><span class="exec">Executable</span></h3>
+      <p class="desc">Buy or sell a tokenized stock (routed through Uniswap). Returns the price and the unsigned transaction — sign it to trade.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">symbol</td><td class="type">string</td><td class="req">required</td><td>Stock symbol, e.g. <code>TSLA</code>.</td></tr>
+        <tr><td class="name">direction</td><td class="type">string</td><td class="req">required</td><td><code>buy</code> or <code>sell</code>.</td></tr>
+        <tr><td class="name">amount</td><td class="type">string</td><td class="req">required</td><td>USDG for a buy; stock units for a sell.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{
+  <span class="k">"fromSymbol"</span>: <span class="s">"USDG"</span>, <span class="k">"toSymbol"</span>: <span class="s">"TSLA"</span>,
+  <span class="k">"toAmount"</span>: <span class="s">"0.012962"</span>, <span class="k">"verified"</span>: <span class="n">true</span>, <span class="k">"routeVia"</span>: <span class="s">"uniswap-v4"</span>,
+  <span class="k">"transaction"</span>: { <span class="k">"to"</span>: <span class="s">"0x…"</span>, <span class="k">"data"</span>: <span class="s">"0x…"</span>, <span class="k">"value"</span>: <span class="s">"0"</span>, <span class="k">"gas"</span>: <span class="s">"…"</span> }
+}</code></pre></div>
+    </section>
+
+    <!-- ============ LENDING ============ -->
+    <h2 class="grouptitle">Lending — borrow against stocks</h2>
+    <section class="block" id="collateral-markets">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/collateral/markets</span></h3>
+      <p class="desc">Which tokenized stocks can back a USDG loan, with live borrow APY, max LTV (LLTV), and available liquidity.</p>
+      <div class="subhead">Query parameters</div>
+      <p class="noparams">None.</p>
+    </section>
+    <section class="block" id="collateral-positions">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/collateral/positions</span></h3>
+      <p class="desc">A wallet's open loans: debt owed, collateral value, and liquidation price.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Wallet address.</td></tr>
+      </tbody></table>
+    </section>
+    <section class="block" id="collateral-borrow">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/collateral/borrow</span><span class="exec">Executable</span></h3>
+      <p class="desc">Post tokenized-stock collateral and borrow USDG (e.g. post TSLA, borrow USDG). Returns the ordered step transactions plus any required ERC-20 approval, and the resulting LTV, borrow APY, and liquidation price so you can gate on risk. Over-leveraged requests are rejected with the safe maximum.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Borrowing wallet.</td></tr>
+        <tr><td class="name">stock</td><td class="type">string</td><td class="req">required</td><td>Collateral stock symbol, e.g. <code>TSLA</code>.</td></tr>
+        <tr><td class="name">borrowUsd</td><td class="type">string</td><td class="req">required</td><td>USDG amount to borrow.</td></tr>
+        <tr><td class="name">collateralAmount</td><td class="type">string</td><td class="opt">optional</td><td>Stock units to post. Defaults to the wallet's full balance.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{
+  <span class="k">"kind"</span>: <span class="s">"stock-borrow"</span>, <span class="k">"stockSymbol"</span>: <span class="s">"TSLA"</span>,
+  <span class="k">"approval"</span>: { <span class="k">"tokenAddress"</span>: <span class="s">"0x…"</span>, <span class="k">"amountRaw"</span>: <span class="s">"…"</span>, <span class="k">"spender"</span>: <span class="s">"0x…"</span> },
+  <span class="k">"steps"</span>: [ { <span class="k">"to"</span>: <span class="s">"0x…"</span>, <span class="k">"data"</span>: <span class="s">"0x…"</span>, <span class="k">"value"</span>: <span class="s">"0"</span> } ],   <span class="c">// sign in order</span>
+  <span class="k">"usdgAmount"</span>: <span class="s">"…"</span>, <span class="k">"borrowApyPct"</span>: <span class="n">6.1</span>,
+  <span class="k">"ltvUtilizationAfterPct"</span>: <span class="n">42.0</span>, <span class="k">"liquidationPriceUsdAfter"</span>: <span class="n">…</span>
+}</code></pre></div>
+    </section>
+
+    <!-- ============ PERPS ============ -->
+    <h2 class="grouptitle">Perps Agent</h2>
+    <section class="block" id="perps-markets">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/perps/markets</span></h3>
+      <p class="desc">Live perpetual-futures market data on Robinhood Chain (via Lighter): mark price, hourly funding, open interest, 24h volume, and max leverage. Read-only — live order execution is jurisdiction-gated and not exposed via the API.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">symbol</td><td class="type">string</td><td class="opt">optional</td><td>Filter to one market, e.g. <code>ETH</code>. Omit for the top markets by volume.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{ <span class="k">"markets"</span>: [
+  { <span class="k">"asset"</span>: <span class="s">"ETH"</span>, <span class="k">"markPrice"</span>: <span class="n">1831.61</span>, <span class="k">"fundingRatePctHourly"</span>: <span class="n">0.0096</span>,
+    <span class="k">"openInterest"</span>: <span class="n">49610</span>, <span class="k">"dailyVolumeUsd"</span>: <span class="n">286985432</span>, <span class="k">"maxLeverage"</span>: <span class="n">20</span> }
+] }</code></pre></div>
+    </section>
+
+    <!-- ============ VAULT + PORTFOLIO ============ -->
+    <h2 class="grouptitle">Vault &amp; portfolio</h2>
+    <section class="block" id="vault-guardrails">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/vault/guardrails</span></h3>
+      <p class="desc">The safety guardrails a wallet has set — currently the per-transaction USD spend limit that gates any swap or deposit. Mirror it in your own pre-trade checks.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Wallet address.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{ <span class="k">"address"</span>: <span class="s">"0x…"</span>, <span class="k">"maxUsdPerTransaction"</span>: <span class="n">500</span> }   <span class="c">// null = no limit set</span></code></pre></div>
+    </section>
+
+    <section class="block" id="portfolio">
+      <h3 class="ep"><span class="verb-badge">GET</span><span class="ep-path">/portfolio</span></h3>
+      <p class="desc">Everything a wallet holds in one call — token and stock-token balances with live USD values and a portfolio total.</p>
+      <div class="subhead">Query parameters</div>
+      <table class="params"><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+        <tr><td class="name">address</td><td class="type">string</td><td class="req">required</td><td>Wallet address.</td></tr>
+      </tbody></table>
+      <div class="subhead">Response</div>
+      <div class="codewrap"><div class="cw-head"><span>JSON</span><span>200</span></div>
+<pre><code>{
+  <span class="k">"address"</span>: <span class="s">"0x…"</span>, <span class="k">"totalPortfolioUsd"</span>: <span class="n">17.63</span>,
+  <span class="k">"balances"</span>: [
+    { <span class="k">"symbol"</span>: <span class="s">"USDG"</span>, <span class="k">"amount"</span>: <span class="s">"15.13"</span>, <span class="k">"usdValue"</span>: <span class="n">15.13</span> },
+    { <span class="k">"symbol"</span>: <span class="s">"NOCK"</span>, <span class="k">"name"</span>: <span class="s">"Nock Finance"</span>, <span class="k">"amount"</span>: <span class="s">"…"</span>, <span class="k">"usdValue"</span>: <span class="n">…</span> }
+  ]
+}</code></pre></div>
+    </section>
+
+    <footer>
+      Nock — AI agent concierge on Robinhood Chain (4663). One API key per partner; contact the Nock team for access and to raise rate limits. · <a href="https://app.nockfi.io">app.nockfi.io</a>
+    </footer>
+  </main>
+</div>
+
+</body>
+</html>
