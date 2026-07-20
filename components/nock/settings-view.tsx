@@ -519,6 +519,9 @@ function PerpsKeySection() {
 
   const [status, setStatus] = useState<PerpsKeyStatus>({ kind: 'checking' })
   const [depositAmount, setDepositAmount] = useState('')
+  const [addAmount, setAddAmount] = useState('')
+  const [addBusy, setAddBusy] = useState(false)
+  const [addDone, setAddDone] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -662,6 +665,62 @@ function PerpsKeySection() {
     }
   }
 
+  // Add more USDG margin to an EXISTING Lighter account (same deposit contract call, which
+  // just tops up collateral). No account-creation polling needed since the account exists.
+  const addFunds = async () => {
+    if (!walletAddress || !activeWallet || !publicClient || !addAmount) return
+    setError('')
+    setAddDone(false)
+    setAddBusy(true)
+    try {
+      const provider = await activeWallet.getEthereumProvider()
+      const walletClient = createWalletClient({
+        account: walletAddress as `0x${string}`,
+        chain: nockChain,
+        transport: custom(provider),
+      })
+      const result = await executeLighterDeposit({ walletClient, publicClient, amountUsdg: addAmount })
+      if (result.error) throw new Error(result.error)
+      setAddAmount('')
+      setAddDone(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setAddBusy(false)
+    }
+  }
+
+  // Small "add funds" row shown once an account exists (ready / connected states).
+  const addFundsRow = (
+    <div className="mt-3 border-t border-border pt-3">
+      <p className="text-xs text-muted-foreground">Add margin to your perps account</p>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={addAmount}
+          onChange={(e) => {
+            setAddAmount(e.target.value)
+            setAddDone(false)
+          }}
+          placeholder="USDG amount, e.g. 20"
+          className="min-w-0 flex-1 rounded-lg border border-border bg-background/40 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={addBusy || !addAmount}
+          onClick={addFunds}
+          className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {addBusy && <Loader2 className="size-3 animate-spin" />}
+          Add funds
+        </button>
+      </div>
+      {addDone && <p className="mt-1.5 text-xs text-primary">Funds added — your perps margin will update shortly.</p>}
+    </div>
+  )
+
   return (
     <section className="mt-4 rounded-xl border border-border bg-card p-4">
       <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -724,13 +783,16 @@ function PerpsKeySection() {
       )}
 
       {status.kind === 'ready' && (
-        <button
-          type="button"
-          onClick={setup}
-          className="mt-3 flex w-full items-center justify-center rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-secondary/60"
-        >
-          Set up trading key
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={setup}
+            className="mt-3 flex w-full items-center justify-center rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-secondary/60"
+          >
+            Set up trading key
+          </button>
+          {addFundsRow}
+        </>
       )}
 
       {status.kind === 'connecting' && (
@@ -768,6 +830,7 @@ function PerpsKeySection() {
             Reset forgets this key on this device only — it stays registered on Lighter
             until you replace it with a new one.
           </p>
+          {addFundsRow}
         </div>
       )}
 

@@ -122,6 +122,25 @@ export async function getLighterPosition(accountIndex: number, marketId: number)
   }
 }
 
+// Current collateral + available (free) margin on a Lighter account. Used to pre-check an
+// open has enough margin before submitting — Lighter accepts the tx then silently fails to
+// fill an under-margined order, so without this the app would report a phantom "opened".
+export async function getLighterAccountBalance(accountIndex: number): Promise<{ collateralUsd: number; availableUsd: number } | null> {
+  try {
+    const res = await fetch(`${LIGHTER_BASE}/api/v1/account?by=index&value=${accountIndex}`)
+    if (!res.ok) return null
+    const data = (await res.json()) as { accounts?: Array<{ collateral?: string; available_balance?: string }> }
+    const a = data.accounts?.[0]
+    if (!a) return null
+    return {
+      collateralUsd: parseFloat(a.collateral ?? '0') || 0,
+      availableUsd: parseFloat(a.available_balance ?? '0') || 0,
+    }
+  } catch {
+    return null
+  }
+}
+
 export type SubmitTxResult = { ok: true } | { ok: false; code: number; message: string }
 
 // Wire format verified live this session: POST, form-urlencoded, tx_type + tx_info.

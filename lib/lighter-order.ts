@@ -7,6 +7,7 @@ import {
   getLighterNextNonce,
   submitLighterTx,
   getLighterPosition,
+  getLighterAccountBalance,
 } from './lighter-account'
 import { loadStoredKeyMeta, unlockPrivateKey, buildWrapMessage } from './lighter-key-storage'
 import { loadLighterSigner, createLighterClient, signCreateOrder, signUpdateLeverage } from './lighter-wasm-client'
@@ -128,6 +129,20 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
     }
     const baseAmount = Math.round(baseUnits * 10 ** market.sizeDecimals)
 
+    // Margin pre-check. Lighter ACCEPTS an under-margined order tx (200) but then never
+    // fills it — so without this the app would report a phantom "position opened". Refuse
+    // up front with a clear, honest reason instead.
+    const bal = await getLighterAccountBalance(meta.accountIndex)
+    if (bal && bal.availableUsd + 1e-6 < args.marginUsd) {
+      return {
+        ok: false,
+        error: `Not enough perps margin: your perps balance has $${bal.availableUsd.toFixed(2)} available, but this position needs $${args.marginUsd.toFixed(2)} of margin. Add funds to your perps account (Settings → Perps trading key → Add funds), or try a smaller size.`,
+      }
+    }
+    // Snapshot the position before the order so we can confirm it actually grew (filled).
+    const beforePos = await getLighterPosition(meta.accountIndex, market.marketId)
+    const beforeSigned = beforePos?.signedSize ?? 0
+
     // Market order needs a price cap (avg execution price): pay up to +slippage on a buy,
     // accept down to -slippage on a sell.
     const isAsk = args.side === 'short' ? 1 : 0
@@ -171,26 +186,34 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
       return { ok: false, error: orderResult.message }
     }
 
-    // Poll briefly for the real fill so the confirmation shows true entry/size rather than
-    // the pre-trade estimate. Market orders fill within a batch or two.
-    let avgPrice = priceCap
-    let baseFilled = baseUnits
-    for (let i = 0; i < 6; i++) {
+    // Poll for the position to actually reflect the fill — the order tx being accepted
+    // (200) does NOT mean it filled. Confirm the position grew in the intended direction;
+    // if it never does, the order did not fill and we must NOT report a phantom success.
+    let filled: Awaited<ReturnType<typeof getLighterPosition>> = null
+    for (let i = 0; i < 8; i++) {
       await new Promise((r) => setTimeout(r, 2500))
       const pos = await getLighterPosition(meta.accountIndex, market.marketId)
-      if (pos && Math.abs(pos.signedSize) > 0) {
-        avgPrice = pos.avgEntryPrice || avgPrice
-        baseFilled = Math.abs(pos.signedSize)
+      const nowSigned = pos?.signedSize ?? 0
+      const grew = isAsk ? nowSigned < beforeSigned - 1e-9 : nowSigned > beforeSigned + 1e-9
+      if (pos && grew) {
+        filled = pos
         break
+      }
+    }
+    if (!filled) {
+      return {
+        ok: false,
+        error:
+          "The order didn't fill — this usually means not enough margin in your perps account for this size, or thin liquidity right now. Nothing was opened. Add funds or try a smaller size/lower leverage.",
       }
     }
 
     return {
       ok: true,
       orderId: orderSigned.txHash,
-      avgPrice,
-      baseFilled,
-      notionalUsd: baseFilled * avgPrice,
+      avgPrice: filled.avgEntryPrice || priceCap,
+      baseFilled: Math.abs(filled.signedSize),
+      notionalUsd: Math.abs(filled.positionValue),
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : 'Order placement failed.' }
