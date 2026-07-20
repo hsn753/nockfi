@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { fetchWalletBalances } from '@/lib/get-balances'
 import { getStockBorrowPositions } from '@/lib/get-stock-collateral'
+import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getUnresolvedRiskEvents } from '@/lib/db/loan-risk'
 import { getWeeklyBaseline } from '@/lib/db/portfolio-snapshots'
@@ -27,25 +28,36 @@ async function handleGET(req: NextRequest) {
       // Collateral positions ride along with balances: stock posted as loan collateral is
       // still the user's asset (net of debt). Best-effort — a read failure here must not
       // take down the balances everything else depends on.
-      const [balances, collateralPositions, riskEvents, weeklyBaseline] = await Promise.all([
+      const [balances, collateralPositions, perps, riskEvents, weeklyBaseline] = await Promise.all([
         fetchWalletBalances(raw),
         getStockBorrowPositions(raw).catch((err) => {
           console.error('[/api/balances] Collateral positions fetch failed:', err)
           return []
         }),
+        // Perps (Lighter) account rides along too — its margin + open positions belong in
+        // the dashboard and portfolio total just like loan collateral. Best-effort.
+        getLighterPortfolio(raw).catch((err) => {
+          console.error('[/api/balances] Perps portfolio fetch failed:', err)
+          return null
+        }),
         wallet ? getUnresolvedRiskEvents(wallet.id).catch(() => []) : Promise.resolve([]),
         wallet ? getWeeklyBaseline(wallet.id).catch(() => null) : Promise.resolve(null),
       ])
 
+      // Perps equity (margin + unrealized PnL) counts toward the total; it left the wallet
+      // on deposit so it isn't double-counted. Open positions are leveraged exposure, listed
+      // separately, not added.
+      const perpsEquity = perps?.hasAccount ? perps.equityUsd : 0
       const currentTotal =
         balances.reduce((s, b) => s + (b.usdValue ?? 0), 0) +
-        collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+        collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0) +
+        perpsEquity
       const weeklyChangePct =
         weeklyBaseline !== null && weeklyBaseline > 0
           ? ((currentTotal - weeklyBaseline) / weeklyBaseline) * 100
           : null
 
-      return { balances, collateralPositions, riskEvents, weeklyChangePct }
+      return { balances, collateralPositions, perps, riskEvents, weeklyChangePct }
     })
 
     return NextResponse.json(data)

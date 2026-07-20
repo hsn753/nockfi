@@ -158,7 +158,11 @@ export function NockApp() {
     if (!walletAddress) return null
     try {
       console.log('[Nock] Fetching balances for portfolio value...')
-      const res = await fetch(`/api/balances?address=${walletAddress}`)
+      // Balances (incl. perps) + yield positions in parallel — both cached server-side.
+      const [res, yieldRes] = await Promise.all([
+        fetch(`/api/balances?address=${walletAddress}`),
+        fetch(`/api/yield-positions?address=${walletAddress}`).catch(() => null),
+      ])
 
       if (!res.ok) {
         console.error('[Nock] Balance fetch failed:', res.status)
@@ -167,6 +171,16 @@ export function NockApp() {
 
       const data = await res.json()
       console.log('[Nock] Balances received:', data.balances)
+
+      // Live yield (Morpho) supply positions for the dashboard — best-effort.
+      type YieldPos = { market: string; suppliedUsd: number; apyPct: number | null }
+      const yieldPositions: YieldPos[] =
+        yieldRes && yieldRes.ok ? ((await yieldRes.json())?.positions ?? []) : []
+
+      // Perps (Lighter) account, folded in by /api/balances.
+      type PerpsPos = { symbol: string; side: 'long' | 'short'; notionalUsd: number; leverage: number | null; unrealizedPnlUsd: number }
+      const perps: { hasAccount?: boolean; equityUsd?: number; positions?: PerpsPos[] } | null = data.perps ?? null
+      const perpsEquity = perps?.hasAccount ? (perps.equityUsd ?? 0) : 0
 
       const walletTotal = (data.balances || []).reduce(
         (sum: number, b: { usdValue?: number | null }) => sum + (b.usdValue ?? 0),
@@ -189,10 +203,14 @@ export function NockApp() {
       }
       const loans: LoanPos[] = data.collateralPositions || []
       const netCollateral = loans.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
-      const total = walletTotal + netCollateral
+      const total = walletTotal + netCollateral + perpsEquity
 
       setPositions((prev) => {
-        const withoutLoans = prev.filter((p) => !p.id.startsWith('loan-'))
+        // Rebuild the real, on-chain-derived cards (loan / perps / yield) from fresh data
+        // each refresh so they PERSIST across reloads; keep any other cards untouched.
+        const kept = prev.filter(
+          (p) => !p.id.startsWith('loan-') && !p.id.startsWith('perps-') && !p.id.startsWith('yield-'),
+        )
         const loanCards: Position[] = loans.map((p) => ({
           id: `loan-${p.stockSymbol}`,
           agent: 'stock' as AgentId,
@@ -202,7 +220,25 @@ export function NockApp() {
           meta: `${p.ltvUtilizationPct.toFixed(0)}% of liquidation ceiling`,
           metaPositive: p.ltvUtilizationPct < 80,
         }))
-        return [...loanCards, ...withoutLoans]
+        const perpsCards: Position[] = (perps?.positions ?? []).map((p) => ({
+          id: `perps-${p.symbol}`,
+          agent: 'perps' as AgentId,
+          title: `${p.symbol} ${p.side === 'short' ? 'short' : 'long'} — $${p.notionalUsd.toFixed(2)} notional`,
+          subtitle: `${p.leverage ? `${p.leverage}x · ` : ''}Perps agent · active`,
+          value: `${p.unrealizedPnlUsd >= 0 ? '+' : '−'}$${Math.abs(p.unrealizedPnlUsd).toFixed(2)} PnL`,
+          meta: p.leverage ? `${p.leverage}x leverage` : 'perpetual',
+          metaPositive: p.unrealizedPnlUsd >= 0,
+        }))
+        const yieldCards: Position[] = yieldPositions.map((p) => ({
+          id: `yield-${p.market}`,
+          agent: 'yield' as AgentId,
+          title: `${p.market} — $${p.suppliedUsd.toFixed(2)} supplied`,
+          subtitle: `Yield agent · active`,
+          value: `$${p.suppliedUsd.toFixed(2)}`,
+          meta: p.apyPct != null ? `${p.apyPct.toFixed(2)}% APY` : 'earning',
+          metaPositive: true,
+        }))
+        return [...perpsCards, ...loanCards, ...yieldCards, ...kept]
       })
       setAttention((prev) => {
         const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-') && !a.id.startsWith('loan-event-'))
@@ -605,27 +641,31 @@ export function NockApp() {
               ? `Done — ${perps.symbol} position closed at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`
               : `Done — ${perps.side === 'short' ? 'short' : 'long'} position opened on ${perps.symbol} at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`,
           }
+          // Optimistic card using the SAME id format (perps-<symbol>) that
+          // fetchPortfolioValue rebuilds from real on-chain data, so there's no duplicate
+          // and it persists across refresh once the real read lands.
+          const sym = String(perps.symbol)
           if (perps.reduceOnly) {
-            // A close removes the open perps position card rather than adding one. Match by
-            // symbol on the subtitle/title so a stale card for this market clears.
-            const sym = String(perps.symbol).toUpperCase()
-            setPositions((p) => p.filter((x) => !(x.agent === 'perps' && `${x.title} ${x.meta}`.toUpperCase().includes(sym))))
+            setPositions((p) => p.filter((x) => x.id !== `perps-${sym}`))
           } else {
             const newPosition: Position = {
-              id: `pos-${actionId}`,
+              id: `perps-${sym}`,
               agent: 'perps',
-              title: action.outcome.title,
-              subtitle: `${agent.name} · active`,
-              value: action.outcome.value,
-              meta: action.outcome.meta,
+              title: `${sym} ${perps.side === 'short' ? 'short' : 'long'} — $${Number(data.notionalUsd).toFixed(2)} notional`,
+              subtitle: `${perps.leverage ? `${perps.leverage}x · ` : ''}${agent.name} · active`,
+              value: '+$0.00 PnL',
+              meta: perps.leverage ? `${perps.leverage}x leverage` : 'perpetual',
               metaPositive: true,
             }
-            setPositions((p) => (p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p]))
+            setPositions((p) => [newPosition, ...p.filter((x) => x.id !== `perps-${sym}`)])
           }
           setAttention((att) => att.filter((x) => x.agent !== 'perps'))
           return [...updated, confirm]
         })
+        // Refresh from real data shortly after — the balances cache (15s) needs a beat to
+        // reflect the new/closed position; the optimistic card above covers the gap.
         fetchPortfolioValue()
+        setTimeout(() => { void fetchPortfolioValue() }, 16_000)
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
         setMessages((prev) => [
