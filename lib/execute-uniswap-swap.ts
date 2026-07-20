@@ -1,3 +1,4 @@
+import { cleanTxError } from './tx-error'
 import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits } from 'viem'
 import { UNISWAP_V4 } from './get-uniswap-quote'
 import { resolveSendGasPrice } from './gas'
@@ -127,7 +128,7 @@ export async function executeUniswapV4Swap({
 
     return { txHash }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
+    const message = cleanTxError(error)
     return { txHash: '0x' as Hash, error: message }
   }
 }

@@ -176,7 +176,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
           {messages.map((m, idx) =>
             m.role === 'user' ? (
               <div key={m.id} className="flex justify-end">
-                <div className="max-w-[82%] rounded-2xl rounded-br-md bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
+                <div className="max-w-[82%] overflow-hidden break-words [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-secondary px-4 py-3 text-[15px] leading-relaxed text-foreground">
                   {renderMessageText(m.text)}
                 </div>
               </div>
@@ -184,7 +184,7 @@ export function ChatPanel({ messages, onSend, onDraw, onLoose, onNewChat, isLoad
               <div key={m.id} className="flex gap-3">
                 <RobinAvatar className="mt-1 size-8 shrink-0" />
                 <div className="min-w-0 max-w-[88%]">
-                  <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground">
+                  <div className="overflow-hidden break-words [overflow-wrap:anywhere] rounded-2xl rounded-tl-md bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground">
                     {renderMessageText(m.text)}
                   </div>
                   {m.action && (

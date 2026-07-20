@@ -10,6 +10,7 @@ import {
   getLighterAccountBalance,
 } from './lighter-account'
 import { loadStoredKeyMeta, unlockPrivateKey, buildWrapMessage } from './lighter-key-storage'
+import { cleanTxError } from './tx-error'
 import { loadLighterSigner, createLighterClient, signCreateOrder, signUpdateLeverage, signWithdraw } from './lighter-wasm-client'
 
 // Phase 4 — client-side perps order placement. The whole point of the non-custodial
@@ -108,7 +109,7 @@ export async function withdrawPerpsFunds(args: {
     if (!res.ok) return { ok: false, error: res.message }
     return { ok: true }
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Withdrawal failed.' }
+    return { ok: false, error: cleanTxError(err) }
   }
 }
 
@@ -295,6 +296,6 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
       notionalUsd: Math.abs(filled.positionValue),
     }
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Order placement failed.' }
+    return { ok: false, error: cleanTxError(err) }
   }
 }

@@ -1,4 +1,5 @@
 import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits } from 'viem'
+import { cleanTxError } from './tx-error'
 
 // Deposits USDG from the connected wallet into Lighter's escrow contract on Robinhood
 // Chain — the on-chain step that both CREATES a Lighter trading account for a new L1
@@ -96,7 +97,6 @@ export async function executeLighterDeposit({
 
     return { txHash: depositHash }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
-    return { txHash: '0x' as Hash, error: message }
+    return { txHash: '0x' as Hash, error: cleanTxError(error) }
   }
 }

@@ -1,3 +1,4 @@
+import { cleanTxError } from './tx-error'
 import { type Hash, type WalletClient, type PublicClient, erc20Abi } from 'viem'
 import type { CollateralStep } from './get-stock-collateral'
 import { resolveSendGasPrice } from './gas'
@@ -80,7 +81,7 @@ export async function executeCollateralSequence({
 
     return { txHash: lastHash }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
+    const message = cleanTxError(error)
     return { txHash: '0x' as Hash, error: message }
   }
 }
