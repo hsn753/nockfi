@@ -6,6 +6,10 @@ export const dynamic = 'force-dynamic'
 
 const BLOCKSCOUT_BASE = 'https://robinhoodchain.blockscout.com'
 const ZEROX_ROUTER = '0x0000000000001ff3684f28c67538d4d072c22734'
+// Lighter's escrow contract — on-chain deposits into a perps account go here. (Perps
+// TRADES and WITHDRAWALS are Lighter L2 txs, not wallet on-chain history, so they don't
+// appear in this feed; the withdrawal shows later as an incoming USDG transfer instead.)
+const LIGHTER_ESCROW = '0x94bab9693ba2f6358507effcbd372b0660afff9d'
 
 export type ActivityEntry = {
   hash: string
@@ -37,6 +41,9 @@ function describeTransaction(tx: BlockscoutTx, address: string): { label: string
 
   if (toAddr === ZEROX_ROUTER) {
     return { label: 'Swap', detail: valueEth > 0 ? `${valueEth.toLocaleString('en-US', { maximumFractionDigits: 6 })} ETH sold` : 'Token sale' }
+  }
+  if (toAddr === LIGHTER_ESCROW) {
+    return { label: 'Perps deposit', detail: 'USDG added to your perps account' }
   }
   if (tx.method === 'approve') {
     return { label: 'Approved token spend', detail: 'Allowance granted to swap router' }

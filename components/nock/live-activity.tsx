@@ -42,26 +42,41 @@ export function LiveActivity() {
     }
 
     let cancelled = false
-    setLoading(true)
-    setFetchError(false)
 
-    fetch(`/api/activity?address=${encodeURIComponent(address)}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json() as Promise<{ activity: ActivityEntry[] }>
-      })
-      .then(({ activity: data }) => {
-        if (!cancelled) setActivity(data)
-      })
-      .catch(() => {
-        if (!cancelled) setFetchError(true)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    // Fetch now, then poll so the feed stays current without a page reload — it fetched
+    // only once on mount before, so anything done after opening the tab never appeared.
+    const load = (isFirst: boolean) => {
+      if (isFirst) {
+        setLoading(true)
+        setFetchError(false)
+      }
+      fetch(`/api/activity?address=${encodeURIComponent(address)}`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          return res.json() as Promise<{ activity: ActivityEntry[] }>
+        })
+        .then(({ activity: data }) => {
+          if (!cancelled) {
+            setActivity(data)
+            setFetchError(false)
+          }
+        })
+        .catch(() => {
+          // Only surface an error on the very first load; a failed background poll keeps
+          // the last good data on screen rather than flashing an error.
+          if (!cancelled && isFirst) setFetchError(true)
+        })
+        .finally(() => {
+          if (!cancelled && isFirst) setLoading(false)
+        })
+    }
+
+    load(true)
+    const interval = setInterval(() => load(false), 20_000)
 
     return () => {
       cancelled = true
+      clearInterval(interval)
     }
   }, [ready, authenticated, address])
 
