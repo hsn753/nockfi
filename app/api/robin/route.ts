@@ -667,7 +667,12 @@ async function handlePOST(request: Request) {
     // never reachable after a data-fetching tool call, so no action card ever appeared.
     for (let round = 0; round < 6; round++) {
       const response = await getOpenAI().chat.completions.create({
-        model: 'gpt-4o-mini',
+        // Upgraded from gpt-4o-mini (2026-07-20): mini was unreliable at tool routing
+        // (the whole reason for the many deterministic backstops below) — e.g. it routed
+        // "withdraw from my perp account" to the yield path for some phrasings. gpt-4o is
+        // far stronger here. Costs more per token but per-conversation cost stays small.
+        // Revert to 'gpt-4o-mini' here if cost becomes a concern (backstops still hold).
+        model: 'gpt-4o',
         messages: openaiMessages,
         tools: TOOLS,
         tool_choice: 'auto',
