@@ -10,7 +10,7 @@ import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED } from '@/lib/feature-flags'
 import { nockChain } from '@/lib/chain'
-import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLighterNextNonce, submitLighterTx, LIGHTER_BASE, LIGHTER_CHAIN_ID } from '@/lib/lighter-account'
+import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLighterNextNonce, submitLighterTx, getLighterAccountBalance, LIGHTER_BASE, LIGHTER_CHAIN_ID } from '@/lib/lighter-account'
 import { loadStoredKeyMeta, clearStoredKey, wrapAndStore, buildWrapMessage } from '@/lib/lighter-key-storage'
 import { loadLighterSigner, generateApiKey, createLighterClient, signChangePubKey } from '@/lib/lighter-wasm-client'
 import { executeLighterDeposit } from '@/lib/lighter-deposit'
@@ -526,7 +526,30 @@ function PerpsKeySection() {
   const [wdAmount, setWdAmount] = useState('')
   const [wdBusy, setWdBusy] = useState(false)
   const [wdDone, setWdDone] = useState(false)
+  const [perpsBalance, setPerpsBalance] = useState<{ collateralUsd: number; availableUsd: number } | null>(null)
   const [error, setError] = useState('')
+
+  // Live perps-account balance (margin) so the user can see how much they hold before
+  // adding/withdrawing. Refreshed on connect and after each add/withdraw.
+  const accountIndex = status.kind === 'connected' ? status.accountIndex : null
+  const refreshPerpsBalance = async () => {
+    if (accountIndex == null) return
+    const bal = await getLighterAccountBalance(accountIndex)
+    setPerpsBalance(bal)
+  }
+  useEffect(() => {
+    if (accountIndex == null) {
+      setPerpsBalance(null)
+      return
+    }
+    let cancelled = false
+    getLighterAccountBalance(accountIndex).then((bal) => {
+      if (!cancelled) setPerpsBalance(bal)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [accountIndex])
 
   useEffect(() => {
     if (!walletAddress) return
@@ -687,6 +710,8 @@ function PerpsKeySection() {
       if (result.error) throw new Error(result.error)
       setAddAmount('')
       setAddDone(true)
+      void refreshPerpsBalance()
+      setTimeout(() => { void refreshPerpsBalance() }, 30_000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong')
     } finally {
@@ -709,6 +734,8 @@ function PerpsKeySection() {
       if (!result.ok) throw new Error(result.error)
       setWdAmount('')
       setWdDone(true)
+      void refreshPerpsBalance()
+      setTimeout(() => { void refreshPerpsBalance() }, 30_000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong')
     } finally {
@@ -874,6 +901,18 @@ function PerpsKeySection() {
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <span className="size-1.5 rounded-full bg-primary" />
               Connected
+            </span>
+          </div>
+          <div className="mt-2.5 flex items-baseline justify-between gap-3 rounded-lg bg-background/40 px-3 py-2">
+            <span className="text-xs text-muted-foreground">Perps margin balance</span>
+            <span className="text-sm text-foreground">
+              {perpsBalance
+                ? `$${perpsBalance.collateralUsd.toFixed(2)}${
+                    perpsBalance.availableUsd < perpsBalance.collateralUsd - 0.005
+                      ? ` · $${perpsBalance.availableUsd.toFixed(2)} free`
+                      : ''
+                  }`
+                : '—'}
             </span>
           </div>
           <button

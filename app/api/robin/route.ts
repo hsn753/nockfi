@@ -1903,11 +1903,17 @@ async function handlePOST(request: Request) {
     // tool returns — the model cannot be the source of market data.
     if (!action && !perpsInfoCalled) {
       const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      // Managing perps FUNDS or POSITIONS (withdraw / deposit / add funds / balance /
+      // close) is NOT a market-data question — the backstop must not hijack those replies
+      // with a market list (seen live: "withdraw $5 from perpetual" got a markets dump).
+      const isFundsOrPositionIntent =
+        lastUser && /\b(withdraw|withdrawal|deposit|add funds|take out|cash out|balance|close|reduce|my (position|short|long)|how much)\b/i.test(lastUser.text)
       // Both sides must look perps-shaped: the user asked about perps AND the
       // model's reply talks perps (i.e. it answered the topic without the tool).
       // A passing mention ("forget perps, what do I hold") keeps its real answer.
       if (
-        lastUser && /\bperps?\b|\bperpetuals?\b|\bfutures\b|\bfunding rate/i.test(lastUser.text) &&
+        lastUser && !isFundsOrPositionIntent &&
+        /\bperps?\b|\bperpetuals?\b|\bfutures\b|\bfunding rate/i.test(lastUser.text) &&
         /perp|futures|leverage|funding|mark price/i.test(responseText)
       ) {
         try {
