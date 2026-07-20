@@ -39,6 +39,9 @@ export type PlacePerpsOrderArgs = {
   // When true, CLOSE the existing position at market (reduce-only). marginUsd/leverage
   // are ignored — the full current position size is closed in the opposite direction.
   reduceOnly?: boolean
+  // Fraction (0-1) of the position to close when reduceOnly. Omitted/>=1 = full close;
+  // e.g. 0.5 trims half. Below the venue min it's rejected with a clear message.
+  reducePct?: number
 }
 
 export type PlacePerpsOrderResult =
@@ -142,14 +145,31 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
     const slip = (args.maxSlippageBps ?? 50) / 1e4
     createLighterClient(LIGHTER_BASE, privateKey, LIGHTER_CHAIN_ID, meta.apiKeyIndex, meta.accountIndex)
 
-    // --- CLOSE / reduce-only: sell the full existing position at market, opposite side ---
+    // --- CLOSE / reduce-only: sell the existing position at market, opposite side. A
+    //     reducePct < 1 trims only part of it (partial close / take some off). ---
     if (args.reduceOnly) {
       const pos = await getLighterPosition(meta.accountIndex, market.marketId)
       if (!pos || Math.abs(pos.signedSize) === 0) {
         return { ok: false, error: `You have no open ${args.symbol} position to close.` }
       }
       const closeIsAsk = pos.signedSize > 0 ? 1 : 0 // long -> sell to close
-      const baseAmount = Math.round(Math.abs(pos.signedSize) * 10 ** market.sizeDecimals)
+      const fullSize = Math.abs(pos.signedSize)
+      const fraction = args.reducePct != null ? Math.min(1, Math.max(0, args.reducePct)) : 1
+      const fullBaseAmount = Math.round(fullSize * 10 ** market.sizeDecimals)
+      let baseAmount = fraction >= 1 ? fullBaseAmount : Math.round(fullSize * fraction * 10 ** market.sizeDecimals)
+      const minBaseAmount = Math.round(market.minBaseAmount * 10 ** market.sizeDecimals)
+      if (baseAmount <= 0) {
+        return { ok: false, error: 'That amount is too small to close.' }
+      }
+      // A partial close below the venue minimum can't be placed — tell them to trim more
+      // or close fully. (A full close is always allowed even if the position < min.)
+      if (fraction < 1 && baseAmount < minBaseAmount) {
+        return {
+          ok: false,
+          error: `That's below Lighter's minimum order size (${market.minBaseAmount} ${args.symbol}). Close a larger amount, or close the whole position.`,
+        }
+      }
+      if (baseAmount > fullBaseAmount) baseAmount = fullBaseAmount
       const priceCap = args.markPrice * (closeIsAsk ? 1 - slip : 1 + slip)
       const price = Math.round(priceCap * 10 ** market.priceDecimals)
       const nonce = await getLighterNextNonce(meta.accountIndex, meta.apiKeyIndex)
@@ -167,12 +187,13 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
       })
       const res = await submitLighterTx(signed.txType, signed.txInfo)
       if (!res.ok) return { ok: false, error: res.message }
+      const closedSize = baseAmount / 10 ** market.sizeDecimals
       return {
         ok: true,
         orderId: signed.txHash,
         avgPrice: pos.avgEntryPrice || priceCap,
-        baseFilled: Math.abs(pos.signedSize),
-        notionalUsd: Math.abs(pos.positionValue),
+        baseFilled: closedSize,
+        notionalUsd: Math.abs(pos.positionValue) * (closedSize / fullSize),
       }
     }
 

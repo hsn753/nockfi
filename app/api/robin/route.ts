@@ -260,7 +260,7 @@ When the user wants to withdraw supplied USDG:
 
 When the user asks to actually open a perps position: first call get_perps_info to get the real current market data (mark price, funding, max leverage). Then call propose_action for the perps agent, INCLUDING the structured 'perps' object (symbol, side, marginUsd, leverage, markPrice) built from that live data. The system applies a jurisdiction + eligibility gate and returns a result in the tool call — follow it exactly. It may tell you: perps aren't available in the user's region (say so plainly — it's a regulatory restriction, not a bug — and offer what Nock does support for them: tokenized stocks for market exposure, token swaps, and yield); OR that execution is launching soon (present the live Lighter data as informational and say opening a position is coming soon for eligible regions); OR a 'preview_ready' status, which means a preview CARD was built — tell the user to review it and press Confirm to place the order (the order is NOT placed until they Confirm). Do NOT claim the position is open on a preview_ready result — placing happens on Confirm, and the app posts its own confirmation afterward. Never fabricate a fill.
 
-When the user asks to CLOSE or reduce an existing perps position: FIRST call get_wallet_holdings to read their real open positions (the 'perps' object). If they have no open position in that market, tell them so — do not propose anything. Otherwise call propose_action for the perps agent with the 'perps' object set to { symbol, side (the EXISTING position's direction — long or short), markPrice (from get_perps_info or the position), reduceOnly: true } and OMIT marginUsd/leverage — the whole position is closed at market. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation after it fills. Never claim it's closed before Confirm, and never fabricate the closing fill.
+When the user asks to CLOSE or reduce an existing perps position: FIRST call get_wallet_holdings to read their real open positions (the 'perps' object). If they have no open position in that market, tell them so — do not propose anything. Otherwise call propose_action for the perps agent with the 'perps' object set to { symbol, side (the EXISTING position's direction — long or short), markPrice (from get_perps_info or the position), reduceOnly: true } and OMIT marginUsd/leverage — the whole position is closed at market. For a PARTIAL close (e.g. "close half", "trim 25%", "take $10 off"), also include reducePct (0-1): half = 0.5, a quarter = 0.25, or for a dollar amount pct = amount ÷ the position notional. Omitting reducePct closes the whole position. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation after it fills. Never claim it's closed before Confirm, and never fabricate the closing fill.
 
 CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. ROUTING (important): a deposit/withdraw/add-funds/take-out request that mentions PERPS or PERPETUAL (or "perps account", "perps balance", "perps margin") is a PERPS FUNDS ACTION described here — it is NOT a yield-market withdrawal. get_yield_withdraw_quote is ONLY for pulling USDG out of a Morpho YIELD market (USDe / syrupUSDG / spUSDG); never use it, or a yield market, for a perps withdrawal. To move USDG between the wallet and the perps account, the user DEPOSITS (wallet → perps) or WITHDRAWS (perps → wallet) — opening a position never converts perps margin back to the wallet, so never suggest that. You CAN do both from chat: call propose_action for the perps agent with the 'perps' object set to { fundsAction: 'deposit', amountUsdg: N } to add margin, or { fundsAction: 'withdraw', amountUsdg: N } to take it out — OMIT symbol/side/markPrice/leverage for a funds action. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation. A deposit moves USDG from their wallet into the perps account; a withdraw returns free margin to their wallet (margin backing an open position must be freed by closing first, and a withdraw settles to the wallet in a few minutes, not instantly). They can also do both in Settings → Perps trading key. Never fabricate a deposit/withdraw confirmation — it only happens on Confirm.
 
@@ -313,6 +313,7 @@ type ProposeActionInput = {
     leverage: number
     markPrice: number
     reduceOnly?: boolean
+    reducePct?: number
     fundsAction?: 'deposit' | 'withdraw'
     amountUsdg?: number
   }
@@ -576,7 +577,8 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               marginUsd: { type: 'number', description: 'Margin to post, in USD. Required to OPEN; omit when reduceOnly is true.' },
               leverage: { type: 'number', description: 'Leverage multiple, e.g. 3. Required to OPEN; omit when reduceOnly is true.' },
               markPrice: { type: 'number', description: 'Current mark price from get_perps_info. Needed for opening/closing a position; omit for deposit/withdraw.' },
-              reduceOnly: { type: 'boolean', description: 'TRUE when CLOSING or reducing an existing position. The whole position is closed at market; marginUsd and leverage are NOT needed. Get the position from get_wallet_holdings first.' },
+              reduceOnly: { type: 'boolean', description: 'TRUE when CLOSING or reducing an existing position. marginUsd and leverage are NOT needed. Get the position from get_wallet_holdings first.' },
+              reducePct: { type: 'number', description: 'With reduceOnly: fraction of the position to close, 0-1 (e.g. 0.5 = close half, 0.25 = a quarter). Omit or 1 = close the whole position. For a dollar amount, compute pct = amount / the position notional.' },
               fundsAction: { type: 'string', enum: ['deposit', 'withdraw'], description: "Set when the user wants to MOVE MARGIN (not trade): 'deposit' adds USDG from their wallet into their perps account; 'withdraw' returns free margin from the perps account to their wallet. Also set amountUsdg. Do NOT set symbol/side/markPrice/leverage for a funds action." },
               amountUsdg: { type: 'number', description: 'USDG amount for a deposit/withdraw funds action.' },
             },
@@ -790,6 +792,7 @@ async function handlePOST(request: Request) {
                   leverage: input.perps.leverage,
                   markPrice: input.perps.markPrice,
                   reduceOnly: input.perps.reduceOnly ?? false,
+                  reducePct: input.perps.reducePct,
                   maxSlippageBps: 50,
                 },
               } as any
@@ -2109,6 +2112,66 @@ async function handlePOST(request: Request) {
           }
         } catch (e) {
           console.error('[robin] perps-open backstop failed:', e)
+        }
+      }
+    }
+
+    // Deterministic perps PARTIAL-CLOSE backstop — "close half my SUI", "take $10 off my BTC
+    // short", "reduce my position by 25%". If no card was built and it's a partial-reduce
+    // intent, compute the fraction from the real position and build a reduceOnly card.
+    if (!action) {
+      const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      const txt = (lastUser?.text || '').toString()
+      const reduceIntent = /\b(close|reduce|trim|cut|lower|decrease|take)\b/i.test(txt)
+      const pctMatch = txt.match(/(\d+(?:\.\d+)?)\s*%/)
+      const halfWord = /\bhalf\b/i.test(txt)
+      const quarterWord = /\bquarter\b/i.test(txt)
+      const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
+      const hasPartial = !!(pctMatch || halfWord || quarterWord || dollarMatch)
+      const isFundsWord = /\b(withdraw|deposit|add funds|top up)\b/i.test(txt)
+      if (reduceIntent && hasPartial && !isFundsWord && walletAddress && isAddress(walletAddress)) {
+        try {
+          const geo = await resolvePerpsGeo(request)
+          if (geo.source !== 'unknown' && geo.allowed && PERPS_ENABLED) {
+            const lighter = await getLighterPortfolio(walletAddress)
+            if (lighter.hasAccount && lighter.positions.length > 0) {
+              const upper = txt.toUpperCase()
+              let pos = lighter.positions.find((p) => new RegExp(`\\b${p.symbol}\\b`).test(upper))
+              if (!pos && lighter.positions.length === 1) pos = lighter.positions[0]
+              if (pos) {
+                let reducePct = 1
+                if (pctMatch) reducePct = parseFloat(pctMatch[1]) / 100
+                else if (halfWord) reducePct = 0.5
+                else if (quarterWord) reducePct = 0.25
+                else if (dollarMatch && pos.notionalUsd > 0) reducePct = parseFloat(dollarMatch[1]) / pos.notionalUsd
+                reducePct = Math.min(1, Math.max(0.0001, reducePct))
+                const markPrice = pos.size > 0 ? pos.notionalUsd / pos.size : 0
+                const pctLabel = reducePct >= 0.999 ? 'all' : `${Math.round(reducePct * 100)}%`
+                const closedNotional = pos.notionalUsd * reducePct
+                const notionalStr = `$${closedNotional.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+                action = {
+                  id: `act-${Date.now()}`,
+                  agent: 'perps',
+                  action: `Close ${pctLabel} of ${pos.symbol} ${pos.side}`,
+                  detail: `Closes ${pctLabel} of your ${pos.symbol} ${pos.side} position (~${notionalStr} notional) at market price.`,
+                  metrics: [
+                    { label: 'Closing', value: pctLabel },
+                    { label: 'Position', value: `${pos.symbol} ${pos.side}` },
+                    { label: 'Notional', value: notionalStr },
+                  ],
+                  status: 'pending',
+                  outcome: { title: `Close ${pctLabel} of ${pos.symbol}`, value: notionalStr, meta: `${pos.symbol} ${pos.side}`, activityTitle: 'Perps reduce' },
+                  routeVia: 'perps',
+                  perps: { symbol: pos.symbol, side: pos.side, markPrice, reduceOnly: true, reducePct, maxSlippageBps: 50 },
+                } as any
+                responseText = `Here's the preview to close ${pctLabel} of your ${pos.symbol} ${pos.side}. Press Confirm to reduce it, or Review first.`
+              }
+            } else {
+              responseText = 'You have no open perps positions to reduce.'
+            }
+          }
+        } catch (e) {
+          console.error('[robin] perps partial-close backstop failed:', e)
         }
       }
     }

@@ -698,6 +698,7 @@ export function NockApp() {
             markPrice: Number(perps.markPrice),
             maxSlippageBps: perps.maxSlippageBps,
             reduceOnly: !!perps.reduceOnly,
+            reducePct: perps.reducePct,
           })
           if (!result.ok) throw new Error(result.error)
           data = result
@@ -718,16 +719,21 @@ export function NockApp() {
             id: `${Date.now()}-c`,
             role: 'robin',
             text: perps.reduceOnly
-              ? `Done — ${perps.symbol} position closed at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`
+              ? (perps.reducePct != null && perps.reducePct < 0.999
+                  ? `Done — trimmed your ${perps.symbol} position by ${Math.round(perps.reducePct * 100)}% (~${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG). Order ${String(data.orderId).slice(0, 12)}…`
+                  : `Done — ${perps.symbol} position closed at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`)
               : `Done — ${perps.side === 'short' ? 'short' : 'long'} position opened on ${perps.symbol} at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`,
           }
           // Optimistic card using the SAME id format (perps-<symbol>) that
           // fetchPortfolioValue rebuilds from real on-chain data, so there's no duplicate
           // and it persists across refresh once the real read lands.
           const sym = String(perps.symbol)
-          if (perps.reduceOnly) {
+          const isPartialClose = perps.reduceOnly && perps.reducePct != null && perps.reducePct < 0.999
+          if (perps.reduceOnly && !isPartialClose) {
+            // Full close — drop the card. A partial close leaves the position open, so keep
+            // the card and let fetchPortfolioValue (below) refresh it to the reduced size.
             setPositions((p) => p.filter((x) => x.id !== `perps-${sym}`))
-          } else {
+          } else if (!perps.reduceOnly) {
             const newPosition: Position = {
               id: `perps-${sym}`,
               agent: 'perps',
