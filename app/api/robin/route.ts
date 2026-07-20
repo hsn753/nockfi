@@ -261,7 +261,7 @@ When the user asks to actually open a perps position: first call get_perps_info 
 
 When the user asks to CLOSE or reduce an existing perps position: FIRST call get_wallet_holdings to read their real open positions (the 'perps' object). If they have no open position in that market, tell them so — do not propose anything. Otherwise call propose_action for the perps agent with the 'perps' object set to { symbol, side (the EXISTING position's direction — long or short), markPrice (from get_perps_info or the position), reduceOnly: true } and OMIT marginUsd/leverage — the whole position is closed at market. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation after it fills. Never claim it's closed before Confirm, and never fabricate the closing fill.
 
-CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. To actually move USDG from the perps account to the wallet, the user WITHDRAWS. You cannot place a withdrawal yourself and opening a position does NOT convert perps margin back to the wallet — never suggest that. When a user asks to withdraw perps funds / take money out of perps / move USDG from perps to wallet: tell them to do it in Settings → Perps trading key → "Withdraw margin to your wallet" (enter the amount, it signs and returns the free margin to their connected wallet; margin backing an open position must be freed by closing first). They can also add margin there ("Add funds"). Depositing to CREATE/fund a perps account also happens in that same Settings section.
+CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. To move USDG between the wallet and the perps account, the user DEPOSITS (wallet → perps) or WITHDRAWS (perps → wallet) — opening a position never converts perps margin back to the wallet, so never suggest that. You CAN do both from chat: call propose_action for the perps agent with the 'perps' object set to { fundsAction: 'deposit', amountUsdg: N } to add margin, or { fundsAction: 'withdraw', amountUsdg: N } to take it out — OMIT symbol/side/markPrice/leverage for a funds action. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation. A deposit moves USDG from their wallet into the perps account; a withdraw returns free margin to their wallet (margin backing an open position must be freed by closing first, and a withdraw settles to the wallet in a few minutes, not instantly). They can also do both in Settings → Perps trading key. Never fabricate a deposit/withdraw confirmation — it only happens on Confirm.
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
@@ -312,6 +312,8 @@ type ProposeActionInput = {
     leverage: number
     markPrice: number
     reduceOnly?: boolean
+    fundsAction?: 'deposit' | 'withdraw'
+    amountUsdg?: number
   }
 }
 
@@ -572,10 +574,12 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               side: { type: 'string', enum: ['long', 'short'], description: 'For an OPEN: the direction. For a CLOSE (reduceOnly true): the direction of the EXISTING position being closed.' },
               marginUsd: { type: 'number', description: 'Margin to post, in USD. Required to OPEN; omit when reduceOnly is true.' },
               leverage: { type: 'number', description: 'Leverage multiple, e.g. 3. Required to OPEN; omit when reduceOnly is true.' },
-              markPrice: { type: 'number', description: 'Current mark price from get_perps_info' },
+              markPrice: { type: 'number', description: 'Current mark price from get_perps_info. Needed for opening/closing a position; omit for deposit/withdraw.' },
               reduceOnly: { type: 'boolean', description: 'TRUE when CLOSING or reducing an existing position. The whole position is closed at market; marginUsd and leverage are NOT needed. Get the position from get_wallet_holdings first.' },
+              fundsAction: { type: 'string', enum: ['deposit', 'withdraw'], description: "Set when the user wants to MOVE MARGIN (not trade): 'deposit' adds USDG from their wallet into their perps account; 'withdraw' returns free margin from the perps account to their wallet. Also set amountUsdg. Do NOT set symbol/side/markPrice/leverage for a funds action." },
+              amountUsdg: { type: 'number', description: 'USDG amount for a deposit/withdraw funds action.' },
             },
-            required: ['symbol', 'markPrice'],
+            required: [],
           },
         },
         required: ['agent', 'action', 'detail', 'metrics', 'outcome'],
@@ -715,6 +719,29 @@ async function handlePOST(request: Request) {
               }
             } else if (!input.perps) {
               result = { error: "Missing structured perps order parameters. Call get_perps_info first, then include the 'perps' object in propose_action." }
+            } else if (input.perps.fundsAction === 'deposit' || input.perps.fundsAction === 'withdraw') {
+              // FUNDS MOVEMENT (deposit / withdraw) — build a preview card; the client
+              // executes it on Confirm (deposit = on-chain USDG -> escrow; withdraw =
+              // browser-signed Lighter withdraw). Same geofence as trading (gated above).
+              if (!(Number(input.perps.amountUsdg) > 0)) {
+                result = { error: 'A positive amountUsdg is required for a deposit/withdraw.' }
+              } else {
+                action = {
+                  id: `act-${Date.now()}`,
+                  agent: 'perps',
+                  action: input.action,
+                  detail: input.detail,
+                  metrics: input.metrics,
+                  status: 'pending',
+                  outcome: input.outcome,
+                  routeVia: 'perps',
+                  perps: {
+                    fundsAction: input.perps.fundsAction,
+                    amountUsdg: input.perps.amountUsdg,
+                  },
+                } as any
+                result = { status: 'preview_ready' }
+              }
             } else if (!input.perps.reduceOnly && !(input.perps.marginUsd > 0 && input.perps.leverage >= 1)) {
               result = { error: 'To OPEN a perps position, marginUsd (>0) and leverage (>=1) are required. To CLOSE one, set reduceOnly: true.' }
             } else {

@@ -18,7 +18,8 @@ import { resolveSendGasPrice } from '@/lib/gas'
 import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
-import { placeClientPerpsOrder, hasClientPerpsKey } from '@/lib/lighter-order'
+import { placeClientPerpsOrder, hasClientPerpsKey, withdrawPerpsFunds } from '@/lib/lighter-order'
+import { executeLighterDeposit } from '@/lib/lighter-deposit'
 import {
   getAgent,
   initialMessages,
@@ -623,6 +624,66 @@ export function NockApp() {
     // and the jurisdiction geofence still gates it (client path: Lighter's own IP geoblock).
     if (action.agent === 'perps' && (action as any).routeVia === 'perps') {
       const perps = (action as any).perps || {}
+
+      // PERPS FUNDS MOVEMENT — deposit (wallet -> perps) or withdraw (perps -> wallet),
+      // done from chat. Separate from the trade path: no order, just the money move.
+      if (perps.fundsAction === 'deposit' || perps.fundsAction === 'withdraw') {
+        try {
+          if (!walletAddress || !activeWallet) throw new Error('Please connect your wallet first.')
+          const amount = Number(perps.amountUsdg)
+          if (!(amount > 0)) throw new Error('Invalid amount.')
+
+          if (perps.fundsAction === 'deposit') {
+            if (!publicClient) throw new Error('Not connected to Robinhood Chain. Refresh and try again.')
+            const provider = await activeWallet.getEthereumProvider()
+            const walletClient = createWalletClient({
+              account: walletAddress as `0x${string}`,
+              chain: nockChain,
+              transport: custom(provider),
+            })
+            const r = await executeLighterDeposit({ walletClient, publicClient, amountUsdg: String(amount) })
+            if (r.error) throw new Error(r.error)
+          } else {
+            if (!hasClientPerpsKey(walletAddress)) {
+              throw new Error('You need a perps trading key on this device to withdraw. Open Settings → "Perps trading key" and set it up, then try again.')
+            }
+            const r = await withdrawPerpsFunds({ walletAddress, activeWallet: activeWallet as any, amountUsdg: amount })
+            if (!r.ok) throw new Error(r.error)
+          }
+
+          setMessages((prev) => {
+            const updated = prev.map((m) =>
+              m.role === 'robin' && m.action && m.action.id === actionId
+                ? { ...m, action: { ...m.action, status: 'executed' as const } }
+                : m,
+            )
+            const confirm: ChatMessage = {
+              id: `${Date.now()}-c`,
+              role: 'robin',
+              text:
+                perps.fundsAction === 'deposit'
+                  ? `Done — deposited $${amount.toFixed(2)} USDG into your perps account. It becomes available margin shortly.`
+                  : `Done — withdrawing $${amount.toFixed(2)} USDG to your wallet. It leaves your perps balance now and settles to your wallet in a few minutes.`,
+            }
+            return [...updated, confirm]
+          })
+          fetchPortfolioValue()
+          setTimeout(() => { void fetchPortfolioValue() }, 16_000)
+        } catch (error) {
+          const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+          setMessages((prev) => [
+            ...prev.map((m) =>
+              m.role === 'robin' && m.action && m.action.id === actionId
+                ? { ...m, action: { ...m.action, status: 'pending' as const } }
+                : m,
+            ),
+            { id: `${Date.now()}-error`, role: 'robin', text: `That didn't go through: ${rawMessage} Nothing moved — press Confirm to try again.` },
+          ])
+        }
+        executingActionsRef.current.delete(actionId)
+        return
+      }
+
       try {
         let data: { orderId?: string; avgPrice?: number; baseFilled?: number; notionalUsd?: number; error?: string }
         if (walletAddress && activeWallet && hasClientPerpsKey(walletAddress)) {
