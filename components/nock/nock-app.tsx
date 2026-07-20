@@ -18,6 +18,7 @@ import { resolveSendGasPrice } from '@/lib/gas'
 import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
+import { placeClientPerpsOrder, hasClientPerpsKey } from '@/lib/lighter-order'
 import {
   getAgent,
   initialMessages,
@@ -553,6 +554,93 @@ export function NockApp() {
 
     if (!action) {
       console.error('Action not found:', actionId)
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
+    // PERPS EXECUTION. Two paths:
+    //  • CLIENT-SIDE (non-custodial): if this wallet has a registered Lighter key (set up
+    //    in Settings → Perps trading key), the order is signed IN THE BROWSER with that key
+    //    and submitted straight to Lighter — Nock never signs or holds anything. Preferred.
+    //  • LEGACY EXECUTOR: otherwise fall back to the server-side executor (/api/execute-perps),
+    //    which signs with the shared account. Retired once everyone is on the client path.
+    // Either way success is keyed on the returned orderId (no on-chain txHash to verify),
+    // and the jurisdiction geofence still gates it (client path: Lighter's own IP geoblock).
+    if (action.agent === 'perps' && (action as any).routeVia === 'perps') {
+      const perps = (action as any).perps || {}
+      try {
+        let data: { orderId?: string; avgPrice?: number; baseFilled?: number; notionalUsd?: number; error?: string }
+        if (walletAddress && activeWallet && hasClientPerpsKey(walletAddress)) {
+          // Non-custodial path — sign + submit in the browser with the user's own key.
+          const result = await placeClientPerpsOrder({
+            walletAddress: walletAddress as string,
+            activeWallet: activeWallet as any,
+            symbol: perps.symbol,
+            side: perps.side,
+            marginUsd: Number(perps.marginUsd),
+            leverage: Number(perps.leverage),
+            markPrice: Number(perps.markPrice),
+            maxSlippageBps: perps.maxSlippageBps,
+            reduceOnly: !!perps.reduceOnly,
+          })
+          if (!result.ok) throw new Error(result.error)
+          data = result
+        } else {
+          // No trading key on this device — perps are non-custodial and require it. Point
+          // the user to set it up rather than silently failing on the legacy executor.
+          throw new Error('You need a perps trading key on this device first. Open Settings → "Perps trading key" and set it up, then press Confirm again.')
+        }
+
+        setMessages((prev) => {
+          const agent = getAgent('perps')
+          const updated = prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'executed' as const } }
+              : m,
+          )
+          const confirm: ChatMessage = {
+            id: `${Date.now()}-c`,
+            role: 'robin',
+            text: perps.reduceOnly
+              ? `Done — ${perps.symbol} position closed at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`
+              : `Done — ${perps.side === 'short' ? 'short' : 'long'} position opened on ${perps.symbol} at ~$${Number(data.avgPrice).toLocaleString('en-US', { maximumFractionDigits: 6 })} (${Number(data.notionalUsd).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDG notional). Order ${String(data.orderId).slice(0, 12)}…`,
+          }
+          if (perps.reduceOnly) {
+            // A close removes the open perps position card rather than adding one. Match by
+            // symbol on the subtitle/title so a stale card for this market clears.
+            const sym = String(perps.symbol).toUpperCase()
+            setPositions((p) => p.filter((x) => !(x.agent === 'perps' && `${x.title} ${x.meta}`.toUpperCase().includes(sym))))
+          } else {
+            const newPosition: Position = {
+              id: `pos-${actionId}`,
+              agent: 'perps',
+              title: action.outcome.title,
+              subtitle: `${agent.name} · active`,
+              value: action.outcome.value,
+              meta: action.outcome.meta,
+              metaPositive: true,
+            }
+            setPositions((p) => (p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p]))
+          }
+          setAttention((att) => att.filter((x) => x.agent !== 'perps'))
+          return [...updated, confirm]
+        })
+        fetchPortfolioValue()
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'pending' as const } }
+              : m,
+          ),
+          {
+            id: `${Date.now()}-error`,
+            role: 'robin',
+            text: `The position was not ${perps.reduceOnly ? 'closed' : 'opened'}: ${rawMessage} Nothing was placed — press Confirm to try again.`,
+          },
+        ])
+      }
       executingActionsRef.current.delete(actionId)
       return
     }

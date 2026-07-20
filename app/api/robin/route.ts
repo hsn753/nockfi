@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { isAddress, formatUnits, erc20Abi } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
+import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
@@ -13,7 +14,6 @@ import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMa
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { resolvePerpsGeo } from '@/lib/geo-gate'
 import { PERPS_ENABLED } from '@/lib/feature-flags'
-import { executePerpsOrder } from '@/lib/lighter-execute'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
 import { getStockCollateralMarketData, getStockBorrowPositions, buildStockBorrow, buildStockRepay, type StockCollateralQuote } from '@/lib/get-stock-collateral'
 import { getNockGateStatus, gateMessage } from '@/lib/nock-gate'
@@ -257,7 +257,9 @@ When the user wants to withdraw supplied USDG:
 3. Call get_yield_withdraw_quote with the amount and market. If it errors (no position, amount too large, or the market lacks idle liquidity right now), relay the real reason plainly — the liquidity case is a real, temporary market condition, not a bug.
 4. If it returns a real transaction, call propose_action for the yield agent with the real numbers.
 
-When the user asks to actually open a perps position: first call get_perps_info to get the real current market data (mark price, funding, max leverage). Then call propose_action for the perps agent, INCLUDING the structured 'perps' object (symbol, side, marginUsd, leverage, markPrice) built from that live data. The system applies a jurisdiction + eligibility gate and returns an instruction in the tool result — follow it exactly. It may tell you: perps aren't available in the user's region (say so plainly — it's a regulatory restriction, not a bug — and offer what Nock does support for them: tokenized stocks for market exposure, token swaps, and yield); OR that execution is launching soon (present the live Lighter data as informational and say opening a position is coming soon for eligible regions). Only ever report a position as actually opened if the tool result explicitly says the order was placed — never fabricate a fill or confirmation.
+When the user asks to actually open a perps position: first call get_perps_info to get the real current market data (mark price, funding, max leverage). Then call propose_action for the perps agent, INCLUDING the structured 'perps' object (symbol, side, marginUsd, leverage, markPrice) built from that live data. The system applies a jurisdiction + eligibility gate and returns a result in the tool call — follow it exactly. It may tell you: perps aren't available in the user's region (say so plainly — it's a regulatory restriction, not a bug — and offer what Nock does support for them: tokenized stocks for market exposure, token swaps, and yield); OR that execution is launching soon (present the live Lighter data as informational and say opening a position is coming soon for eligible regions); OR a 'preview_ready' status, which means a preview CARD was built — tell the user to review it and press Confirm to place the order (the order is NOT placed until they Confirm). Do NOT claim the position is open on a preview_ready result — placing happens on Confirm, and the app posts its own confirmation afterward. Never fabricate a fill.
+
+When the user asks to CLOSE or reduce an existing perps position: FIRST call get_wallet_holdings to read their real open positions (the 'perps' object). If they have no open position in that market, tell them so — do not propose anything. Otherwise call propose_action for the perps agent with the 'perps' object set to { symbol, side (the EXISTING position's direction — long or short), markPrice (from get_perps_info or the position), reduceOnly: true } and OMIT marginUsd/leverage — the whole position is closed at market. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation after it fills. Never claim it's closed before Confirm, and never fabricate the closing fill.
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
@@ -307,6 +309,7 @@ type ProposeActionInput = {
     marginUsd: number
     leverage: number
     markPrice: number
+    reduceOnly?: boolean
   }
 }
 
@@ -315,7 +318,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_wallet_holdings',
-      description: `Returns the user's real on-chain balances from their connected wallet, each with a live usdValue, across all supported tokens: ${SUPPORTED_TOKENS_LIST}. Call this whenever the user asks what they hold, their portfolio, their balances, or anything about their specific holdings. Never answer holdings questions from memory.`,
+      description: `Returns the user's real on-chain balances from their connected wallet, each with a live usdValue, across all supported tokens: ${SUPPORTED_TOKENS_LIST}. Also returns a 'perps' object when the user has a Lighter perps account — their deposited margin balance and any open positions. Call this whenever the user asks what they hold, their portfolio, their balances, their perps, or anything about their specific holdings. Never answer holdings questions from memory.`,
       parameters: {
         type: 'object',
         properties: {},
@@ -446,7 +449,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_perps_info',
-      description: 'Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter\'s own live margin requirement). Scoped to crypto/memecoin markets only. Opening a position is gated (region + eligibility) and launching soon for eligible regions — propose_action handles that gate. Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.',
+      description: `Returns real, live perpetual futures market data from Lighter (a separate exchange that accepts Robinhood Chain assets as margin) — real mark price, funding rate, open interest, and max leverage (derived from Lighter's own live margin requirement). Scoped to crypto/memecoin markets only. ${PERPS_ENABLED ? 'Opening a position is live for eligible regions — after this call, call propose_action with the perps object to attempt it; the system enforces the region gate.' : 'Opening a position is gated (region + eligibility) and launching soon for eligible regions — propose_action handles that gate.'} Pass a symbol to look up one specific market, or omit it for the current top markets by volume. Call this whenever the user asks what perps markets exist, without necessarily proposing an action.`,
       parameters: {
         type: 'object',
         properties: {
@@ -564,12 +567,13 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             description: "REQUIRED when agent is 'perps': the structured order parameters, taken from the live get_perps_info data. Omit for all other agents.",
             properties: {
               symbol: { type: 'string', description: 'Perp market symbol, e.g. "ETH"' },
-              side: { type: 'string', enum: ['long', 'short'] },
-              marginUsd: { type: 'number', description: 'Margin to post, in USD' },
-              leverage: { type: 'number', description: 'Leverage multiple, e.g. 3' },
+              side: { type: 'string', enum: ['long', 'short'], description: 'For an OPEN: the direction. For a CLOSE (reduceOnly true): the direction of the EXISTING position being closed.' },
+              marginUsd: { type: 'number', description: 'Margin to post, in USD. Required to OPEN; omit when reduceOnly is true.' },
+              leverage: { type: 'number', description: 'Leverage multiple, e.g. 3. Required to OPEN; omit when reduceOnly is true.' },
               markPrice: { type: 'number', description: 'Current mark price from get_perps_info' },
+              reduceOnly: { type: 'boolean', description: 'TRUE when CLOSING or reducing an existing position. The whole position is closed at market; marginUsd and leverage are NOT needed. Get the position from get_wallet_holdings first.' },
             },
-            required: ['symbol', 'side', 'marginUsd', 'leverage', 'markPrice'],
+            required: ['symbol', 'markPrice'],
           },
         },
         required: ['agent', 'action', 'detail', 'metrics', 'outcome'],
@@ -709,24 +713,36 @@ async function handlePOST(request: Request) {
               }
             } else if (!input.perps) {
               result = { error: "Missing structured perps order parameters. Call get_perps_info first, then include the 'perps' object in propose_action." }
+            } else if (!input.perps.reduceOnly && !(input.perps.marginUsd > 0 && input.perps.leverage >= 1)) {
+              result = { error: 'To OPEN a perps position, marginUsd (>0) and leverage (>=1) are required. To CLOSE one, set reduceOnly: true.' }
             } else {
-              // Eligible region + live flag: run the order through the execution adapter. On
-              // today's deploy the flag is off, so this branch is unreachable in prod; even if
-              // flipped on, the adapter refuses until the executor service is provisioned.
-              const exec = await executePerpsOrder(
-                {
-                  walletAddress: walletAddress || '',
+              // Eligible region + live flag + valid params: build a PREVIEW CARD. Do NOT
+              // execute here — a real, leveraged order must never fire just from the model
+              // proposing it (that caused accidental double-fills on retries). The order is
+              // placed only when the user clicks Confirm, which POSTs these params to the
+              // client-side signer (or the executor fallback). This mirrors the swap/stock
+              // flow: preview → Confirm → execute. `routeVia: 'perps'` is the discriminator
+              // the client's Confirm handler branches on. reduceOnly => close the position.
+              action = {
+                id: `act-${Date.now()}`,
+                agent: 'perps',
+                action: input.action,
+                detail: input.detail,
+                metrics: input.metrics,
+                status: 'pending',
+                outcome: input.outcome,
+                routeVia: 'perps',
+                perps: {
                   symbol: input.perps.symbol,
                   side: input.perps.side,
                   marginUsd: input.perps.marginUsd,
                   leverage: input.perps.leverage,
                   markPrice: input.perps.markPrice,
+                  reduceOnly: input.perps.reduceOnly ?? false,
+                  maxSlippageBps: 50,
                 },
-                geo,
-              )
-              result = exec.ok
-                ? { ok: true, orderId: exec.orderId, avgPrice: exec.avgPrice, baseFilled: exec.baseFilled, notionalUsd: exec.notionalUsd }
-                : { error: `Perps order was not placed: ${exec.error} Present the market data and explain plainly — do not fake a confirmation.` }
+              } as any
+              result = { status: 'preview_ready' }
             }
 
             openaiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) })
@@ -977,22 +993,38 @@ async function handlePOST(request: Request) {
               // collateral silently vanishes from the answer (seen live: a borrow
               // made TSLA "disappear" and the stated portfolio total drop, when the
               // user still owned it and owed 2 USDG against it).
-              const [balances, collateralPositions] = await Promise.all([
+              const [balances, collateralPositions, lighter] = await Promise.all([
                 fetchWalletBalances(walletAddress),
                 getStockBorrowPositions(walletAddress).catch(() => []),
+                getLighterPortfolio(walletAddress).catch(() => null),
               ])
               console.log('[robin] Balances fetched:', balances)
               // The total is computed HERE, never left to the model's arithmetic —
               // seen live: items summing to ~$14.3 presented as "approximately $8.37".
               const walletUsd = balances.reduce((s, b) => s + (b.usdValue ?? 0), 0)
               const netCollateralUsd = collateralPositions.reduce((s, p) => s + (p.collateralValueUsd - p.borrowedUsd), 0)
+              // Perps (Lighter) equity — the USDG deposited as margin plus unrealized PnL.
+              // It left the wallet on deposit, so it's not double-counted with wallet USDG;
+              // open positions are leveraged exposure and are listed, not added to the total.
+              const perpsEquityUsd = lighter?.hasAccount ? lighter.equityUsd : 0
+              const perps = lighter?.hasAccount
+                ? { balanceUsd: lighter.collateralUsd, availableUsd: lighter.availableUsd, equityUsd: lighter.equityUsd, positions: lighter.positions }
+                : null
               result = {
                 balances,
                 collateralPositions,
-                totalPortfolioUsd: Number((walletUsd + netCollateralUsd).toFixed(2)),
-                note: collateralPositions.length > 0
-                  ? 'Live on-chain balances with live USD reference prices. collateralPositions is stock the user OWNS but has posted as loan collateral on Morpho — it is NOT in the wallet balances above and MUST be listed as its own line ("posted as collateral"), with the debt owed and liquidation price next to it. State totalPortfolioUsd as the total portfolio value EXACTLY as given (it already includes collateral net of debt) — never compute your own total.'
-                  : 'Live on-chain balances with live USD reference prices. State totalPortfolioUsd as the total portfolio value exactly as given — never compute your own total.',
+                perps,
+                totalPortfolioUsd: Number((walletUsd + netCollateralUsd + perpsEquityUsd).toFixed(2)),
+                note: [
+                  'Live on-chain balances with live USD reference prices.',
+                  collateralPositions.length > 0
+                    ? 'collateralPositions is stock the user OWNS but has posted as loan collateral on Morpho — it is NOT in the wallet balances above and MUST be listed as its own line ("posted as collateral"), with the debt owed and liquidation price next to it.'
+                    : '',
+                  perps && (perps.positions.length > 0 || perps.balanceUsd > 0)
+                    ? `perps is the user's Lighter perpetual-futures account (separate from the wallet). ALWAYS surface it: state the perps balance (balanceUsd, the USDG margin deposited there) as its own line, and list EACH open position in perps.positions with its side (long/short), symbol, notional (notionalUsd), leverage, and unrealized PnL (unrealizedPnlUsd, + or −). This balance is already folded into totalPortfolioUsd (as equity = margin + unrealized PnL); the position notionals are leveraged exposure and are NOT separately added.`
+                    : '',
+                  'State totalPortfolioUsd as the total portfolio value EXACTLY as given — never compute your own total.',
+                ].filter(Boolean).join(' '),
               }
             } catch (err) {
               console.error('[robin] Balance fetch error:', err)
@@ -1097,6 +1129,46 @@ async function handlePOST(request: Request) {
             }
           }
 
+          // "Sell all / max" resolution. Seen in prod: for "sell all TSLA" the model
+          // passes the literal word "all" as amount (never resolving it to a balance),
+          // and parseUnits("all") then throws → the whole quote fails. "Sell all" is a
+          // common request, so resolve it here, deterministically, to the wallet's exact
+          // on-chain balance of the sell-side token — full precision from formatUnits (no
+          // rounding UP past what's held, which would fail at execution), no thousands
+          // separators. ERC-20s only; selling the entire native ETH is refused because
+          // gas must be left over.
+          const ALL_WORDS = /^(all|max|maximum|everything|entire|full|100%)$/i
+          let allResolveError: string | undefined
+          if (amount && ALL_WORDS.test(amount.trim()) && fromToken) {
+            const up = fromToken.toUpperCase()
+            let tokenAddr: string | undefined
+            if (isAddress(fromToken)) tokenAddr = fromToken
+            else if (up in SWAP_TOKENS) tokenAddr = SWAP_TOKENS[up].address
+            amount = undefined // clear the unparseable word; set below only on success
+            if (tokenAddr && tokenAddr.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()) {
+              allResolveError = "Selling your entire ETH isn't possible — some must stay to pay gas. Tell me a specific amount of ETH to sell."
+            } else if (!tokenAddr) {
+              allResolveError = `To sell your full ${fromToken} balance I need its token, but couldn't resolve it — give a specific amount instead.`
+            } else if (!walletAddress || !isAddress(walletAddress)) {
+              allResolveError = 'No wallet connected. Ask the user to connect their wallet first.'
+            } else {
+              try {
+                const client = getReadClient()
+                const [raw, decimals] = await Promise.all([
+                  client.readContract({ address: tokenAddr as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] }),
+                  client.readContract({ address: tokenAddr as `0x${string}`, abi: erc20Abi, functionName: 'decimals' }),
+                ])
+                if ((raw as bigint) > BigInt(0)) {
+                  amount = formatUnits(raw as bigint, decimals as number)
+                } else {
+                  allResolveError = `You don't hold any ${up in SWAP_TOKENS ? up : fromToken} to sell.`
+                }
+              } catch {
+                allResolveError = 'Could not read your balance to size a full sell — try a specific amount.'
+              }
+            }
+          }
+
           // Seen in prod: despite the prompt explicitly saying to ask for an
           // amount before calling this tool, the model sometimes calls it anyway with a
           // fabricated amount (e.g. defaulting to "100 USDG") when the user never gave
@@ -1107,11 +1179,14 @@ async function handlePOST(request: Request) {
           // possibly have a real amount to work with, so refuse and force it to actually
           // ask. Contract addresses (0x + 40 hex chars) are stripped first — confirmed
           // this guard originally false-positived because an address is full of digits.
-          const hasUserSpecifiedAmount = messages.some(
+          // "Sell all" carries no digit but is a real, resolved amount — exempt it.
+          const hasUserSpecifiedAmount = amount != null || messages.some(
             (m) => m.role === 'user' && /\d/.test(m.text.replace(/0x[a-fA-F0-9]{40}/g, '')),
           )
 
-          if (!hasUserSpecifiedAmount) {
+          if (allResolveError) {
+            result = { error: allResolveError }
+          } else if (!hasUserSpecifiedAmount) {
             result = {
               error: "The user has not specified a swap amount anywhere in this conversation. Do not guess or default to any amount (e.g. 100, 1, 0.01) — ask the user exactly how much they want to swap, then call this tool again once they answer with a specific number.",
             }
@@ -1839,7 +1914,7 @@ async function handlePOST(request: Request) {
             const lines = markets.slice(0, 5).map((m, i) =>
               `${i + 1}. **${m.asset}**: mark $${m.markPrice.toLocaleString('en-US', { maximumFractionDigits: m.markPrice < 1 ? 6 : 2 })}, funding ${m.fundingRatePctHourly != null ? `${m.fundingRatePctHourly.toFixed(4)}%/hr` : 'n/a'}, 24h volume $${Math.round(m.dailyVolumeUsd).toLocaleString('en-US')}${m.maxLeverage != null ? `, up to ${m.maxLeverage}x` : ''}`,
             )
-            responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. Opening a position is launching soon for eligible regions — for now this is informational.`
+            responseText = `Here are the top live perps markets on Lighter right now:\n\n${lines.join('\n')}\n\nThese are real, live numbers. ${PERPS_ENABLED ? 'Opening a position is live for eligible regions — just tell me the market, side, size, and leverage.' : 'Opening a position is launching soon for eligible regions — for now this is informational.'}`
           }
         } catch (err) {
           console.error('[robin] deterministic perps backstop failed:', err)

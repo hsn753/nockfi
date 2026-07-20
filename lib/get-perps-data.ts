@@ -1,4 +1,10 @@
-const LIGHTER_API_BASE = 'https://mainnet.zklighter.elliot.ai/api/v1'
+import { PERPS_ENABLED } from './feature-flags'
+
+// Data source for perps market reads. Defaults to Lighter mainnet; can be pointed at the
+// Robinhood Chain instance (https://api.rh.lighter.xyz/api/v1) via LIGHTER_DATA_BASE so the
+// mark price Robin shows matches the venue the executor actually fills on (account 703, USDG
+// margin). Same REST shape on both. Env-driven so prod stays on the default untouched.
+const LIGHTER_API_BASE = process.env.LIGHTER_DATA_BASE || 'https://mainnet.zklighter.elliot.ai/api/v1'
 
 // Lighter's real market list spans far more than crypto — tokenized stock/index
 // perpetuals (AAPL, TSLA, SPY, QQQ...), forex pairs, and commodities all trade
@@ -111,6 +117,6 @@ export async function getPerpsMarkets(symbol?: string): Promise<{ markets: PerpM
 
   return {
     markets,
-    note: 'Real live data from Lighter (mainnet.zklighter.elliot.ai) — a separate perps exchange that accepts Robinhood Chain assets (USDG) as margin. Funding is hourly. Opening a position is region-gated and launching soon for eligible jurisdictions, so this is informational for now. Only crypto/memecoin markets are shown here, even though Lighter also lists stock, index, forex, and commodity perpetuals.',
+    note: `Real live data from Lighter (mainnet.zklighter.elliot.ai) — a separate perps exchange that accepts Robinhood Chain assets (USDG) as margin. Funding is hourly. ${PERPS_ENABLED ? "Opening a position is live for eligible jurisdictions — call propose_action with the 'perps' object to attempt it; the system enforces the region gate." : 'Opening a position is region-gated and launching soon for eligible jurisdictions, so this is informational for now.'} Only crypto/memecoin markets are shown here, even though Lighter also lists stock, index, forex, and commodity perpetuals.`,
   }
 }

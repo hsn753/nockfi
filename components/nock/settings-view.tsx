@@ -2,11 +2,18 @@
 
 import { useEffect, useState } from 'react'
 import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet, getIdentityToken } from '@privy-io/react-auth'
+import { usePublicClient } from 'wagmi'
+import { createWalletClient, custom } from 'viem'
 import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
 import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
+import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED } from '@/lib/feature-flags'
+import { nockChain } from '@/lib/chain'
+import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLighterNextNonce, submitLighterTx, LIGHTER_BASE, LIGHTER_CHAIN_ID } from '@/lib/lighter-account'
+import { loadStoredKeyMeta, clearStoredKey, wrapAndStore, buildWrapMessage } from '@/lib/lighter-key-storage'
+import { loadLighterSigner, generateApiKey, createLighterClient, signChangePubKey } from '@/lib/lighter-wasm-client'
+import { executeLighterDeposit } from '@/lib/lighter-deposit'
 import { user } from './data'
 
 // There's no wallet extension UI for the embedded instant-swap wallet the way there is
@@ -148,6 +155,10 @@ export function SettingsView() {
           {/* Instant Swaps is hidden until the next version (see lib/feature-flags.ts) —
               not part of the current public spec. Component kept, just not rendered. */}
           {INSTANT_SWAPS_ENABLED && ready && authenticated && <InstantSwapsSection />}
+
+          {/* Per-user Lighter key onboarding — hidden until Phase 2 is reviewed (see
+              lib/feature-flags.ts). */}
+          {PERPS_KEY_ONBOARDING_ENABLED && ready && authenticated && <PerpsKeySection />}
 
           <section className="mt-4 rounded-xl border border-border bg-card p-4">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -477,6 +488,253 @@ function InstantSwapsSection() {
           <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
             Opens a Privy-hosted screen to reveal this wallet's key so you can move funds
             out yourself (e.g. import into MetaMask). Nock never sees or stores it.
+          </p>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </section>
+  )
+}
+
+type PerpsKeyStatus =
+  | { kind: 'checking' }
+  | { kind: 'no-account' }
+  | { kind: 'depositing'; step: string }
+  | { kind: 'ready' }
+  | { kind: 'connecting'; step: string }
+  | { kind: 'connected'; accountIndex: number; apiKeyIndex: number; publicKey: string }
+
+// Non-custodial per-user Lighter trading key — see lib/lighter-wasm-client.ts,
+// lib/lighter-key-storage.ts, lib/lighter-account.ts. Generates and registers a Lighter
+// API keypair entirely client-side; Nock's servers never see the private key. For a
+// wallet with no Lighter account yet, the 'no-account' state first runs a USDG deposit
+// (lib/lighter-deposit.ts) — which creates the account — then chains into key setup.
+function PerpsKeySection() {
+  const { wallets } = useWallets()
+  const publicClient = usePublicClient()
+  const activeWallet = wallets[0]
+  const walletAddress = activeWallet?.address
+
+  const [status, setStatus] = useState<PerpsKeyStatus>({ kind: 'checking' })
+  const [depositAmount, setDepositAmount] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!walletAddress) return
+    let cancelled = false
+    setStatus({ kind: 'checking' })
+    setError('')
+    ;(async () => {
+      const account = await lookupLighterAccount(walletAddress)
+      if (cancelled) return
+      if (!account) {
+        setStatus({ kind: 'no-account' })
+        return
+      }
+      // Trust the locally-stored key if present. We deliberately do NOT re-verify it
+      // against Lighter's /apikeys on load: a freshly-registered key isn't reflected there
+      // until the next rollup batch commits (~1 min, same lag as deposits), so verifying
+      // would wrongly delete a valid key on a quick refresh. If a stored key is ever truly
+      // invalid, the trade fails with a clear error and the user can hit Reset.
+      const meta = loadStoredKeyMeta(walletAddress)
+      setStatus(meta ? { kind: 'connected', ...meta } : { kind: 'ready' })
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [walletAddress])
+
+  const setup = async () => {
+    if (!walletAddress || !activeWallet || status.kind !== 'ready') return
+    setError('')
+    try {
+      const accountLookup = await lookupLighterAccount(walletAddress)
+      if (!accountLookup) throw new Error('No Lighter account found for this wallet.')
+      const { accountIndex } = accountLookup
+
+      setStatus({ kind: 'connecting', step: 'Loading signer…' })
+      await loadLighterSigner()
+
+      setStatus({ kind: 'connecting', step: 'Generating your trading key…' })
+      const { privateKey, publicKey } = generateApiKey()
+
+      const existingKeys = await listLighterApiKeys(accountIndex)
+      const apiKeyIndex = pickFreeApiKeyIndex(existingKeys)
+      const nonce = await getLighterNextNonce(accountIndex, apiKeyIndex)
+
+      createLighterClient(LIGHTER_BASE, privateKey, LIGHTER_CHAIN_ID, apiKeyIndex, accountIndex)
+      const signed = signChangePubKey(publicKey, nonce, apiKeyIndex, accountIndex)
+
+      const provider = await activeWallet.getEthereumProvider()
+      const walletClient = createWalletClient({
+        account: walletAddress as `0x${string}`,
+        chain: nockChain,
+        transport: custom(provider),
+      })
+
+      setStatus({ kind: 'connecting', step: 'Waiting for signature (1 of 2) — securing your key locally…' })
+      const wrapSignature = await walletClient.signMessage({
+        account: walletAddress as `0x${string}`,
+        message: buildWrapMessage(walletAddress),
+      })
+      await wrapAndStore({ walletAddress, accountIndex, apiKeyIndex, publicKey, privateKeyHex: privateKey, wrapSignature })
+
+      setStatus({ kind: 'connecting', step: 'Waiting for signature (2 of 2) — registering with Lighter…' })
+      const l1Sig = await walletClient.signMessage({
+        account: walletAddress as `0x${string}`,
+        message: signed.messageToSign,
+      })
+
+      const txInfo = { ...JSON.parse(signed.txInfo), L1Sig: l1Sig }
+
+      setStatus({ kind: 'connecting', step: 'Submitting registration…' })
+      const result = await submitLighterTx(signed.txType, JSON.stringify(txInfo))
+      if (!result.ok) {
+        clearStoredKey(walletAddress)
+        throw new Error(result.message)
+      }
+
+      setStatus({ kind: 'connected', accountIndex, apiKeyIndex, publicKey })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+      setStatus({ kind: 'ready' })
+    }
+  }
+
+  const deposit = async () => {
+    if (!walletAddress || !activeWallet || !publicClient || status.kind !== 'no-account') return
+    setError('')
+    try {
+      const provider = await activeWallet.getEthereumProvider()
+      const walletClient = createWalletClient({
+        account: walletAddress as `0x${string}`,
+        chain: nockChain,
+        transport: custom(provider),
+      })
+
+      setStatus({ kind: 'depositing', step: 'Confirm the deposit in your wallet…' })
+      const result = await executeLighterDeposit({ walletClient, publicClient, amountUsdg: depositAmount })
+      if (result.error) throw new Error(result.error)
+
+      // The account won't appear until the next rollup batch commits (~1/min), so poll
+      // rather than expecting it immediately. This is expected latency, not an error.
+      setStatus({ kind: 'depositing', step: 'Confirming on Lighter — this can take up to a minute…' })
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5000))
+        const account = await lookupLighterAccount(walletAddress)
+        if (account) {
+          setDepositAmount('')
+          setStatus({ kind: 'ready' })
+          return
+        }
+      }
+      throw new Error(
+        'Your deposit was sent but the Lighter account has not appeared yet. Give it a minute and reopen Settings — it should show up.',
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+      setStatus({ kind: 'no-account' })
+    }
+  }
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Perps trading key
+      </h2>
+      <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+        A separate key, generated in your browser, that lets you trade on Lighter under
+        your own account. It's encrypted with your wallet and never sent to Nock.
+      </p>
+
+      {status.kind === 'checking' && (
+        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          Checking for a Lighter account…
+        </div>
+      )}
+
+      {status.kind === 'no-account' && (
+        <div className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <p className="text-xs text-muted-foreground text-pretty">
+            No Lighter account found for this wallet yet. Deposit USDG to create one —
+            this funds your trading balance and sets up the account in one step.
+          </p>
+          <div className="mt-2.5 flex items-center gap-2">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={depositAmount}
+              onChange={(e) => setDepositAmount(e.target.value)}
+              placeholder="USDG amount, e.g. 10"
+              className="min-w-0 flex-1 rounded-lg border border-border bg-background/40 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            />
+            <button
+              type="button"
+              disabled={!depositAmount}
+              onClick={deposit}
+              className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              Deposit
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status.kind === 'depositing' && (
+        <div className="mt-3 flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2.5 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin shrink-0" />
+          {status.step}
+        </div>
+      )}
+
+      {status.kind === 'ready' && (
+        <button
+          type="button"
+          onClick={setup}
+          className="mt-3 flex w-full items-center justify-center rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-secondary/60"
+        >
+          Set up trading key
+        </button>
+      )}
+
+      {status.kind === 'connecting' && (
+        <div className="mt-3 flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2.5 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin shrink-0" />
+          {status.step}
+        </div>
+      )}
+
+      {status.kind === 'connected' && (
+        <div className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">Lighter account</p>
+              <p className="font-mono text-sm text-foreground">
+                #{status.accountIndex} · key {status.apiKeyIndex} · {status.publicKey.slice(0, 8)}…{status.publicKey.slice(-6)}
+              </p>
+            </div>
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-primary" />
+              Connected
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (walletAddress) clearStoredKey(walletAddress)
+              setStatus({ kind: 'ready' })
+            }}
+            className="mt-2.5 text-xs text-muted-foreground hover:text-foreground"
+          >
+            Reset
+          </button>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            Reset forgets this key on this device only — it stays registered on Lighter
+            until you replace it with a new one.
           </p>
         </div>
       )}
