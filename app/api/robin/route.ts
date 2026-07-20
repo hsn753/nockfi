@@ -2057,6 +2057,62 @@ async function handlePOST(request: Request) {
       }
     }
 
+    // Deterministic perps-OPEN backstop — the model sometimes gathers info (get_perps_info +
+    // get_wallet_holdings) but never calls propose_action to build the open card, leaving the
+    // user with nothing. If the message clearly says to open a long/short with a margin and
+    // leverage, build the preview here from live market data.
+    if (!action) {
+      const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      const txt = (lastUser?.text || '').toString()
+      const sideMatch = txt.match(/\b(long|short)\b/i)
+      const openIntent =
+        /\b(open|go|enter|start|place|take)\b/i.test(txt) &&
+        !!sideMatch &&
+        !/\b(close|reduce|withdraw|deposit)\b/i.test(txt)
+      if (openIntent && walletAddress && isAddress(walletAddress)) {
+        try {
+          const geo = await resolvePerpsGeo(request)
+          if (geo.source !== 'unknown' && geo.allowed && PERPS_ENABLED) {
+            const { markets } = await getPerpsMarkets()
+            const upper = txt.toUpperCase()
+            const market = markets.find((m) => new RegExp(`\\b${m.asset}\\b`).test(upper))
+            const levMatch = txt.match(/(\d+(?:\.\d+)?)\s*x\b/i)
+            const marginMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdg|usd|dollars)/i)
+            const side: 'long' | 'short' = sideMatch![1].toLowerCase() === 'short' ? 'short' : 'long'
+            const leverage = levMatch ? parseFloat(levMatch[1]) : null
+            const marginUsd = marginMatch ? parseFloat(marginMatch[1]) : null
+            if (market && leverage && leverage >= 1 && marginUsd && marginUsd > 0) {
+              const mkStr = `$${market.markPrice.toLocaleString('en-US', { maximumFractionDigits: market.markPrice < 1 ? 6 : 2 })}`
+              const amtStr = `$${marginUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+              action = {
+                id: `act-${Date.now()}`,
+                agent: 'perps',
+                action: `${side === 'short' ? 'Short' : 'Long'} ${market.asset} ${leverage}x with ${amtStr} USDG`,
+                detail: `Open a ${leverage}x leveraged ${side} position on ${market.asset} at market price.`,
+                metrics: [
+                  { label: `${market.asset} Mark Price`, value: mkStr },
+                  { label: 'Leverage', value: `${leverage}x` },
+                  { label: 'Margin', value: `${amtStr} USDG`, positive: true },
+                ],
+                status: 'pending',
+                outcome: {
+                  title: `${side === 'short' ? 'Short' : 'Long'} ${market.asset} ${leverage}x`,
+                  value: `${amtStr} margin`,
+                  meta: `${leverage}x · ${market.asset}`,
+                  activityTitle: `Perps ${side}`,
+                },
+                routeVia: 'perps',
+                perps: { symbol: market.asset, side, marginUsd, leverage, markPrice: market.markPrice, maxSlippageBps: 50 },
+              } as any
+              responseText = `Here's your ${side} ${market.asset} preview at ${leverage}x with ${amtStr} margin. Press Confirm to place it, or Review first.`
+            }
+          }
+        } catch (e) {
+          console.error('[robin] perps-open backstop failed:', e)
+        }
+      }
+    }
+
     // Hard backstop, not a prompt instruction — Seen twice in prod: the prompt
     // rule alone doesn't hold: the model claimed "the withdrawal has been executed
     // successfully" for an execution that never happened on-chain (once after the user
