@@ -206,11 +206,30 @@ export function NockApp() {
       const total = walletTotal + netCollateral + perpsEquity
 
       setPositions((prev) => {
-        // Rebuild the real, on-chain-derived cards (loan / perps / yield) from fresh data
-        // each refresh so they PERSIST across reloads; keep any other cards untouched.
+        // Rebuild the real, on-chain-derived cards (loan / perps / yield / stock) from fresh
+        // data each refresh so they PERSIST across reloads; keep any other cards untouched.
         const kept = prev.filter(
-          (p) => !p.id.startsWith('loan-') && !p.id.startsWith('perps-') && !p.id.startsWith('yield-'),
+          (p) =>
+            !p.id.startsWith('loan-') &&
+            !p.id.startsWith('perps-') &&
+            !p.id.startsWith('yield-') &&
+            !p.id.startsWith('stock-'),
         )
+        // Tokenized stock the wallet HOLDS (not posted as collateral — that's a loan card).
+        // Flagged by get-balances as "(official stock token)". Its USD value is already in
+        // walletTotal, so this only adds the card, not double-counted value.
+        type Bal = { symbol: string; name?: string; amount: string; usdValue?: number | null }
+        const stockCards: Position[] = (data.balances as Bal[] | undefined ?? [])
+          .filter((b) => (b.name ?? '').includes('(official stock token)') && parseFloat(b.amount) > 0)
+          .map((b) => ({
+            id: `stock-${b.symbol}`,
+            agent: 'stock' as AgentId,
+            title: `${b.symbol} — ${b.amount} held`,
+            subtitle: `Stock token agent · active`,
+            value: b.usdValue != null ? `$${b.usdValue.toFixed(2)}` : `${b.amount} ${b.symbol}`,
+            meta: 'tokenized stock',
+            metaPositive: true,
+          }))
         const loanCards: Position[] = loans.map((p) => ({
           id: `loan-${p.stockSymbol}`,
           agent: 'stock' as AgentId,
@@ -238,7 +257,7 @@ export function NockApp() {
           meta: p.apyPct != null ? `${p.apyPct.toFixed(2)}% APY` : 'earning',
           metaPositive: true,
         }))
-        return [...perpsCards, ...loanCards, ...yieldCards, ...kept]
+        return [...perpsCards, ...stockCards, ...loanCards, ...yieldCards, ...kept]
       })
       setAttention((prev) => {
         const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-') && !a.id.startsWith('loan-event-'))
@@ -975,11 +994,11 @@ export function NockApp() {
             text: `Done! ${action.agent === 'yield' ? (isWithdrawal ? 'Withdrawal' : 'Deposit') : action.agent === 'stock' ? 'Trade' : 'Swap'} executed on Robinhood Chain. TX: ${result.txHash ? `${result.txHash.slice(0, 10)}...${result.txHash.slice(-8)}` : 'confirmed'}`,
           }
 
-          // Collateral actions don't get an action-based card: fetchPortfolioValue
-          // (called right below) derives the authoritative live loan card from the
-          // chain — it shows real debt/LTV and disappears when the loan closes,
-          // which a frozen snapshot card can't do.
-          if ((action as any).routeVia !== 'morpho-collateral') {
+          // Yield, stock, and collateral positions are all rebuilt from real on-chain data
+          // by fetchPortfolioValue (below) with stable ids (yield-/stock-/loan-), so adding
+          // an ephemeral pos-<actionId> card here would just duplicate them. Only a plain
+          // swap — which has no rebuilt card — gets a transient snapshot card.
+          if (action.agent === 'swap') {
             const newPosition: Position = {
               id: `pos-${actionId}`,
               agent: action.agent,
@@ -989,23 +1008,18 @@ export function NockApp() {
               meta: action.outcome.meta,
               metaPositive: true,
             }
-
-            setPositions((p) =>
-              p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p],
-            )
+            setPositions((p) => (p.some((x) => x.id === newPosition.id) ? p : [newPosition, ...p]))
           }
           setAttention((att) => att.filter((x) => x.agent !== action.agent))
 
           return [...updated, confirm]
         })
 
-        // Refetch the real on-chain total instead of estimating it by adding the
-        // preview's outcome value on top of the last-known total. That estimate approach
-        // was the exact mechanism behind an earlier bug (a swap into an unpriced token
-        // added its raw token quantity as if it were a dollar figure) — a real swap now
-        // always has a verified transaction behind it, so there's no reason not to just
-        // ask the chain for the real number.
+        // Refetch the real on-chain total/positions. The second, delayed refetch clears the
+        // 15s balances cache so a just-bought stock / just-opened yield position shows even
+        // though the cached read still predates it.
         fetchPortfolioValue()
+        setTimeout(() => { void fetchPortfolioValue() }, 16_000)
       } catch (error) {
         const actionNoun = action.agent === 'yield' ? ((action as any).direction === 'withdraw' ? 'Withdrawal' : 'Deposit') : action.agent === 'stock' ? 'Trade' : 'Swap'
         console.error(`${actionNoun} execution failed:`, error)
