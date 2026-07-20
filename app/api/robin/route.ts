@@ -261,7 +261,7 @@ When the user asks to actually open a perps position: first call get_perps_info 
 
 When the user asks to CLOSE or reduce an existing perps position: FIRST call get_wallet_holdings to read their real open positions (the 'perps' object). If they have no open position in that market, tell them so — do not propose anything. Otherwise call propose_action for the perps agent with the 'perps' object set to { symbol, side (the EXISTING position's direction — long or short), markPrice (from get_perps_info or the position), reduceOnly: true } and OMIT marginUsd/leverage — the whole position is closed at market. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation after it fills. Never claim it's closed before Confirm, and never fabricate the closing fill.
 
-CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. To move USDG between the wallet and the perps account, the user DEPOSITS (wallet → perps) or WITHDRAWS (perps → wallet) — opening a position never converts perps margin back to the wallet, so never suggest that. You CAN do both from chat: call propose_action for the perps agent with the 'perps' object set to { fundsAction: 'deposit', amountUsdg: N } to add margin, or { fundsAction: 'withdraw', amountUsdg: N } to take it out — OMIT symbol/side/markPrice/leverage for a funds action. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation. A deposit moves USDG from their wallet into the perps account; a withdraw returns free margin to their wallet (margin backing an open position must be freed by closing first, and a withdraw settles to the wallet in a few minutes, not instantly). They can also do both in Settings → Perps trading key. Never fabricate a deposit/withdraw confirmation — it only happens on Confirm.
+CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. ROUTING (important): a deposit/withdraw/add-funds/take-out request that mentions PERPS or PERPETUAL (or "perps account", "perps balance", "perps margin") is a PERPS FUNDS ACTION described here — it is NOT a yield-market withdrawal. get_yield_withdraw_quote is ONLY for pulling USDG out of a Morpho YIELD market (USDe / syrupUSDG / spUSDG); never use it, or a yield market, for a perps withdrawal. To move USDG between the wallet and the perps account, the user DEPOSITS (wallet → perps) or WITHDRAWS (perps → wallet) — opening a position never converts perps margin back to the wallet, so never suggest that. You CAN do both from chat: call propose_action for the perps agent with the 'perps' object set to { fundsAction: 'deposit', amountUsdg: N } to add margin, or { fundsAction: 'withdraw', amountUsdg: N } to take it out — OMIT symbol/side/markPrice/leverage for a funds action. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation. A deposit moves USDG from their wallet into the perps account; a withdraw returns free margin to their wallet (margin backing an open position must be freed by closing first, and a withdraw settles to the wallet in a few minutes, not instantly). They can also do both in Settings → Perps trading key. Never fabricate a deposit/withdraw confirmation — it only happens on Confirm.
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
@@ -726,14 +726,30 @@ async function handlePOST(request: Request) {
               if (!(Number(input.perps.amountUsdg) > 0)) {
                 result = { error: 'A positive amountUsdg is required for a deposit/withdraw.' }
               } else {
+                // Build the card deterministically (do NOT rely on the model providing
+                // metrics/outcome — a funds card without metrics crashed the render).
+                const amt = Number(input.perps.amountUsdg)
+                const isDep = input.perps.fundsAction === 'deposit'
+                const amtStr = `$${amt.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
                 action = {
                   id: `act-${Date.now()}`,
                   agent: 'perps',
-                  action: input.action,
-                  detail: input.detail,
-                  metrics: input.metrics,
+                  action: isDep ? `Deposit ${amtStr} into perps account` : `Withdraw ${amtStr} to your wallet`,
+                  detail: isDep
+                    ? `Moves ${amtStr} USDG from your wallet into your perps account as margin.`
+                    : `Returns ${amtStr} of free margin from your perps account to your wallet (settles in a few minutes).`,
+                  metrics: [
+                    { label: 'Amount', value: amtStr, positive: true },
+                    { label: isDep ? 'From' : 'From', value: isDep ? 'Your wallet' : 'Perps account' },
+                    { label: 'To', value: isDep ? 'Perps account' : 'Your wallet' },
+                  ],
                   status: 'pending',
-                  outcome: input.outcome,
+                  outcome: {
+                    title: isDep ? `Deposited ${amtStr} to perps` : `Withdrawing ${amtStr} to wallet`,
+                    value: amtStr,
+                    meta: isDep ? 'margin added' : 'settling to wallet',
+                    activityTitle: isDep ? 'Perps deposit' : 'Perps withdrawal',
+                  },
                   routeVia: 'perps',
                   perps: {
                     fundsAction: input.perps.fundsAction,

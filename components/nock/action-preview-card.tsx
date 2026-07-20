@@ -56,9 +56,10 @@ export function ActionPreviewCard({ action, onDraw, onLoose }: Props) {
           {action.detail}
         </p>
 
-        {/* Metrics */}
+        {/* Metrics — guarded: a missing/malformed metrics array must never crash the whole
+            page (it did — a perps funds card built without metrics threw on .map here). */}
         <div className="mt-5 grid grid-cols-3 gap-2.5">
-          {action.metrics.map((m) => (
+          {(action.metrics ?? []).map((m) => (
             <div
               key={m.label}
               className="flex min-w-0 flex-col gap-1 rounded-xl bg-secondary/60 px-3 py-3.5"
