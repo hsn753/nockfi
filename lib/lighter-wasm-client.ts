@@ -31,8 +31,15 @@ declare global {
     ) => { txType: number; txInfo: string; txHash: string; messageToSign: string; error?: string }
     SignCreateOrder?: (...args: number[]) => { txType: number; txInfo: string; txHash: string; error?: string }
     SignUpdateLeverage?: (...args: number[]) => { txType: number; txInfo: string; txHash: string; error?: string }
+    SignWithdraw?: (...args: number[]) => { txType: number; txInfo: string; txHash: string; error?: string }
   }
 }
+
+// USDG on the RH Lighter instance = asset id 3 (ASSET_ID_USDC in the SDK; matches the
+// deposit's assetId), 6 decimals. Withdraw route 0 = ROUTE_PERP (the perps account).
+export const LIGHTER_USDG_ASSET_ID = 3
+const LIGHTER_ROUTE_PERP = 0
+const USDG_SCALE = 1e6
 
 const WASM_JS_URL = '/lighter/wasm_exec.js'
 const WASM_BINARY_URL = '/lighter/lighter-signer.wasm'
@@ -166,6 +173,23 @@ export function signCreateOrder(args: {
       args.accountIndex,
     ),
     'SignCreateOrder',
+  )
+}
+
+// Sign a withdraw tx (7-arg contract): move USDG from the perps account back to the
+// owner's L1 wallet. There is NO recipient param — funds can only return to the account
+// owner's own L1 address, so a leaked key can't redirect them. `amountUsdg` is human units.
+export function signWithdraw(args: {
+  amountUsdg: number
+  nonce: number
+  apiKeyIndex: number
+  accountIndex: number
+}): { txType: number; txInfo: string; txHash: string } {
+  if (!window.SignWithdraw) throw new Error('Lighter signer not loaded — call loadLighterSigner() first.')
+  const amountRaw = Math.round(args.amountUsdg * USDG_SCALE)
+  return checkErr(
+    window.SignWithdraw(LIGHTER_USDG_ASSET_ID, LIGHTER_ROUTE_PERP, amountRaw, 0, args.nonce, args.apiKeyIndex, args.accountIndex),
+    'SignWithdraw',
   )
 }
 

@@ -10,7 +10,7 @@ import {
   getLighterAccountBalance,
 } from './lighter-account'
 import { loadStoredKeyMeta, unlockPrivateKey, buildWrapMessage } from './lighter-key-storage'
-import { loadLighterSigner, createLighterClient, signCreateOrder, signUpdateLeverage } from './lighter-wasm-client'
+import { loadLighterSigner, createLighterClient, signCreateOrder, signUpdateLeverage, signWithdraw } from './lighter-wasm-client'
 
 // Phase 4 — client-side perps order placement. The whole point of the non-custodial
 // rebuild: the user's own Lighter API key (unlocked from encrypted local storage with a
@@ -49,6 +49,64 @@ export type PlacePerpsOrderResult =
 // this to decide between the client path and the legacy executor.
 export function hasClientPerpsKey(walletAddress: string): boolean {
   return loadStoredKeyMeta(walletAddress) !== null
+}
+
+export type WithdrawResult = { ok: true } | { ok: false; error: string }
+
+// Withdraw USDG from the perps (Lighter) account back to the user's wallet. Signs a
+// withdraw tx IN THE BROWSER with the user's own key; funds can only return to their own
+// L1 address (the signer has no recipient param). Requires a registered key.
+export async function withdrawPerpsFunds(args: {
+  walletAddress: string
+  activeWallet: PrivyWalletLike
+  amountUsdg: number
+}): Promise<WithdrawResult> {
+  try {
+    const meta = loadStoredKeyMeta(args.walletAddress)
+    if (!meta) {
+      return { ok: false, error: 'No trading key on this device. Set one up in Settings → Perps trading key first.' }
+    }
+    if (!(args.amountUsdg > 0)) {
+      return { ok: false, error: 'Enter a positive USDG amount to withdraw.' }
+    }
+
+    // Only free (available) margin can be withdrawn — margin backing an open position can't.
+    const bal = await getLighterAccountBalance(meta.accountIndex)
+    if (bal && args.amountUsdg > bal.availableUsd + 1e-6) {
+      return {
+        ok: false,
+        error: `You can withdraw up to $${bal.availableUsd.toFixed(2)} — that's the free margin in your perps account. ${bal.availableUsd < bal.collateralUsd ? 'The rest is backing an open position; close it first to free it up.' : ''}`.trim(),
+      }
+    }
+
+    const provider = await args.activeWallet.getEthereumProvider()
+    const walletClient = createWalletClient({
+      account: args.walletAddress as `0x${string}`,
+      chain: nockChain,
+      transport: custom(provider as Parameters<typeof custom>[0]),
+    })
+    const wrapSignature = await walletClient.signMessage({
+      account: args.walletAddress as `0x${string}`,
+      message: buildWrapMessage(args.walletAddress),
+    })
+    const privateKey = await unlockPrivateKey({ walletAddress: args.walletAddress, wrapSignature })
+
+    await loadLighterSigner()
+    createLighterClient(LIGHTER_BASE, privateKey, LIGHTER_CHAIN_ID, meta.apiKeyIndex, meta.accountIndex)
+
+    const nonce = await getLighterNextNonce(meta.accountIndex, meta.apiKeyIndex)
+    const signed = signWithdraw({
+      amountUsdg: args.amountUsdg,
+      nonce,
+      apiKeyIndex: meta.apiKeyIndex,
+      accountIndex: meta.accountIndex,
+    })
+    const res = await submitLighterTx(signed.txType, signed.txInfo)
+    if (!res.ok) return { ok: false, error: res.message }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Withdrawal failed.' }
+  }
 }
 
 export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<PlacePerpsOrderResult> {

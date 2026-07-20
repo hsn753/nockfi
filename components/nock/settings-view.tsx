@@ -14,6 +14,7 @@ import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLight
 import { loadStoredKeyMeta, clearStoredKey, wrapAndStore, buildWrapMessage } from '@/lib/lighter-key-storage'
 import { loadLighterSigner, generateApiKey, createLighterClient, signChangePubKey } from '@/lib/lighter-wasm-client'
 import { executeLighterDeposit } from '@/lib/lighter-deposit'
+import { withdrawPerpsFunds } from '@/lib/lighter-order'
 import { user } from './data'
 
 // There's no wallet extension UI for the embedded instant-swap wallet the way there is
@@ -522,6 +523,9 @@ function PerpsKeySection() {
   const [addAmount, setAddAmount] = useState('')
   const [addBusy, setAddBusy] = useState(false)
   const [addDone, setAddDone] = useState(false)
+  const [wdAmount, setWdAmount] = useState('')
+  const [wdBusy, setWdBusy] = useState(false)
+  const [wdDone, setWdDone] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -690,6 +694,62 @@ function PerpsKeySection() {
     }
   }
 
+  // Withdraw free margin from the perps account back to the wallet (needs the key to sign).
+  const withdraw = async () => {
+    if (!walletAddress || !activeWallet || !wdAmount) return
+    setError('')
+    setWdDone(false)
+    setWdBusy(true)
+    try {
+      const result = await withdrawPerpsFunds({
+        walletAddress: walletAddress as string,
+        activeWallet: activeWallet as unknown as { address: string; getEthereumProvider: () => Promise<unknown> },
+        amountUsdg: parseFloat(wdAmount),
+      })
+      if (!result.ok) throw new Error(result.error)
+      setWdAmount('')
+      setWdDone(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setWdBusy(false)
+    }
+  }
+
+  // Withdraw row — shown only in the connected state (needs the key to sign the withdraw).
+  const withdrawRow = (
+    <div className="mt-3 border-t border-border pt-3">
+      <p className="text-xs text-muted-foreground">Withdraw margin to your wallet</p>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={wdAmount}
+          onChange={(e) => {
+            setWdAmount(e.target.value)
+            setWdDone(false)
+          }}
+          placeholder="USDG amount, e.g. 10"
+          className="min-w-0 flex-1 rounded-lg border border-border bg-background/40 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={wdBusy || !wdAmount}
+          onClick={withdraw}
+          className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-secondary/60 disabled:opacity-50"
+        >
+          {wdBusy && <Loader2 className="size-3 animate-spin" />}
+          Withdraw
+        </button>
+      </div>
+      {wdDone && <p className="mt-1.5 text-xs text-primary">Withdrawal submitted — USDG returns to your wallet shortly.</p>}
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        Moves free (unused) margin back to your connected wallet. Margin backing an open position must be freed by closing it first.
+      </p>
+    </div>
+  )
+
   // Small "add funds" row shown once an account exists (ready / connected states).
   const addFundsRow = (
     <div className="mt-3 border-t border-border pt-3">
@@ -831,6 +891,7 @@ function PerpsKeySection() {
             until you replace it with a new one.
           </p>
           {addFundsRow}
+          {withdrawRow}
         </div>
       )}
 
