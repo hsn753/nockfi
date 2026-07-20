@@ -499,6 +499,7 @@ function InstantSwapsSection() {
 
 type PerpsKeyStatus =
   | { kind: 'checking' }
+  | { kind: 'restricted'; label: string }
   | { kind: 'no-account' }
   | { kind: 'depositing'; step: string }
   | { kind: 'ready' }
@@ -526,6 +527,28 @@ function PerpsKeySection() {
     setStatus({ kind: 'checking' })
     setError('')
     ;(async () => {
+      // Jurisdiction gate FIRST — a restricted-region user must not reach the deposit or
+      // key-setup flow at all. Depositing isn't geoblocked on-chain, but registration and
+      // trading are, so onboarding here would strand their funds in a Lighter account they
+      // can't use. Fail-closed: if the check errors, treat as restricted.
+      let eligible = false
+      let label = 'your region'
+      try {
+        const res = await fetch('/api/perps/eligibility')
+        if (res.ok) {
+          const geo = (await res.json()) as { allowed?: boolean; restrictedLabel?: string }
+          eligible = !!geo.allowed
+          if (geo.restrictedLabel) label = geo.restrictedLabel
+        }
+      } catch {
+        /* fail closed */
+      }
+      if (cancelled) return
+      if (!eligible) {
+        setStatus({ kind: 'restricted', label })
+        return
+      }
+
       const account = await lookupLighterAccount(walletAddress)
       if (cancelled) return
       if (!account) {
@@ -652,8 +675,17 @@ function PerpsKeySection() {
       {status.kind === 'checking' && (
         <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 className="size-3.5 animate-spin" />
-          Checking for a Lighter account…
+          Checking availability…
         </div>
+      )}
+
+      {status.kind === 'restricted' && (
+        <p className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5 text-xs text-muted-foreground text-pretty">
+          Perps aren&apos;t available in your region. Perpetual futures are restricted for
+          retail in {status.label} (a regulatory restriction, not a technical one), so
+          deposits and trading are disabled here. Nock still supports tokenized stocks,
+          token swaps, and yield for you.
+        </p>
       )}
 
       {status.kind === 'no-account' && (
