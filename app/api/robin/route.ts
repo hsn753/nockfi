@@ -4,6 +4,7 @@ import { isAddress, formatUnits, erc20Abi } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
+import { lookupLighterAccount, getLighterAccountBalance } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
@@ -1969,6 +1970,84 @@ async function handlePOST(request: Request) {
           }
         } catch (err) {
           console.error('[robin] deterministic perps backstop failed:', err)
+        }
+      }
+    }
+
+    // Deterministic perps-FUNDS backstop — gpt-4o-mini inconsistently routes
+    // "withdraw/deposit ... my perp(s) account" (sometimes to the yield path, sometimes
+    // asking "proceed?" then failing). If no card was built and the message is clearly a
+    // perps funds move, build the card here from real balances so it works regardless of
+    // phrasing (including "withdraw all"). Only fires when the model didn't already act.
+    if (!action) {
+      const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      const txt = (lastUser?.text || '').toString()
+      const perpsCtx = /\bperp(s|etual|etuals)?\b/i.test(txt) && !/\b(syrup|usde|spusdg|morpho|yield|lend|earn|vault)\b/i.test(txt)
+      const isWithdraw = /\b(withdraw|withdrawal|take\s*out|cash\s*out|pull\s*out)\b/i.test(txt)
+      const isDeposit = !isWithdraw && /\b(deposit|add\s*(?:funds|margin|money)?|top\s*up|fund)\b/i.test(txt)
+      if (perpsCtx && (isWithdraw || isDeposit) && walletAddress && isAddress(walletAddress)) {
+        try {
+          const geo = await resolvePerpsGeo(request)
+          const eligible = geo.source !== 'unknown' && geo.allowed
+          if (eligible && PERPS_ENABLED) {
+            const amtMatch = txt.match(/\$?\s*(\d+(?:\.\d+)?)/)
+            const wantsAll = /\b(all|everything|max|maximum|entire|full)\b/i.test(txt)
+            const fundsAction: 'deposit' | 'withdraw' = isWithdraw ? 'withdraw' : 'deposit'
+            let amt: number | null = amtMatch ? parseFloat(amtMatch[1]) : null
+            let proceed = true
+
+            if (fundsAction === 'withdraw') {
+              const acct = await lookupLighterAccount(walletAddress)
+              if (!acct) {
+                responseText = "You don't have a perps account yet, so there's nothing to withdraw."
+                proceed = false
+              } else {
+                const bal = await getLighterAccountBalance(acct.accountIndex)
+                if (wantsAll && bal) amt = bal.availableUsd
+                if (bal && amt != null && amt > bal.availableUsd + 1e-6) amt = bal.availableUsd
+                if (!bal || amt == null || !(amt > 0)) {
+                  responseText =
+                    bal && bal.availableUsd <= 0
+                      ? 'Your perps account has no free margin to withdraw right now (any margin is backing an open position — close it first).'
+                      : 'How much USDG would you like to withdraw from your perps account?'
+                  proceed = false
+                }
+              }
+            } else if (amt == null || !(amt > 0)) {
+              responseText = 'How much USDG would you like to add to your perps account?'
+              proceed = false
+            }
+
+            if (proceed && amt != null && amt > 0) {
+              const isDep = fundsAction === 'deposit'
+              const amtStr = `$${amt.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+              action = {
+                id: `act-${Date.now()}`,
+                agent: 'perps',
+                action: isDep ? `Deposit ${amtStr} into perps account` : `Withdraw ${amtStr} to your wallet`,
+                detail: isDep
+                  ? `Moves ${amtStr} USDG from your wallet into your perps account as margin.`
+                  : `Returns ${amtStr} of free margin from your perps account to your wallet (settles in a few minutes).`,
+                metrics: [
+                  { label: 'Amount', value: amtStr, positive: true },
+                  { label: 'From', value: isDep ? 'Your wallet' : 'Perps account' },
+                  { label: 'To', value: isDep ? 'Perps account' : 'Your wallet' },
+                ],
+                status: 'pending',
+                outcome: {
+                  title: isDep ? `Deposited ${amtStr} to perps` : `Withdrawing ${amtStr} to wallet`,
+                  value: amtStr,
+                  meta: isDep ? 'margin added' : 'settling to wallet',
+                  activityTitle: isDep ? 'Perps deposit' : 'Perps withdrawal',
+                },
+                routeVia: 'perps',
+                perps: { fundsAction, amountUsdg: amt },
+              } as any
+              responseText = `Here's the ${isDep ? 'deposit' : 'withdrawal'} preview. Press Confirm on the card to ${isDep ? 'add the margin' : 'send it to your wallet'}, or Review first.`
+            }
+          }
+        } catch (e) {
+          console.error('[robin] perps-funds backstop failed:', e)
         }
       }
     }

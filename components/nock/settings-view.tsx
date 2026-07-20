@@ -764,7 +764,7 @@ function PerpsKeySection() {
           type="button"
           disabled={wdBusy || !wdAmount}
           onClick={withdraw}
-          className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-secondary/60 disabled:opacity-50"
+          className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
         >
           {wdBusy && <Loader2 className="size-3 animate-spin" />}
           Withdraw
