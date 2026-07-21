@@ -233,7 +233,7 @@ When the user wants to swap, trade, buy, or sell any token:
 When the user asks about stocks or tokenized equities (prices, what's available, buying, selling):
 - Call get_stock_tokens — it returns ONLY Robinhood's official stock tokens, verified on-chain against the official issuer. Never use get_trending_tokens for a stock symbol; that tool surfaces impersonator contracts with the same ticker.
 - At least once per conversation, make the framing clear: a stock token tracks the stock's price but is NOT share ownership — no dividends, no voting rights. It trades on-chain 24/7, including when the real market is closed, so its price can drift from the official close.
-- To buy or sell: resolve the OFFICIAL contract address via get_stock_tokens (pass the symbol), then call get_swap_quote using that exact address as toToken (buying with USDG) or fromToken (selling), then propose_action with agent "stock" and the real quote numbers. Stock trades route through Uniswap directly and trade against USDG only. The first trade can take up to three wallet confirmations (two approvals, then the trade) — mention that when proposing. Same rules as swaps: never guess amounts, always quote fresh.
+- To buy or sell, call get_swap_quote DIRECTLY with the stock SYMBOL — toToken:"TSLA" (buying with fromToken:"USDG") or fromToken:"TSLA" (selling to toToken:"USDG"). The server resolves the symbol to the official verified contract itself, so you do NOT need to call get_stock_tokens first for a trade, and you must NEVER pass a guessed/looked-up contract address for a stock (that's how impersonators get hit). A dollar amount works too (amountUsd:"5" to sell $5 worth) — the server converts at the live stock price. Then propose_action with agent "stock" and the real quote numbers. Stock trades route through Uniswap and trade against USDG only. The first trade can take up to three wallet confirmations (two approvals, then the trade) — mention that when proposing. Never guess amounts, always quote fresh. (Only use get_stock_tokens to browse/discover stocks, not to trade one the user already named.)
 - If a symbol isn't in the registry, say Robinhood doesn't issue that stock token — do not go looking for it among unverified tokens.
 - If the user asks about borrowing against a stock position, using stock as collateral, or a loan on their stocks: call get_stock_collateral_info and present the real markets (LLTV, live borrow APY, oracle price, available USDG) and their current position health if any. Be explicit about liquidation risk: if the stock's oracle price falls enough that debt exceeds collateralValue × LLTV, the collateral gets liquidated.
 - To actually BORROW: get the exact USDG amount from the user (never guess), call get_stock_borrow_quote, then propose_action with agent "stock" using its real numbers. When proposing, ALWAYS state: the liquidation price, that the full stock balance is posted as collateral by default (they can name a smaller amount), and that the collateral stays theirs and comes back when the debt is repaid. If the quote returns an error (too much borrow, no liquidity, no market), relay it plainly.
@@ -1149,8 +1149,24 @@ async function handlePOST(request: Request) {
           }
 
         } else if (functionName === 'get_swap_quote') {
-          const { fromToken, toToken, amount: amountArg, amountUsd } = functionArgs as {
+          const { fromToken: fromTokenRaw, toToken: toTokenRaw, amount: amountArg, amountUsd } = functionArgs as {
             fromToken?: string; toToken?: string; amount?: string; amountUsd?: string
+          }
+
+          // Resolve a stock SYMBOL (e.g. "TSLA") to its OFFICIAL contract address up front.
+          // Otherwise the model guesses addresses (trying same-ticker impersonators) — slow
+          // (multiple failed quote round-trips) and wrong — and both the dollar-conversion
+          // and the stock/Uniswap routing below key off the official address. Verified
+          // symbols (USDG/ETH/WETH/NOCK) and raw 0x addresses are left untouched.
+          let fromToken = fromTokenRaw
+          let toToken = toTokenRaw
+          if (fromToken && !isAddress(fromToken) && !(fromToken.toUpperCase() in SWAP_TOKENS)) {
+            const st = await findStockToken(fromToken).catch(() => null)
+            if (st) fromToken = st.address
+          }
+          if (toToken && !isAddress(toToken) && !(toToken.toUpperCase() in SWAP_TOKENS)) {
+            const st = await findStockToken(toToken).catch(() => null)
+            if (st) toToken = st.address
           }
 
           // Dollar-denominated sells are converted here, deterministically, at the

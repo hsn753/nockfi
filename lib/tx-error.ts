@@ -19,6 +19,12 @@ export function cleanTxError(err: unknown): string {
   if (/timeout|timed out/.test(lower)) {
     return 'The network timed out. Nothing was sent — try again in a moment.'
   }
+  if (/unknown rpc error|internal (json-?rpc )?error|rpc error|-32603|-32000|could not coalesce/.test(lower)) {
+    return 'The network rejected the transaction — usually temporary (an RPC hiccup or the price moved). Wait a moment and press Confirm to try again.'
+  }
+  if (/slippage|price impact|too little received|minimum amount|STF|insufficient output/.test(lower)) {
+    return 'The price moved past your slippage limit before it landed. Nothing was spent — try again with a fresh quote.'
+  }
 
   // Fallback: the first line only (never the calldata dump), truncated.
   const firstLine = raw.split('\n')[0].replace(/\s+/g, ' ').trim()
