@@ -143,6 +143,10 @@ export async function fetchSwapQuote({
     sellToken: sell.address,
     buyToken: buy.address,
     sellAmount: sellAmountWei,
+    // 2% slippage tolerance (0x default is 1%). Sells of thinner tokens (NOCK, memecoins)
+    // were reverting on-chain: the price drifts during the approve→sign round-trip and 0x's
+    // minimum-output guard trips. 2% absorbs that; liquid pairs won't actually slip that far.
+    slippageBps: '200',
     ...(taker ? { taker } : {}),
   })
 
