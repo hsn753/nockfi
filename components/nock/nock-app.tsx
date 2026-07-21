@@ -789,6 +789,10 @@ export function NockApp() {
         const fromAmount = ((action as any).amount || '0').replace(/,/g, '')
         const sellTokenAddress = (action as any).sellTokenAddress as string | undefined
         const sellTokenDecimals = (action as any).sellTokenDecimals as number | undefined
+        // EXACT sell amount in wei from the quote. fromAmount is a display string rounded to
+        // 6 dp — for a full-balance "sell all" it rounds UP past the real balance, so using it
+        // for the pre-flight check / approval falsely fails with "not enough". Prefer this.
+        const sellAmountRaw = (action as any).sellAmountRaw as string | undefined
 
         // A yield withdrawal brings USDG back INTO the wallet — nothing is sold or
         // approved, so the sell-token balance/approval pre-flight below must be skipped
@@ -852,7 +856,9 @@ export function NockApp() {
           }
         } else if (publicClient && signerAddress) {
           const isNativeEth = sellTokenAddress.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()
-          const requiredAmount = parseUnits(fromAmount, sellTokenDecimals)
+          // Use the exact wei from the quote when present (avoids the round-up "not enough"
+          // on a full-balance sell); fall back to parsing the display amount otherwise.
+          const requiredAmount = sellAmountRaw ? BigInt(sellAmountRaw) : parseUnits(fromAmount, sellTokenDecimals)
           const ethBalance = await publicClient.getBalance({ address: signerAddress as `0x${string}` })
           const gasCost = BigInt(txData.gas || '0') * (await resolveSendGasPrice(publicClient, txData.gasPrice))
 
@@ -931,6 +937,9 @@ export function NockApp() {
                 amount: isWithdrawal ? '0' : fromAmount,
                 sellTokenAddress,
                 sellTokenDecimals,
+                // Exact wei to approve — avoids rounding the display amount UP past the
+                // balance on a full-balance sell (which made the approval/pull fail).
+                sellAmountRaw: isWithdrawal ? undefined : sellAmountRaw,
                 transaction: txData,
               }
               // Executor by route: Morpho collateral actions run an ordered multi-step

@@ -40,6 +40,7 @@ export type ExecuteUniswapSwapParams = {
   amount: string
   sellTokenAddress: string
   sellTokenDecimals: number
+  sellAmountRaw?: string // exact sell-side wei; preferred over parseUnits(amount) for approval
   transaction: {
     to: string
     data: string
@@ -55,6 +56,7 @@ export async function executeUniswapV4Swap({
   amount,
   sellTokenAddress,
   sellTokenDecimals,
+  sellAmountRaw,
   transaction,
 }: ExecuteUniswapSwapParams): Promise<{ txHash: Hash; error?: string }> {
   try {
@@ -63,7 +65,9 @@ export async function executeUniswapV4Swap({
       return { txHash: '0x' as Hash, error: 'No wallet connected' }
     }
 
-    const sellAmount = parseUnits(amount.replace(/,/g, ''), sellTokenDecimals)
+    // Exact wei from the quote when available — parsing the rounded display `amount` can
+    // round UP past the wallet balance on a full-balance sell, failing the approve/pull.
+    const sellAmount = sellAmountRaw ? BigInt(sellAmountRaw) : parseUnits(amount.replace(/,/g, ''), sellTokenDecimals)
     const permit2 = UNISWAP_V4.permit2 as `0x${string}`
     const router = transaction.to as `0x${string}`
     const token = sellTokenAddress as `0x${string}`

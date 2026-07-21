@@ -27,7 +27,8 @@ export const SWAP_TOKENS: Record<string, { address: string; decimals: number }> 
 export type SwapQuoteResult = {
   fromSymbol: string
   toSymbol: string
-  fromAmount: string
+  fromAmount: string // display string (rounded) — NEVER use for execution math
+  sellAmountRaw?: string // EXACT sell amount in wei — use this for balance checks/approvals
   toAmount: string
   exchangeRate: string
   liquidityAvailable: boolean
@@ -201,6 +202,9 @@ export async function fetchSwapQuote({
     fromSymbol: sell.symbol,
     toSymbol: buy.symbol,
     fromAmount: fromAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
+    // Exact wei 0x will pull — the display fromAmount rounds to 6 dp and, for a full-balance
+    // "sell all", rounds UP past the real balance, tripping the pre-flight "not enough" check.
+    sellAmountRaw: String(rawSell),
     toAmount: toAmt.toLocaleString('en-US', { maximumFractionDigits: 6 }),
     exchangeRate: `1 ${sell.symbol} = ${rateStr} ${buy.symbol}`,
     liquidityAvailable: true,

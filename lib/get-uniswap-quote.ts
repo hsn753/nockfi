@@ -125,6 +125,7 @@ export type UniswapStockQuote = {
   verified: boolean
   sellTokenAddress: string
   sellTokenDecimals: number
+  sellAmountRaw?: string // EXACT sell-side wei — use for balance checks/approvals, not fromAmount
   routeVia: 'uniswap-v4'
   poolFeePct: number
   // Unix seconds after which the encoded transaction's on-chain deadline check
@@ -159,6 +160,7 @@ export async function fetchUniswapStockQuote(params: {
     verified: true,
     sellTokenAddress: isBuy ? USDG_ADDRESS : stockAddress,
     sellTokenDecimals: inDecimals,
+    sellAmountRaw: amountIn.toString(),
     routeVia: 'uniswap-v4',
     poolFeePct: 0,
   }

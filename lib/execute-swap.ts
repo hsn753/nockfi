@@ -9,6 +9,7 @@ export type ExecuteSwapParams = {
   amount: string
   sellTokenAddress: string
   sellTokenDecimals: number
+  sellAmountRaw?: string // exact sell-side wei; preferred over parseUnits(amount) for approval
   transaction: {
     to: string
     data: string
@@ -24,6 +25,7 @@ export async function executeSwap({
   amount,
   sellTokenAddress,
   sellTokenDecimals,
+  sellAmountRaw,
   transaction,
 }: ExecuteSwapParams): Promise<{ txHash: Hash; error?: string }> {
   try {
@@ -42,7 +44,10 @@ export async function executeSwap({
     // allowance). Only approve the exact amount being sold, not unlimited, matching the
     // least-privilege approach used everywhere else in this app.
     if (sellTokenAddress.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase()) {
-      const sellAmountWei = parseUnits(amount.replace(/,/g, ''), sellTokenDecimals)
+      // Exact wei from the quote when available — parsing the rounded display `amount` can
+      // round UP past the wallet balance on a full-balance sell, so the approve/transferFrom
+      // then reverts with "not enough".
+      const sellAmountWei = sellAmountRaw ? BigInt(sellAmountRaw) : parseUnits(amount.replace(/,/g, ''), sellTokenDecimals)
       const currentAllowance = await publicClient.readContract({
         address: sellTokenAddress as `0x${string}`,
         abi: erc20Abi,

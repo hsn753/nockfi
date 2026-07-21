@@ -663,13 +663,14 @@ async function handlePOST(request: Request) {
       | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
-    // ── PRE-MODEL FAST PATH for stock trades ──────────────────────────────────────────
-    // Stock buy/sell is the one flow the model reliably fumbles (guessing contract
-    // addresses, even misreading a typo like "wan" as a ticker) — burning 5+ slow model
-    // rounds (the 1-2 min the user saw). When the message is an unambiguous
-    // "buy/sell $X | all | N of/worth SYMBOL" and SYMBOL is an OFFICIAL stock, build the
-    // quote + card HERE and skip the model loop entirely: near-instant and always right.
-    // Ambiguous cases (e.g. "sell that stock" with no ticker) fall through to the model.
+    // ── PRE-MODEL FAST PATH for trades ────────────────────────────────────────────────
+    // The model (even gpt-4o) is slow + easily confused on trades — e.g. "sell all my nock
+    // TOKENS" made it treat "tokens" as a ticker, burning 2-3 min then erroring. When the
+    // message is an unambiguous buy/sell of a KNOWN asset (an OFFICIAL stock OR a verified
+    // token: ETH/WETH/NOCK), build the quote + card HERE and skip the model loop entirely:
+    // near-instant and always right. Stocks route via Uniswap, verified tokens via 0x.
+    // Ambiguous cases (e.g. "sell that stock" with no ticker, memecoins, raw addresses)
+    // fall through to the model, which handles discovery/context.
     if (walletAddress && isAddress(walletAddress)) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
@@ -677,48 +678,61 @@ async function handlePOST(request: Request) {
         const verbMatch = fpText.match(/\b(buy|sell)\b/i)
         if (verbMatch) {
           const isBuy = verbMatch[1].toLowerCase() === 'buy'
-          const STOP = new Set(['buy', 'sell', 'all', 'full', 'everything', 'entire', 'max', 'my', 'the', 'of', 'with', 'worth', 'usdg', 'usd', 'dollars', 'to', 'for', 'a', 'an', 'stock', 'stocks', 'token', 'tokens', 'tokenized', 'want', 'wanna', 'wan', 'i', 'me', 'now', 'please', 'some', 'that', 'this', 'and'])
+          const STOP = new Set(['buy', 'sell', 'all', 'full', 'everything', 'entire', 'max', 'my', 'the', 'of', 'with', 'worth', 'usdg', 'usd', 'usdc', 'dollars', 'to', 'for', 'a', 'an', 'stock', 'stocks', 'token', 'tokens', 'tokenized', 'want', 'wanna', 'wan', 'i', 'me', 'now', 'please', 'some', 'that', 'this', 'and', 'swap', 'trade', 'convert'])
           const words = fpText.split(/[^a-zA-Z]+/).filter((w) => /^[a-zA-Z]{1,6}$/.test(w))
-          let stock: Awaited<ReturnType<typeof findStockToken>> = null
+          // The ASSET being traded (the non-USDG side): a verified token or an official stock.
+          let asset: { kind: 'stock' | 'verified'; symbol: string; address: string; decimals: number; priceUsd: number | null } | null = null
           for (const w of words) {
-            if (STOP.has(w.toLowerCase()) || w.toUpperCase() in SWAP_TOKENS) continue
+            const u = w.toUpperCase()
+            if (STOP.has(w.toLowerCase()) || u === 'USDG') continue
+            if (u in SWAP_TOKENS) { asset = { kind: 'verified', symbol: u, address: SWAP_TOKENS[u].address, decimals: SWAP_TOKENS[u].decimals, priceUsd: null }; break }
             const st = await findStockToken(w).catch(() => null)
-            if (st) { stock = st; break }
+            if (st) { asset = { kind: 'stock', symbol: st.symbol, address: st.address, decimals: 18, priceUsd: st.priceUsd }; break }
           }
-          if (stock) {
+          if (asset) {
             const dollarMatch = fpText.match(/\$\s*(\d+(?:\.\d+)?)/) || fpText.match(/(\d+(?:\.\d+)?)\s*(?:usdg|usd|dollars)\b/i)
             const wantsAll = /\b(all|full|everything|entire|max)\b/i.test(fpText)
             const bareNum = !dollarMatch && !wantsAll ? fpText.match(/(\d+(?:\.\d+)?)/) : null
-            let quoteAmount: string | null = null
+            let quoteAmount: string | null = null // asset units for a sell, USDG for a buy
             let fastErr: string | null = null
 
             if (isBuy) {
               if (dollarMatch) quoteAmount = dollarMatch[1]
               else if (bareNum) quoteAmount = bareNum[1]
-              else fastErr = `How much USDG do you want to spend to buy ${stock.symbol}?`
+              else fastErr = `How much USDG do you want to spend to buy ${asset.symbol}?`
             } else if (wantsAll) {
-              const raw = (await getReadClient().readContract({ address: stock.address as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] })) as bigint
-              if (raw > BigInt(0)) quoteAmount = formatUnits(raw, 18)
-              else fastErr = `You don't hold any ${stock.symbol} to sell.`
+              const raw = (await getReadClient().readContract({ address: asset.address as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] })) as bigint
+              if (raw > BigInt(0)) quoteAmount = formatUnits(raw, asset.decimals)
+              else fastErr = `You don't hold any ${asset.symbol} to sell.`
             } else if (dollarMatch) {
-              if (stock.priceUsd && stock.priceUsd > 0) quoteAmount = (parseFloat(dollarMatch[1]) / stock.priceUsd).toPrecision(8)
-              else fastErr = `I couldn't get a live ${stock.symbol} price to size a $${dollarMatch[1]} sell — tell me the amount in ${stock.symbol} units instead.`
+              let price = asset.priceUsd
+              if (price == null) { const rp = await getReferencePrices().catch(() => ({} as Record<string, number>)); price = rp[asset.symbol] ?? null }
+              if (price == null) { const dx = await getTokenPriceByAddress(asset.address).catch(() => null); price = dx?.priceUsd ?? null }
+              if (price && price > 0) quoteAmount = (parseFloat(dollarMatch[1]) / price).toPrecision(8)
+              else fastErr = `I couldn't get a live ${asset.symbol} price to size a $${dollarMatch[1]} sell — tell me the amount in ${asset.symbol} units instead.`
             } else if (bareNum) {
               quoteAmount = bareNum[1]
             } else {
-              fastErr = `How much ${stock.symbol} do you want to sell? Give an amount, a $ value, or say "all".`
+              fastErr = `How much ${asset.symbol} do you want to sell? Give an amount, a $ value, or say "all".`
             }
 
             if (fastErr) {
               responseText = fastErr
             } else if (quoteAmount) {
-              const quote = await fetchUniswapStockQuote({ stockAddress: stock.address, stockSymbol: stock.symbol, direction: isBuy ? 'buy' : 'sell', amount: quoteAmount })
-              if (quote.error) {
-                responseText = quote.error
+              const isStock = asset.kind === 'stock'
+              const quote = isStock
+                ? await fetchUniswapStockQuote({ stockAddress: asset.address, stockSymbol: asset.symbol, direction: isBuy ? 'buy' : 'sell', amount: quoteAmount })
+                : await fetchSwapQuote({ fromToken: isBuy ? 'USDG' : asset.symbol, toToken: isBuy ? asset.symbol : 'USDG', amount: quoteAmount, taker: walletAddress })
+              if ((quote as any).error) {
+                responseText = (quote as any).error
               } else {
-                const gate = await getNockGateStatus(walletAddress)
-                if (gate.enabled && !gate.holder) {
-                  responseText = gateMessage(gate, 'the Stock Token Agent')
+                let gateMsg: string | null = null
+                if (isStock) {
+                  const gate = await getNockGateStatus(walletAddress)
+                  if (gate.enabled && !gate.holder) gateMsg = gateMessage(gate, 'the Stock Token Agent')
+                }
+                if (gateMsg) {
+                  responseText = gateMsg
                 } else {
                   lastSwapQuote = quote
                   const outcomeValue = await computeQuotedTradeValue(quote)
@@ -726,14 +740,16 @@ async function handlePOST(request: Request) {
                   if (exceededLimit !== null) {
                     responseText = `That trade is worth about ${outcomeValue}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
                   } else {
-                    const headline = isBuy
-                      ? `Buy ${quote.toAmount} ${quote.toSymbol} with ${quote.fromAmount} ${quote.fromSymbol}`
-                      : `Sell ${quote.fromAmount} ${quote.fromSymbol} for ${quote.toAmount} ${quote.toSymbol}`
+                    const headline = isStock
+                      ? (isBuy ? `Buy ${quote.toAmount} ${quote.toSymbol} with ${quote.fromAmount} ${quote.fromSymbol}` : `Sell ${quote.fromAmount} ${quote.fromSymbol} for ${quote.toAmount} ${quote.toSymbol}`)
+                      : `Swap ${quote.fromAmount} ${quote.fromSymbol} for ${quote.toAmount} ${quote.toSymbol}`
                     action = {
                       id: `act-${Date.now()}`,
-                      agent: 'stock',
+                      agent: isStock ? 'stock' : 'swap',
                       action: headline,
-                      detail: 'This trades at the live Uniswap pool price. A stock token is price exposure only, not share ownership.',
+                      detail: isStock
+                        ? 'This trades at the live Uniswap pool price. A stock token is price exposure only, not share ownership.'
+                        : 'This swaps at the live quoted rate.',
                       metrics: [
                         { label: 'You pay', value: `${quote.fromAmount} ${quote.fromSymbol}` },
                         { label: 'You receive', value: `${quote.toAmount} ${quote.toSymbol}` },
@@ -748,10 +764,13 @@ async function handlePOST(request: Request) {
                       verified: true,
                       sellTokenAddress: quote.sellTokenAddress,
                       sellTokenDecimals: quote.sellTokenDecimals,
-                      routeVia: quote.routeVia,
-                      ...(quote.deadlineTimestamp ? { quoteDeadline: quote.deadlineTimestamp } : {}),
+                      sellAmountRaw: (quote as any).sellAmountRaw,
+                      ...((quote as any).routeVia ? { routeVia: (quote as any).routeVia } : {}),
+                      ...((quote as any).deadlineTimestamp ? { quoteDeadline: (quote as any).deadlineTimestamp } : {}),
                     } as any
-                    responseText = `Here's the ${isBuy ? 'buy' : 'sell'} preview for ${stock.symbol}, from the live Uniswap price — press Confirm to execute, or Review first. (A first stock trade can need up to three wallet confirmations: two approvals, then the trade.)`
+                    responseText = isStock
+                      ? `Here's the ${isBuy ? 'buy' : 'sell'} preview for ${asset.symbol}, from the live Uniswap price — press Confirm to execute, or Review first. (A first stock trade can need up to three wallet confirmations: two approvals, then the trade.)`
+                      : `Here's the ${isBuy ? 'buy' : 'sell'} preview for ${asset.symbol}, from the live quote — press Confirm to execute, or Review first.`
                   }
                 }
               }
@@ -763,7 +782,7 @@ async function handlePOST(request: Request) {
           }
         }
       } catch (e) {
-        console.error('[robin] stock fast-path failed, falling through to model:', e)
+        console.error('[robin] trade fast-path failed, falling through to model:', e)
       }
     }
 
@@ -1093,6 +1112,7 @@ async function handlePOST(request: Request) {
                 verified: lastSwapQuote.verified !== false,
                 sellTokenAddress: lastSwapQuote.sellTokenAddress,
                 sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
+                sellAmountRaw: lastSwapQuote.sellAmountRaw,
                 // Stock trades execute through the Uniswap Universal Router (Permit2
                 // settlement), not the 0x router — the client picks its executor off this.
                 ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
