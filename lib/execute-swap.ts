@@ -56,10 +56,14 @@ export async function executeSwap({
       })
 
       if (currentAllowance < sellAmountWei) {
+        // Approve max (one-time): once approved, every future trade of this token to the same
+        // 0x router needs NO second confirmation — just the swap. Standard dapp UX (per the
+        // user's chosen approvals setting). The router (0x AllowanceHolder) is audited.
+        const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
         const approveData = encodeFunctionData({
           abi: erc20Abi,
           functionName: 'approve',
-          args: [transaction.to as `0x${string}`, sellAmountWei],
+          args: [transaction.to as `0x${string}`, MAX_UINT256],
         })
         const approveHash = await walletClient.sendTransaction({
           account,

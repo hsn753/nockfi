@@ -72,15 +72,21 @@ export async function executeUniswapV4Swap({
     const router = transaction.to as `0x${string}`
     const token = sellTokenAddress as `0x${string}`
 
-    // Step 1: the token itself must allow Permit2 to move it. Exact amount, matching
-    // the least-privilege approach used for 0x swaps.
+    // One-time (max) approvals so repeat stock trades of this token need NO re-approval —
+    // just the swap (per the user's chosen approvals setting). Permit2 + the Universal
+    // Router are audited. MAX for the ERC-20 approval; max uint160 + a far expiry for the
+    // Permit2 allowance (its amount field is uint160, expiration uint48).
+    const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
+    const MAX_UINT160 = (BigInt(1) << BigInt(160)) - BigInt(1)
+
+    // Step 1: the token itself must allow Permit2 to move it.
     const erc20Allowance = await publicClient.readContract({
       address: token, abi: erc20Abi, functionName: 'allowance', args: [account, permit2],
     })
     if (erc20Allowance < sellAmount) {
       const approveHash = await walletClient.writeContract({
         address: token, abi: erc20Abi, functionName: 'approve',
-        args: [permit2, sellAmount],
+        args: [permit2, MAX_UINT256],
         account, chain: walletClient.chain,
       })
       const receipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
@@ -95,11 +101,13 @@ export async function executeUniswapV4Swap({
       address: permit2, abi: PERMIT2_ABI, functionName: 'allowance', args: [account, token, router],
     })
     const nowSec = Math.floor(Date.now() / 1000)
-    if (p2Amount < sellAmount || p2Expiration <= nowSec) {
-      const expiration = nowSec + PERMIT2_EXPIRATION_SECONDS
+    if (p2Amount < sellAmount || p2Expiration <= nowSec + 3600) {
+      // Long expiry (~10y) so it doesn't lapse and re-prompt. PERMIT2_EXPIRATION_SECONDS is
+      // the previous short window; use a large one here for the one-time UX.
+      const expiration = nowSec + 315_360_000
       const permitHash = await walletClient.writeContract({
         address: permit2, abi: PERMIT2_ABI, functionName: 'approve',
-        args: [token, router, sellAmount, expiration],
+        args: [token, router, MAX_UINT160, expiration],
         account, chain: walletClient.chain,
       })
       const receipt = await publicClient.waitForTransactionReceipt({ hash: permitHash })
