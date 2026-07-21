@@ -663,6 +663,110 @@ async function handlePOST(request: Request) {
       | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
+    // ── PRE-MODEL FAST PATH for stock trades ──────────────────────────────────────────
+    // Stock buy/sell is the one flow the model reliably fumbles (guessing contract
+    // addresses, even misreading a typo like "wan" as a ticker) — burning 5+ slow model
+    // rounds (the 1-2 min the user saw). When the message is an unambiguous
+    // "buy/sell $X | all | N of/worth SYMBOL" and SYMBOL is an OFFICIAL stock, build the
+    // quote + card HERE and skip the model loop entirely: near-instant and always right.
+    // Ambiguous cases (e.g. "sell that stock" with no ticker) fall through to the model.
+    if (walletAddress && isAddress(walletAddress)) {
+      try {
+        const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+        const fpText = (lastUser?.text || '').trim()
+        const verbMatch = fpText.match(/\b(buy|sell)\b/i)
+        if (verbMatch) {
+          const isBuy = verbMatch[1].toLowerCase() === 'buy'
+          const STOP = new Set(['buy', 'sell', 'all', 'full', 'everything', 'entire', 'max', 'my', 'the', 'of', 'with', 'worth', 'usdg', 'usd', 'dollars', 'to', 'for', 'a', 'an', 'stock', 'stocks', 'token', 'tokens', 'tokenized', 'want', 'wanna', 'wan', 'i', 'me', 'now', 'please', 'some', 'that', 'this', 'and'])
+          const words = fpText.split(/[^a-zA-Z]+/).filter((w) => /^[a-zA-Z]{1,6}$/.test(w))
+          let stock: Awaited<ReturnType<typeof findStockToken>> = null
+          for (const w of words) {
+            if (STOP.has(w.toLowerCase()) || w.toUpperCase() in SWAP_TOKENS) continue
+            const st = await findStockToken(w).catch(() => null)
+            if (st) { stock = st; break }
+          }
+          if (stock) {
+            const dollarMatch = fpText.match(/\$\s*(\d+(?:\.\d+)?)/) || fpText.match(/(\d+(?:\.\d+)?)\s*(?:usdg|usd|dollars)\b/i)
+            const wantsAll = /\b(all|full|everything|entire|max)\b/i.test(fpText)
+            const bareNum = !dollarMatch && !wantsAll ? fpText.match(/(\d+(?:\.\d+)?)/) : null
+            let quoteAmount: string | null = null
+            let fastErr: string | null = null
+
+            if (isBuy) {
+              if (dollarMatch) quoteAmount = dollarMatch[1]
+              else if (bareNum) quoteAmount = bareNum[1]
+              else fastErr = `How much USDG do you want to spend to buy ${stock.symbol}?`
+            } else if (wantsAll) {
+              const raw = (await getReadClient().readContract({ address: stock.address as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] })) as bigint
+              if (raw > BigInt(0)) quoteAmount = formatUnits(raw, 18)
+              else fastErr = `You don't hold any ${stock.symbol} to sell.`
+            } else if (dollarMatch) {
+              if (stock.priceUsd && stock.priceUsd > 0) quoteAmount = (parseFloat(dollarMatch[1]) / stock.priceUsd).toPrecision(8)
+              else fastErr = `I couldn't get a live ${stock.symbol} price to size a $${dollarMatch[1]} sell — tell me the amount in ${stock.symbol} units instead.`
+            } else if (bareNum) {
+              quoteAmount = bareNum[1]
+            } else {
+              fastErr = `How much ${stock.symbol} do you want to sell? Give an amount, a $ value, or say "all".`
+            }
+
+            if (fastErr) {
+              responseText = fastErr
+            } else if (quoteAmount) {
+              const quote = await fetchUniswapStockQuote({ stockAddress: stock.address, stockSymbol: stock.symbol, direction: isBuy ? 'buy' : 'sell', amount: quoteAmount })
+              if (quote.error) {
+                responseText = quote.error
+              } else {
+                const gate = await getNockGateStatus(walletAddress)
+                if (gate.enabled && !gate.holder) {
+                  responseText = gateMessage(gate, 'the Stock Token Agent')
+                } else {
+                  lastSwapQuote = quote
+                  const outcomeValue = await computeQuotedTradeValue(quote)
+                  const exceededLimit = await getExceededSpendLimit(walletAddress, outcomeValue)
+                  if (exceededLimit !== null) {
+                    responseText = `That trade is worth about ${outcomeValue}, which is over your set spend limit of $${exceededLimit} per transaction, so I can't prepare it. You can adjust the limit in Settings.`
+                  } else {
+                    const headline = isBuy
+                      ? `Buy ${quote.toAmount} ${quote.toSymbol} with ${quote.fromAmount} ${quote.fromSymbol}`
+                      : `Sell ${quote.fromAmount} ${quote.fromSymbol} for ${quote.toAmount} ${quote.toSymbol}`
+                    action = {
+                      id: `act-${Date.now()}`,
+                      agent: 'stock',
+                      action: headline,
+                      detail: 'This trades at the live Uniswap pool price. A stock token is price exposure only, not share ownership.',
+                      metrics: [
+                        { label: 'You pay', value: `${quote.fromAmount} ${quote.fromSymbol}` },
+                        { label: 'You receive', value: `${quote.toAmount} ${quote.toSymbol}` },
+                        { label: 'Rate', value: String(quote.exchangeRate) },
+                      ],
+                      status: 'pending',
+                      outcome: { title: `${quote.toSymbol} position`, value: outcomeValue, meta: `${quote.toAmount} ${quote.toSymbol}`, activityTitle: headline },
+                      transactionData: quote.transaction,
+                      fromToken: quote.fromSymbol,
+                      toToken: quote.toSymbol,
+                      amount: quote.fromAmount,
+                      verified: true,
+                      sellTokenAddress: quote.sellTokenAddress,
+                      sellTokenDecimals: quote.sellTokenDecimals,
+                      routeVia: quote.routeVia,
+                      ...(quote.deadlineTimestamp ? { quoteDeadline: quote.deadlineTimestamp } : {}),
+                    } as any
+                    responseText = `Here's the ${isBuy ? 'buy' : 'sell'} preview for ${stock.symbol}, from the live Uniswap price — press Confirm to execute, or Review first. (A first stock trade can need up to three wallet confirmations: two approvals, then the trade.)`
+                  }
+                }
+              }
+            }
+
+            if (action || responseText) {
+              return NextResponse.json({ text: responseText, action, bridgeInfo })
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[robin] stock fast-path failed, falling through to model:', e)
+      }
+    }
+
     // Loop so the model can chain tool calls within one request — e.g. get_swap_quote
     // to fetch real numbers, then propose_action to build the preview card from them.
     // A single non-looped round (the previous implementation) meant propose_action was
