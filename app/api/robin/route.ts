@@ -2010,6 +2010,12 @@ async function handlePOST(request: Request) {
               verified: lastSwapQuote.verified !== false,
               sellTokenAddress: lastSwapQuote.sellTokenAddress,
               sellTokenDecimals: lastSwapQuote.sellTokenDecimals,
+              // EXACT sell-side wei — without this the client falls back to parsing the
+              // display `amount` (rounded to 6dp), which on a full-balance "sell all" rounds
+              // UP past the real balance and trips a false "not enough". The other two card
+              // builders (fast-path, propose_action) already thread this; this deterministic
+              // synthesis path was the one that dropped it.
+              sellAmountRaw: lastSwapQuote.sellAmountRaw,
               ...(lastSwapQuote.routeVia ? { routeVia: lastSwapQuote.routeVia } : {}),
               ...(lastSwapQuote.deadlineTimestamp ? { quoteDeadline: lastSwapQuote.deadlineTimestamp } : {}),
             } as object),
