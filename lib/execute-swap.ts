@@ -2,6 +2,7 @@ import { cleanTxError } from './tx-error'
 import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits, encodeFunctionData } from 'viem'
 import { NATIVE_ETH_ADDRESS } from './get-swap-quote'
 import { resolveSendGasPrice } from './gas'
+import { supportsAtomicBatch, sendAtomicBatch } from './eip5792'
 
 export type ExecuteSwapParams = {
   walletClient: WalletClient
@@ -65,6 +66,31 @@ export async function executeSwap({
           functionName: 'approve',
           args: [transaction.to as `0x${string}`, MAX_UINT256],
         })
+
+        // If the wallet runs as a smart account (EIP-5792 atomic batching), send the
+        // approval AND the swap in ONE user confirmation — so even a first-ever trade of a
+        // token is a single tap. Standard EOAs don't support this; we fall through to the
+        // sequential approve-then-swap flow below, which behaves exactly as before.
+        const chainId = walletClient.chain?.id
+        if (chainId && (await supportsAtomicBatch(walletClient, account, chainId))) {
+          try {
+            const batched = await sendAtomicBatch(walletClient, {
+              account,
+              chain: walletClient.chain,
+              calls: [
+                { to: sellTokenAddress as `0x${string}`, data: approveData },
+                { to: transaction.to as `0x${string}`, data: transaction.data as `0x${string}`, value: BigInt(transaction.value) },
+              ],
+            })
+            return { txHash: (batched.txHash ?? ('0x' as Hash)), error: batched.error }
+          } catch (batchErr) {
+            // e.g. the wallet advertised batching but the user declined a one-time
+            // smart-account upgrade, or the bundle method errored. Don't fail the trade —
+            // fall through to the normal sequential approve + swap below.
+            console.warn('[execute-swap] atomic batch unavailable, using sequential flow:', batchErr)
+          }
+        }
+
         const approveHash = await walletClient.sendTransaction({
           account,
           chain: walletClient.chain,

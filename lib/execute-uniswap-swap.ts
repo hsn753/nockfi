@@ -1,7 +1,8 @@
 import { cleanTxError } from './tx-error'
-import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits } from 'viem'
+import { type Hash, type WalletClient, type PublicClient, erc20Abi, parseUnits, encodeFunctionData } from 'viem'
 import { UNISWAP_V4 } from './get-uniswap-quote'
 import { resolveSendGasPrice } from './gas'
+import { supportsAtomicBatch, sendAtomicBatch, type BatchCall } from './eip5792'
 
 // Executes a stock-token trade through the Uniswap Universal Router. Unlike the 0x
 // router (which pulls tokens via a direct ERC20 allowance), the Universal Router
@@ -79,36 +80,63 @@ export async function executeUniswapV4Swap({
     const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
     const MAX_UINT160 = (BigInt(1) << BigInt(160)) - BigInt(1)
 
+    // Which of the two approval steps are actually needed for this trade.
     // Step 1: the token itself must allow Permit2 to move it.
     const erc20Allowance = await publicClient.readContract({
       address: token, abi: erc20Abi, functionName: 'allowance', args: [account, permit2],
     })
-    if (erc20Allowance < sellAmount) {
-      const approveHash = await walletClient.writeContract({
-        address: token, abi: erc20Abi, functionName: 'approve',
-        args: [permit2, MAX_UINT256],
-        account, chain: walletClient.chain,
-      })
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
-      if (receipt.status !== 'success') {
-        return { txHash: approveHash, error: 'Token approval to Permit2 failed on-chain — the trade was not attempted.' }
-      }
-    }
-
+    const needErc20Approval = erc20Allowance < sellAmount
     // Step 2: Permit2 must allow the Universal Router to spend that token for this
     // wallet, and the allowance must not be expired.
     const [p2Amount, p2Expiration] = await publicClient.readContract({
       address: permit2, abi: PERMIT2_ABI, functionName: 'allowance', args: [account, token, router],
     })
     const nowSec = Math.floor(Date.now() / 1000)
-    if (p2Amount < sellAmount || p2Expiration <= nowSec + 3600) {
-      // Long expiry (~10y) so it doesn't lapse and re-prompt. PERMIT2_EXPIRATION_SECONDS is
-      // the previous short window; use a large one here for the one-time UX.
-      const expiration = nowSec + 315_360_000
-      const permitHash = await walletClient.writeContract({
-        address: permit2, abi: PERMIT2_ABI, functionName: 'approve',
-        args: [token, router, MAX_UINT160, expiration],
-        account, chain: walletClient.chain,
+    const needPermit2Approval = p2Amount < sellAmount || p2Expiration <= nowSec + 3600
+    // Long expiry (~10y) so it doesn't lapse and re-prompt. PERMIT2_EXPIRATION_SECONDS is
+    // the previous short window; use a large one here for the one-time UX.
+    const permit2Expiration = nowSec + 315_360_000
+
+    const erc20ApproveData = encodeFunctionData({
+      abi: erc20Abi, functionName: 'approve', args: [permit2, MAX_UINT256],
+    })
+    const permit2ApproveData = encodeFunctionData({
+      abi: PERMIT2_ABI, functionName: 'approve', args: [token, router, MAX_UINT160, permit2Expiration],
+    })
+
+    // If the wallet runs as a smart account (EIP-5792), bundle whatever approvals are
+    // needed PLUS the swap into ONE user confirmation — so even a first-ever stock trade
+    // is a single tap instead of up to three. Standard EOAs fall through to the
+    // sequential steps below, which behave exactly as before.
+    const chainId = walletClient.chain?.id
+    if ((needErc20Approval || needPermit2Approval) && chainId && (await supportsAtomicBatch(walletClient, account, chainId))) {
+      try {
+        const calls: BatchCall[] = []
+        if (needErc20Approval) calls.push({ to: token, data: erc20ApproveData })
+        if (needPermit2Approval) calls.push({ to: permit2, data: permit2ApproveData })
+        calls.push({ to: router, data: transaction.data as `0x${string}`, value: BigInt(transaction.value || '0') })
+        const batched = await sendAtomicBatch(walletClient, { account, chain: walletClient.chain, calls })
+        return { txHash: (batched.txHash ?? ('0x' as Hash)), error: batched.error }
+      } catch (batchErr) {
+        // Advertised batching but the bundle errored (e.g. user declined a one-time
+        // smart-account upgrade). Fall through to the sequential steps below.
+        console.warn('[execute-uniswap-swap] atomic batch unavailable, using sequential flow:', batchErr)
+      }
+    }
+
+    // Sequential fallback (standard wallet): approve step 1, then step 2, then swap.
+    if (needErc20Approval) {
+      const approveHash = await walletClient.sendTransaction({
+        account, chain: walletClient.chain, to: token, data: erc20ApproveData,
+      })
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
+      if (receipt.status !== 'success') {
+        return { txHash: approveHash, error: 'Token approval to Permit2 failed on-chain — the trade was not attempted.' }
+      }
+    }
+    if (needPermit2Approval) {
+      const permitHash = await walletClient.sendTransaction({
+        account, chain: walletClient.chain, to: permit2, data: permit2ApproveData,
       })
       const receipt = await publicClient.waitForTransactionReceipt({ hash: permitHash })
       if (receipt.status !== 'success') {
