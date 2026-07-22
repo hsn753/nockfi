@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useWallets, usePrivy, getIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
-import { erc20Abi, formatUnits, parseUnits, createWalletClient, custom } from 'viem'
+import { erc20Abi, formatUnits, parseUnits, createWalletClient, createPublicClient, encodeFunctionData, custom, type Chain } from 'viem'
+import { mainnet, base } from 'viem/chains'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
@@ -48,6 +49,13 @@ const SettingsView = dynamic(() => import('./settings-view').then((m) => m.Setti
 // Portfolio value calculation - will be real once we have price feeds
 const PORTFOLIO_BASE = 0
 const DEMO_IDS = new Set(['m1', 'm2'])
+
+// Source chains a Houdini cross-chain funding order can be signed on (see the
+// routeVia:'houdini' branch in handleLoose). Keyed by EVM chain id.
+const HOUDINI_SOURCE_CHAINS: Record<number, Chain> = {
+  [mainnet.id]: mainnet,
+  [base.id]: base,
+}
 
 export function NockApp() {
   const [activeView, setActiveView] = useState<NavView>('chat')
@@ -765,6 +773,126 @@ export function NockApp() {
             role: 'robin',
             text: `The position was not ${perps.reduceOnly ? 'closed' : 'opened'}: ${rawMessage} Nothing was placed — press Confirm to try again.`,
           },
+        ])
+      }
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
+    // CROSS-CHAIN FUNDING (Houdini): bring funds onto Robinhood Chain as USDG starting from
+    // an asset on ANOTHER chain (v1: USDC on Ethereum/Base). Unlike every other action here
+    // it signs on the SOURCE chain, so it has its own client + chain switch and never
+    // touches the Robinhood-chain balance/executor path below.
+    if ((action as any).routeVia === 'houdini') {
+      try {
+        if (!walletAddress || !activeWallet) throw new Error('Please connect your wallet first.')
+        const sourceKey = (action as any).houdiniSourceKey as string
+        const amount = (action as any).houdiniAmount as string
+        const sourceChainId = Number((action as any).houdiniSourceChainId)
+        const srcChain = HOUDINI_SOURCE_CHAINS[sourceChainId]
+        if (!srcChain) throw new Error('That source chain isn’t supported yet.')
+
+        const { identityToken, accessToken } = await getAuthTokens()
+        // Server re-quotes + creates the order (the KEY:CODE secret stays server-side) and
+        // returns the exact SOURCE-chain transaction to sign.
+        const res = await fetch('/api/houdini/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Privy-Identity-Token': identityToken ?? '',
+            'X-Privy-Access-Token': accessToken ?? '',
+          },
+          body: JSON.stringify({ sourceKey, amount, addressFrom: walletAddress, addressTo: walletAddress }),
+        })
+        const data = await res.json()
+        if (!res.ok || data.error) throw new Error(data.error || 'Could not set up the funding order.')
+        const meta = data.metadata
+        const source = data.source as { chainId: number; address: `0x${string}`; decimals: number; symbol: string }
+        if (!meta?.to || !meta?.data) {
+          throw new Error('This route needs a manual deposit address, which isn’t supported in-app yet. Try a different amount or chain.')
+        }
+
+        // Move the wallet to the source chain, then build a source-chain client pair.
+        await activeWallet.switchChain(sourceChainId)
+        const provider = await activeWallet.getEthereumProvider()
+        const srcWallet = createWalletClient({ account: walletAddress as `0x${string}`, chain: srcChain, transport: custom(provider) })
+        const srcPublic = createPublicClient({ chain: srcChain, transport: custom(provider) })
+
+        // Approve the source token to Houdini's router if the allowance is short (max, one-time).
+        if (data.requiresApproval !== false) {
+          const amtWei = parseUnits(String(amount), source.decimals)
+          const allowance = (await srcPublic.readContract({
+            address: source.address, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, meta.to as `0x${string}`],
+          })) as bigint
+          if (allowance < amtWei) {
+            const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [meta.to as `0x${string}`, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+            const ah = await srcWallet.sendTransaction({ account: walletAddress as `0x${string}`, chain: srcChain, to: source.address, data: approveData })
+            const ar = await srcPublic.waitForTransactionReceipt({ hash: ah })
+            if (ar.status !== 'success') throw new Error('Approval failed on the source chain — nothing was sent.')
+          }
+        }
+
+        // Sign + send the bridge transaction on the source chain.
+        const txHash = await srcWallet.sendTransaction({
+          account: walletAddress as `0x${string}`,
+          chain: srcChain,
+          to: meta.to as `0x${string}`,
+          data: meta.data as `0x${string}`,
+          value: BigInt(meta.value || '0'),
+          ...(meta.gasLimit ? { gas: BigInt(meta.gasLimit) } : {}),
+          ...(meta.maxFeePerGas ? { maxFeePerGas: BigInt(meta.maxFeePerGas) } : {}),
+          ...(meta.maxPriorityFeePerGas ? { maxPriorityFeePerGas: BigInt(meta.maxPriorityFeePerGas) } : {}),
+        })
+        const rcpt = await srcPublic.waitForTransactionReceipt({ hash: txHash })
+        if (rcpt.status !== 'success') throw new Error('The transaction reverted on the source chain — nothing was bridged (only gas was spent).')
+
+        // Return the wallet to Robinhood Chain for normal app use.
+        activeWallet.switchChain(nockChain.id).catch(() => {})
+
+        const outEst = Number(data.amountOut)
+        setMessages((prev) => {
+          const updated = prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'executed' as const } }
+              : m,
+          )
+          const confirm: ChatMessage = {
+            id: `${Date.now()}-c`,
+            role: 'robin',
+            text: `Sent ✅ Your ${amount} ${source.symbol} is on its way — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}USDG will arrive on Robinhood Chain in a few minutes. I'll pick it up in your balance once it lands.`,
+          }
+          return [...updated, confirm]
+        })
+
+        // Poll Houdini for arrival; refresh balance + confirm when it lands.
+        void (async () => {
+          for (let i = 0; i < 24; i++) {
+            await new Promise((r) => setTimeout(r, 15_000))
+            try {
+              const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
+              if (s?.done) {
+                fetchPortfolioValue()
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: `Funds landed 🎉 Your USDG is now on Robinhood Chain.` }])
+                return
+              }
+              if (s?.failed) {
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: `Heads up — the cross-chain transfer reported an issue. Your source-chain funds are safe; reference Houdini order ${String(data.houdiniId).slice(0, 8)}… if you need support.` }])
+                return
+              }
+            } catch {}
+          }
+          fetchPortfolioValue()
+        })()
+      } catch (error) {
+        try { await activeWallet?.switchChain(nockChain.id) } catch {}
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) =>
+            m.role === 'robin' && m.action && m.action.id === actionId
+              ? { ...m, action: { ...m.action, status: 'pending' as const } }
+              : m,
+          ),
+          { id: `${Date.now()}-error`, role: 'robin', text: `Cross-chain funding didn't complete: ${rawMessage}` },
         ])
       }
       executingActionsRef.current.delete(actionId)

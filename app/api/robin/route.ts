@@ -6,6 +6,7 @@ import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balan
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { lookupLighterAccount, getLighterAccountBalance } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
+import { houdiniEnabled, getHoudiniQuote } from '@/lib/houdini'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
@@ -662,6 +663,63 @@ async function handlePOST(request: Request) {
       | Awaited<ReturnType<typeof buildMarketWithdraw>>
       | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
+
+    // ── PRE-MODEL: cross-chain funding via Houdini ────────────────────────────────────
+    // "add/fund/deposit <amount> from ethereum/base" = bring funds INTO the wallet as USDG
+    // on Robinhood FROM another chain (v1: USDC on Ethereum/Base). Distinct from perps/yield
+    // deposits (which move USDG already on Robinhood) — the SOURCE-chain keyword + "from" is
+    // the trigger. Builds the preview card; the client signs ONE source-chain tx on Confirm
+    // (see nock-app routeVia:'houdini'). Deliberately excludes the word "bridge" so the
+    // informational get_bridge_info flow is untouched.
+    if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
+      try {
+        const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+        const txt = (lastUser?.text || '').trim()
+        const wantsFund = /\b(add|fund|deposit|bring|move|top\s*up|transfer)\b/i.test(txt)
+        const srcChain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|eth|mainnet|erc20)\b/i.test(txt) ? 'ethereum' : null
+        if (wantsFund && srcChain && /\bfrom\b/i.test(txt)) {
+          const chainLabel = srcChain === 'base' ? 'Base' : 'Ethereum'
+          const m = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usd|usdg|dollars)?/i)
+          const amount = m ? parseFloat(m[1]) : null
+          const sourceKey = `${srcChain}:USDC`
+          if (!amount || amount <= 0) {
+            responseText = `How much would you like to add from ${chainLabel}? Tell me an amount in USDC (e.g. "add 50 USDC from ${srcChain}").`
+          } else {
+            const country =
+              request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
+            const { source, best } = await getHoudiniQuote(sourceKey, amount, country || undefined)
+            const out = best.netAmountOut ?? best.amountOut
+            const etaMin = best.eta ?? best.duration ?? 5
+            const headline = `Add ${amount} ${source.symbol} from ${chainLabel} → ${out.toFixed(2)} USDG`
+            action = {
+              id: `act-${Date.now()}`,
+              agent: 'swap',
+              action: headline,
+              detail: `Brings funds onto Robinhood Chain as USDG via Houdini. You sign one transaction on ${chainLabel}; the USDG arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
+              metrics: [
+                { label: 'You send', value: `${amount} ${source.symbol} on ${chainLabel}` },
+                { label: 'You receive', value: `~${out.toFixed(2)} USDG on Robinhood` },
+                { label: 'Route', value: best.swapName || 'Houdini' },
+                { label: 'ETA', value: `~${etaMin} min` },
+              ],
+              status: 'pending',
+              outcome: { title: 'USDG on Robinhood', value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} USDG`, activityTitle: headline },
+              routeVia: 'houdini',
+              houdiniSourceKey: sourceKey,
+              houdiniAmount: String(amount),
+              houdiniSourceChainId: source.chainId,
+              verified: true,
+            } as any
+            responseText = `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.`
+          }
+          if (action || responseText) return NextResponse.json({ text: responseText, action, bridgeInfo })
+        }
+      } catch (e) {
+        const msg = (e as Error)?.message
+        console.error('[robin] houdini funding backstop failed:', msg)
+        return NextResponse.json({ text: `I couldn't set up cross-chain funding right now${msg ? `: ${msg}` : '.'}`, bridgeInfo })
+      }
+    }
 
     // ── PRE-MODEL FAST PATH for trades ────────────────────────────────────────────────
     // The model (even gpt-4o) is slow + easily confused on trades — e.g. "sell all my nock
