@@ -676,49 +676,63 @@ async function handlePOST(request: Request) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
-        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet)\b/i.test(txt) ? 'ethereum' : null
+        // "eth chain" is an alias for Ethereum-the-network (as opposed to bare "eth", which
+        // below means the ETH TOKEN) — lets "swap to eth chain" resolve the destination chain.
+        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet|eth\s*chain)\b/i.test(txt) ? 'ethereum' : null
         const fundVerb = /\b(add|fund|deposit|bring|top\s*up)\b/i.test(txt)
         const cashVerb = /\b(cash\s*out|cashout|withdraw|off\s*ramp|take\s*out|send)\b/i.test(txt)
         const swapVerb = /\b(swap|convert|move|transfer|bridge)\b/i.test(txt)
         const usdc = /\busdc\b/i.test(txt)
         const usdg = /\busdg\b/i.test(txt)
+        // Bare "eth" (not "ethereum") as the EXTERNAL asset — e.g. "swap 0.01 eth from base
+        // to usdg". Requires an explicit chain (below) since ETH also exists natively on
+        // Robinhood Chain; without a named external chain this is ambiguous with a normal
+        // same-chain swap, which the regular swap agent already handles.
+        const eth = /\beth\b/i.test(txt)
+        const assetSymbol: 'USDC' | 'ETH' | null = usdc ? 'USDC' : eth ? 'ETH' : null
         // Determine direction. A USDC<->USDG conversion is itself unambiguous (USDC lives on
         // Ethereum/Base, USDG on Robinhood), so it maps to a Houdini flow even with no chain
         // named — that's the case that used to fall through to the old bridge deep-link.
         let direction: 'in' | 'out' | null = null
         if (/\busdc\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdg\b/i.test(txt)) direction = 'in'
         else if (/\busdg\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdc\b/i.test(txt)) direction = 'out'
-        else if (chain && /\bfrom\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'in'
-        else if (chain && /\b(to|onto|into)\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'out'
+        else if (chain && /\bfrom\s+(ethereum|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'in'
+        else if (chain && /\b(to|onto|into)\s+(ethereum|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'out'
         else if (chain && fundVerb) direction = 'in'
         else if (chain && cashVerb) direction = 'out'
         else if (chain && swapVerb && usdg) direction = 'out'
         // No chain named on a clear USDC<->USDG request → default to Ethereum (tell the user
-        // they can say "Base"). USDC is on both; Ethereum is the common case.
+        // they can say "Base"). USDC is on both; Ethereum is the common case. ETH never gets
+        // this default — see note above on why it requires an explicit chain.
         let chainDefaulted = false
         if (!chain && direction && usdc && usdg) { chain = 'ethereum'; chainDefaulted = true }
 
-        if (chain && direction && (fundVerb || cashVerb || swapVerb || (usdc && usdg))) {
+        if (chain && direction && assetSymbol && (fundVerb || cashVerb || swapVerb || (usdc && usdg))) {
           const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
           const chainNote = chainDefaulted ? ` (assuming your ${direction === 'in' ? 'USDC' : 'USDC destination'} is on ${chainLabel} — say "Base" to use Base instead)` : ''
-          // ETH as the external asset isn't supported yet (native-ETH token ids aren't
-          // discoverable via Houdini's API) — steer to USDC.
-          const asksEth = /\beth(ereum)?\b/i.test(txt) && /\b(to|for|into)\s+eth\b/i.test(txt)
-          const assetKey = `${chain}:USDC`
-          const m = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|usd|dollars)?/i)
+          const assetKey = `${chain}:${assetSymbol}`
+          const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
+          const m = dollarMatch || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|eth|usd|dollars)?/i)
           const amount = m ? parseFloat(m[1]) : null
           // Houdini enforces a per-transfer minimum (~$5 in practice, up to $10/$25 on some
           // routes). Use a clean $10 floor so the user gets a friendly heads-up instead of a
-          // raw API "amount too low" error, and never hits a route that rejects it.
+          // raw API "amount too low" error. Only applies to USDC, which is ~1:1 with USD —
+          // ETH amounts are in ETH units (e.g. "0.01 eth"), not dollars, so this check doesn't
+          // translate; Houdini's own quote call surfaces a real error for a too-small amount.
           const MIN_USD = 10
-          if (asksEth && direction === 'out') {
-            responseText = `Right now cross-chain cash-out supports USDC (on ${chainLabel}), not native ETH yet. Want to send USDC instead? e.g. "cash out ${amount ?? 50} USDG to USDC on ${chain}".`
+          // Cash-out (direction 'out') always sells USDG (~1:1 USD) no matter which external
+          // asset is the destination, so a "$" amount is always safe there. Funding-IN with
+          // ETH is the one case where the sell amount is in the ASSET's own units — a "$"
+          // prefix there would misread "$20 eth" as 20 WHOLE ETH (~$37k) instead of $20 worth.
+          // Refuse to guess; ask for an explicit ETH amount instead.
+          if (assetSymbol === 'ETH' && direction === 'in' && dollarMatch) {
+            responseText = `For ETH, give the amount in ETH (not dollars) — e.g. "add 0.01 ETH from ${chain}".`
           } else if (!amount || amount <= 0) {
             responseText =
               direction === 'in'
-                ? `How much would you like to add from ${chainLabel}? Give an amount in USDC (e.g. "add 50 USDC from ${chain}").`
-                : `How much USDG do you want to cash out to ${chainLabel}? e.g. "cash out 50 USDG to USDC on ${chain}".`
-          } else if (amount < MIN_USD) {
+                ? `How much would you like to add from ${chainLabel}? Give an amount in ${assetSymbol} (e.g. "add 50 ${assetSymbol} from ${chain}").`
+                : `How much USDG do you want to cash out to ${chainLabel}? e.g. "cash out 50 USDG to ${assetSymbol} on ${chain}".`
+          } else if (assetSymbol === 'USDC' && amount < MIN_USD) {
             responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more — e.g. ${
               direction === 'in' ? `"add ${MIN_USD} USDC from ${chain}"` : `"cash out ${MIN_USD} USDG to USDC on ${chain}"`
             }.`

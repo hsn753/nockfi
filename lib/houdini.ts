@@ -28,17 +28,18 @@ export type HoudiniAsset = {
   chain: string // Houdini shortName
   chainId: number // EVM chain id of the external side
   symbol: string
-  address: `0x${string}` // external token contract (for approvals when it's the sell side)
+  address: `0x${string}` | null // external token contract; null = native asset (e.g. ETH — no ERC20 to approve)
   decimals: number
   tokenId: string // Houdini token id
   label: string
 }
 
 // The external (non-Robinhood) asset in each flow. Used as the SOURCE for funding-in and
-// the DESTINATION for cashing-out. USDC first (clean ~1:1 vs USDG, low slippage). Token
-// ids verified live. Extend via GET /tokens?chain=<shortName>&address=<addr>.
-// NOTE: native ETH ids are NOT discoverable through Houdini's listing API (native tokens
-// are hidden from chain-filtered lists) — add ETH here once Houdini provides its token ids.
+// the DESTINATION for cashing-out. Token ids verified live. Extend via
+// GET /tokens?chain=<shortName>&address=<addr> for ERC20s; native coins (address=null, e.g.
+// ETH) aren't returned by that address-filtered lookup — they only surface via
+// GET /tokens?chain=<shortName>&search=<symbol> (paginated; the exact-symbol match has
+// address:null and its own token id).
 export const HOUDINI_ASSETS: Record<string, HoudiniAsset> = {
   'ethereum:USDC': {
     key: 'ethereum:USDC', chain: 'ethereum', chainId: 1, symbol: 'USDC',
@@ -49,6 +50,16 @@ export const HOUDINI_ASSETS: Record<string, HoudiniAsset> = {
     key: 'base:USDC', chain: 'base', chainId: 8453, symbol: 'USDC',
     address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6,
     tokenId: '6689b757c90e45f3b3e51805', label: 'USDC on Base',
+  },
+  'ethereum:ETH': {
+    key: 'ethereum:ETH', chain: 'ethereum', chainId: 1, symbol: 'ETH',
+    address: null, decimals: 18,
+    tokenId: '6689b73ec90e45f3b3e51566', label: 'ETH on Ethereum',
+  },
+  'base:ETH': {
+    key: 'base:ETH', chain: 'base', chainId: 8453, symbol: 'ETH',
+    address: null, decimals: 18,
+    tokenId: '6689b73ec90e45f3b3e51590', label: 'ETH on Base',
   },
 }
 
@@ -98,7 +109,9 @@ export type HoudiniRoute = {
 }
 
 // The token the user actually SIGNS with (the sell side), plus the chain they sign on.
-export type HoudiniSignSide = { chainId: number; address: `0x${string}`; decimals: number; symbol: string }
+// address is null for a native-coin sell (e.g. ETH) — there's no ERC20 to approve; the
+// amount is sent as tx value instead.
+export type HoudiniSignSide = { chainId: number; address: `0x${string}` | null; decimals: number; symbol: string }
 
 // Quote a flow. `direction` picks which side is USDG:
 //   in  → from external asset, to USDG (sign on the external chain).

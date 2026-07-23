@@ -817,7 +817,7 @@ export function NockApp() {
         const data = await res.json()
         if (!res.ok || data.error) throw new Error(data.error || 'Could not set up the order.')
         const meta = data.metadata
-        const sign = data.sign as { chainId: number; address: `0x${string}`; decimals: number; symbol: string }
+        const sign = data.sign as { chainId: number; address: `0x${string}` | null; decimals: number; symbol: string }
         if (!meta?.to || !meta?.data) {
           throw new Error('This route needs a manual deposit address, which isn’t supported in-app yet. Try a different amount or chain.')
         }
@@ -836,14 +836,17 @@ export function NockApp() {
         const signPublic = createPublicClient({ chain: signChain, transport: http(HOUDINI_READ_RPC[sign.chainId]) })
 
         // Approve the sell token to Houdini's router if the allowance is short (max, one-time).
-        if (data.requiresApproval !== false) {
+        // A native-coin sell (sign.address === null, e.g. ETH) has no ERC20 to approve — the
+        // amount is sent as tx value on the bridge tx itself, so this step is skipped entirely.
+        if (data.requiresApproval !== false && sign.address) {
+          const sellTokenAddress = sign.address
           const amtWei = parseUnits(String(amount), sign.decimals)
           const allowance = (await signPublic.readContract({
-            address: sign.address, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, meta.to as `0x${string}`],
+            address: sellTokenAddress, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, meta.to as `0x${string}`],
           })) as bigint
           if (allowance < amtWei) {
             const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [meta.to as `0x${string}`, (BigInt(1) << BigInt(256)) - BigInt(1)] })
-            const ah = await signWallet.sendTransaction({ account: walletAddress as `0x${string}`, chain: signChain, to: sign.address, data: approveData })
+            const ah = await signWallet.sendTransaction({ account: walletAddress as `0x${string}`, chain: signChain, to: sellTokenAddress, data: approveData })
             const ar = await signPublic.waitForTransactionReceipt({ hash: ah })
             if (ar.status !== 'success') throw new Error('Approval failed — nothing was sent.')
           }
