@@ -59,6 +59,15 @@ const HOUDINI_SOURCE_CHAINS: Record<number, Chain> = {
   [nockChain.id]: nockChain,
 }
 
+// Explicit, CORS-friendly public RPCs for reads (allowance checks, waitForTransactionReceipt)
+// during the Houdini flow — viem's built-in default RPC list for these chains starts with
+// eth.merkle.io, which has proven unreliable ("Failed to fetch") from the browser. Falls back
+// to viem's default (undefined -> http()) for any chain not listed here.
+const HOUDINI_READ_RPC: Record<number, string> = {
+  [mainnet.id]: 'https://ethereum-rpc.publicnode.com',
+  [base.id]: 'https://base-rpc.publicnode.com',
+}
+
 export function NockApp() {
   const [activeView, setActiveView] = useState<NavView>('chat')
   const [selectedAgent, setSelectedAgent] = useState<AgentId | null>(null)
@@ -824,7 +833,7 @@ export function NockApp() {
         // not the embedded wallet's own provider — routing receipt polling through the
         // wallet proxy was unreliable and caused spurious "timed out" errors even after the
         // tx had actually confirmed on-chain.
-        const signPublic = createPublicClient({ chain: signChain, transport: http() })
+        const signPublic = createPublicClient({ chain: signChain, transport: http(HOUDINI_READ_RPC[sign.chainId]) })
 
         // Approve the sell token to Houdini's router if the allowance is short (max, one-time).
         if (data.requiresApproval !== false) {
