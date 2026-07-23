@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useWallets, usePrivy, getIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
-import { erc20Abi, formatUnits, parseUnits, createWalletClient, createPublicClient, encodeFunctionData, custom, type Chain } from 'viem'
+import { erc20Abi, formatUnits, parseUnits, createWalletClient, createPublicClient, encodeFunctionData, custom, http, type Chain } from 'viem'
 import { mainnet, base } from 'viem/chains'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -820,7 +820,11 @@ export function NockApp() {
         await activeWallet.switchChain(sign.chainId)
         const provider = await activeWallet.getEthereumProvider()
         const signWallet = createWalletClient({ account: walletAddress as `0x${string}`, chain: signChain, transport: custom(provider) })
-        const signPublic = createPublicClient({ chain: signChain, transport: custom(provider) })
+        // Reads (allowance checks, waitForTransactionReceipt) go through a real public RPC,
+        // not the embedded wallet's own provider — routing receipt polling through the
+        // wallet proxy was unreliable and caused spurious "timed out" errors even after the
+        // tx had actually confirmed on-chain.
+        const signPublic = createPublicClient({ chain: signChain, transport: http() })
 
         // Approve the sell token to Houdini's router if the allowance is short (max, one-time).
         if (data.requiresApproval !== false) {
