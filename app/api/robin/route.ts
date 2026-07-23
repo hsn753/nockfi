@@ -694,6 +694,12 @@ async function handlePOST(request: Request) {
         // same-chain swap, which the regular swap agent already handles.
         const eth = /\beth\b/i.test(txt)
         const assetSymbol: 'USDC' | 'ETH' | null = usdc ? 'USDC' : eth ? 'ETH' : null
+        // "to/from robinhood(chain)" is an explicit, unambiguous cross-chain signal on its
+        // own — the ONLY chain named might be the external one (e.g. "bridge eth to
+        // robinhood" names no external chain at all). Checked independently of `chain` so it
+        // still resolves direction even when no external chain was mentioned.
+        const toRobinhood = /\b(to|onto|into)\s+robinhood(\s*chain)?\b/i.test(txt)
+        const fromRobinhood = /\bfrom\s+robinhood(\s*chain)?\b/i.test(txt)
         // Determine direction. A USDC<->USDG conversion is itself unambiguous (USDC lives on
         // Ethereum/Base, USDG on Robinhood), so it maps to a Houdini flow even with no chain
         // named — that's the case that used to fall through to the old bridge deep-link.
@@ -702,14 +708,19 @@ async function handlePOST(request: Request) {
         else if (/\busdg\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdc\b/i.test(txt)) direction = 'out'
         else if (chain && /\bfrom\s+(ether\w*|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'in'
         else if (chain && /\b(to|onto|into)\s+(ether\w*|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'out'
+        else if (toRobinhood) direction = 'in'
+        else if (fromRobinhood) direction = 'out'
         else if (chain && fundVerb) direction = 'in'
         else if (chain && cashVerb) direction = 'out'
         else if (chain && swapVerb && usdg) direction = 'out'
-        // No chain named on a clear USDC<->USDG request → default to Ethereum (tell the user
-        // they can say "Base"). USDC is on both; Ethereum is the common case. ETH never gets
-        // this default — see note above on why it requires an explicit chain.
+        // No external chain named, but the request is unambiguous anyway → default to
+        // Ethereum (tell the user they can say "Base"): either a USDC<->USDG conversion
+        // (USDC lives on Ethereum/Base), or an explicit "to/from robinhood" mention — both
+        // signal cross-chain intent clearly enough that ETH gets this default too here
+        // (unlike the plain "chain && ..." rules above, where bare "eth" alone would be
+        // ambiguous with a normal same-chain swap).
         let chainDefaulted = false
-        if (!chain && direction && usdc && usdg) { chain = 'ethereum'; chainDefaulted = true }
+        if (!chain && direction && (usdg || toRobinhood || fromRobinhood)) { chain = 'ethereum'; chainDefaulted = true }
 
         if (chain && direction && assetSymbol && (fundVerb || cashVerb || swapVerb || (usdc && usdg))) {
           const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
@@ -722,24 +733,34 @@ async function handlePOST(request: Request) {
           const robinhoodAsset: RobinhoodAssetKey = usdg ? 'USDG' : assetSymbol === 'ETH' ? 'ETH' : 'USDG'
           const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
           const m = dollarMatch || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|eth|usd|dollars)?/i)
-          const amount = m ? parseFloat(m[1]) : null
+          let amount = m ? parseFloat(m[1]) : null
           // Houdini enforces a per-transfer minimum (~$5 in practice, up to $10/$25 on some
           // routes). Use a clean $10 floor so the user gets a friendly heads-up instead of a
           // raw API "amount too low" error. Only applies when the SELL side is USDC/USDG,
-          // which are ~1:1 with USD — an ETH sell side is in ETH units (e.g. "0.01 eth"), so
-          // this check doesn't translate; Houdini's own quote call surfaces a real error for
-          // a too-small amount.
+          // which are ~1:1 with USD — an ETH sell side is in ETH units, so this check doesn't
+          // translate; Houdini's own quote call surfaces a real error for a too-small amount.
           const MIN_USD = 10
           // The sell side is in ETH units (not USD) whenever funding-IN sells external ETH,
-          // OR cashing-OUT sells Robinhood-native ETH (the new ETH<->ETH bridge). A "$"
-          // prefix there would misread "$20 eth" as 20 WHOLE ETH (~$37k) instead of $20
-          // worth. Refuse to guess; ask for an explicit ETH amount instead.
+          // OR cashing-OUT sells Robinhood-native ETH (the ETH<->ETH bridge). A "$" amount
+          // there means dollars-WORTH, not literal ETH units — convert using a live price
+          // (same feed the portfolio valuation uses) rather than either misreading "$20" as
+          // 20 whole ETH (~$37k) or making the user do the math themselves.
           const sellSideIsEth = (direction === 'in' && assetSymbol === 'ETH') || (direction === 'out' && robinhoodAsset === 'ETH')
-          if (sellSideIsEth && dollarMatch) {
-            responseText =
-              direction === 'in'
-                ? `For ETH, give the amount in ETH (not dollars) — e.g. "add 0.01 ETH from ${chain}".`
-                : `For ETH, give the amount in ETH (not dollars) — e.g. "bridge 0.01 ETH to ${chain}".`
+          let ethPriceNote = ''
+          let ethPriceFetchFailed = false
+          if (sellSideIsEth && dollarMatch && amount) {
+            const ethPrice = (await getReferencePrices()).ETH
+            if (ethPrice) {
+              const usdAmount = amount
+              amount = Math.round((usdAmount / ethPrice) * 1e6) / 1e6
+              ethPriceNote = ` (≈ $${usdAmount.toFixed(2)} at $${ethPrice.toFixed(2)}/ETH)`
+            } else {
+              amount = null // no live price available — fall through to the prompt below
+              ethPriceFetchFailed = true
+            }
+          }
+          if (ethPriceFetchFailed) {
+            responseText = `I couldn't fetch a live ETH price to convert that right now — give the amount in ETH directly instead, e.g. "${direction === 'in' ? `add 0.01 ETH from ${chain}` : `bridge 0.01 ETH to ${chain}`}".`
           } else if (!amount || amount <= 0) {
             responseText =
               direction === 'in'
@@ -761,14 +782,15 @@ async function handlePOST(request: Request) {
             // The symbol for whichever side `out` (the amount RECEIVED) represents.
             const outSymbol = direction === 'in' ? robinhoodAsset : asset.symbol
             const outStr = fmtHoudiniAmount(out, outSymbol)
-            const sellLabel = direction === 'in' ? `${amount} ${asset.symbol}` : `${amount} ${robinhoodAsset}`
+            const sellSymbol = direction === 'in' ? asset.symbol : robinhoodAsset
+            const sellLabel = `${fmtHoudiniAmount(amount, sellSymbol)} ${sellSymbol}`
             const headline =
               direction === 'in'
                 ? `Add ${sellLabel} from ${chainLabel} → ${outStr} ${robinhoodAsset}`
                 : robinhoodAsset === 'ETH'
                   ? `Bridge ${sellLabel} on Robinhood → ${outStr} ${asset.symbol} on ${chainLabel}`
                   : `Cash out ${sellLabel} → ${outStr} ${asset.symbol} on ${chainLabel}`
-            const sendLine = direction === 'in' ? `${amount} ${asset.symbol} on ${chainLabel}` : `${amount} ${robinhoodAsset} on Robinhood`
+            const sendLine = direction === 'in' ? `${sellLabel} on ${chainLabel}` : `${sellLabel} on Robinhood`
             const recvLine = direction === 'in' ? `~${outStr} ${robinhoodAsset} on Robinhood` : `~${outStr} ${asset.symbol} on ${chainLabel}`
             const signWhere = direction === 'in' ? chainLabel : 'Robinhood Chain'
             const robinhoodOnRobinhoodText =
@@ -797,11 +819,11 @@ async function handlePOST(request: Request) {
               verified: true,
             } as any
             responseText =
-              direction === 'in'
+              (direction === 'in'
                 ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive ${robinhoodAsset} on Robinhood.${chainNote}`
                 : robinhoodAsset === 'ETH'
                   ? `Here's your bridge preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
-                  : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
+                  : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`) + ethPriceNote
           }
           if (action || responseText) return NextResponse.json({ text: responseText, action, bridgeInfo })
         }
