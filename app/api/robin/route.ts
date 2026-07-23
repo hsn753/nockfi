@@ -678,7 +678,11 @@ async function handlePOST(request: Request) {
         const txt = (lastUser?.text || '').trim()
         // "eth chain" is an alias for Ethereum-the-network (as opposed to bare "eth", which
         // below means the ETH TOKEN) — lets "swap to eth chain" resolve the destination chain.
-        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet|eth\s*chain)\b/i.test(txt) ? 'ethereum' : null
+        // `ether\w*` (not a literal "ethereum") tolerates "ether"/"etherium"/typos like
+        // "etherum" — a message with the typo used to miss this regex entirely and fall
+        // through to the general model, which doesn't know Houdini is an approved
+        // integration and would refuse to help with it when named explicitly.
+        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ether\w*|mainnet|eth\s*chain)\b/i.test(txt) ? 'ethereum' : null
         const fundVerb = /\b(add|fund|deposit|bring|top\s*up)\b/i.test(txt)
         const cashVerb = /\b(cash\s*out|cashout|withdraw|off\s*ramp|take\s*out|send)\b/i.test(txt)
         const swapVerb = /\b(swap|convert|move|transfer|bridge)\b/i.test(txt)
@@ -696,8 +700,8 @@ async function handlePOST(request: Request) {
         let direction: 'in' | 'out' | null = null
         if (/\busdc\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdg\b/i.test(txt)) direction = 'in'
         else if (/\busdg\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdc\b/i.test(txt)) direction = 'out'
-        else if (chain && /\bfrom\s+(ethereum|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'in'
-        else if (chain && /\b(to|onto|into)\s+(ethereum|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'out'
+        else if (chain && /\bfrom\s+(ether\w*|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'in'
+        else if (chain && /\b(to|onto|into)\s+(ether\w*|base|mainnet|eth\s*chain)\b/i.test(txt)) direction = 'out'
         else if (chain && fundVerb) direction = 'in'
         else if (chain && cashVerb) direction = 'out'
         else if (chain && swapVerb && usdg) direction = 'out'
