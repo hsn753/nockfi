@@ -675,20 +675,31 @@ async function handlePOST(request: Request) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
-        const chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet)\b/i.test(txt) ? 'ethereum' : null
+        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet)\b/i.test(txt) ? 'ethereum' : null
         const fundVerb = /\b(add|fund|deposit|bring|top\s*up)\b/i.test(txt)
         const cashVerb = /\b(cash\s*out|cashout|withdraw|off\s*ramp|take\s*out|send)\b/i.test(txt)
-        const swapVerb = /\b(swap|convert|move|transfer)\b/i.test(txt)
-        // Determine direction from prepositions first, then verbs.
+        const swapVerb = /\b(swap|convert|move|transfer|bridge)\b/i.test(txt)
+        const usdc = /\busdc\b/i.test(txt)
+        const usdg = /\busdg\b/i.test(txt)
+        // Determine direction. A USDC<->USDG conversion is itself unambiguous (USDC lives on
+        // Ethereum/Base, USDG on Robinhood), so it maps to a Houdini flow even with no chain
+        // named — that's the case that used to fall through to the old bridge deep-link.
         let direction: 'in' | 'out' | null = null
-        if (chain && /\bfrom\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'in'
+        if (/\busdc\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdg\b/i.test(txt)) direction = 'in'
+        else if (/\busdg\b[\s\S]{0,12}\b(to|into|for|=>|->)\b[\s\S]{0,12}\busdc\b/i.test(txt)) direction = 'out'
+        else if (chain && /\bfrom\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'in'
         else if (chain && /\b(to|onto|into)\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'out'
         else if (chain && fundVerb) direction = 'in'
         else if (chain && cashVerb) direction = 'out'
-        else if (chain && swapVerb && /\busdg\b/i.test(txt)) direction = 'out'
+        else if (chain && swapVerb && usdg) direction = 'out'
+        // No chain named on a clear USDC<->USDG request → default to Ethereum (tell the user
+        // they can say "Base"). USDC is on both; Ethereum is the common case.
+        let chainDefaulted = false
+        if (!chain && direction && usdc && usdg) { chain = 'ethereum'; chainDefaulted = true }
 
-        if (chain && direction && (fundVerb || cashVerb || swapVerb)) {
+        if (chain && direction && (fundVerb || cashVerb || swapVerb || (usdc && usdg))) {
           const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
+          const chainNote = chainDefaulted ? ` (assuming your ${direction === 'in' ? 'USDC' : 'USDC destination'} is on ${chainLabel} — say "Base" to use Base instead)` : ''
           // ETH as the external asset isn't supported yet (native-ETH token ids aren't
           // discoverable via Houdini's API) — steer to USDC.
           const asksEth = /\beth(ereum)?\b/i.test(txt) && /\b(to|for|into)\s+eth\b/i.test(txt)
@@ -739,8 +750,8 @@ async function handlePOST(request: Request) {
             } as any
             responseText =
               direction === 'in'
-                ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.`
-                : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.`
+                ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.${chainNote}`
+                : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
           }
           if (action || responseText) return NextResponse.json({ text: responseText, action, bridgeInfo })
         }
