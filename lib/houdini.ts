@@ -14,13 +14,31 @@
 
 const HOUDINI_BASE = 'https://api-partner.houdiniswap.com/v2'
 
-// USDG on Robinhood Chain — the Robinhood side of every flow.
+// USDG on Robinhood Chain — the default Robinhood side (fund your USDG wallet).
 export const ROBINHOOD_USDG = {
   chainId: 4663,
   address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as `0x${string}`,
   decimals: 6,
   symbol: 'USDG',
   tokenId: '6a4686845de9c7c6e77d3f0c',
+}
+
+// Native ETH on Robinhood Chain — the OTHER possible Robinhood side, for a direct
+// ETH<->ETH bridge that never touches USDG (e.g. "bridge my ETH to Ethereum, keep it as
+// ETH"). Distinct product from funding/cashing-out the USDG wallet. Verified live:
+// Houdini offers DEX routes both ways against ETH@Ethereum and ETH@Base.
+export const ROBINHOOD_ETH = {
+  chainId: 4663,
+  address: null as `0x${string}` | null,
+  decimals: 18,
+  symbol: 'ETH',
+  tokenId: '6a461601a5a43628a07b3b17',
+}
+
+export type RobinhoodAssetKey = 'USDG' | 'ETH'
+export const ROBINHOOD_ASSETS: Record<RobinhoodAssetKey, typeof ROBINHOOD_USDG | typeof ROBINHOOD_ETH> = {
+  USDG: ROBINHOOD_USDG,
+  ETH: ROBINHOOD_ETH,
 }
 
 export type HoudiniAsset = {
@@ -65,6 +83,12 @@ export const HOUDINI_ASSETS: Record<string, HoudiniAsset> = {
 
 export type HoudiniDirection = 'in' | 'out'
 
+// USDG/USDC amounts round sensibly at 2 decimals; ETH amounts (often < 0.01) need more
+// precision or they'd display as a misleading "0.00".
+export function fmtHoudiniAmount(value: number, symbol: string): string {
+  return symbol === 'ETH' ? value.toFixed(5) : value.toFixed(2)
+}
+
 export function houdiniEnabled(): boolean {
   return process.env.HOUDINI_ENABLED === 'true' && !!process.env.HOUDINI_API_KEY && !!process.env.HOUDINI_CODE
 }
@@ -98,6 +122,7 @@ export type HoudiniRoute = {
   type: string
   amountIn: number
   amountOut: number
+  amountOutUsd?: number // dollar value of amountOut — NOT 1:1 with amountOut for non-stablecoin routes (e.g. ETH)
   netAmountOut: number
   feeUsd?: number
   gasUsd?: number
@@ -113,20 +138,25 @@ export type HoudiniRoute = {
 // amount is sent as tx value instead.
 export type HoudiniSignSide = { chainId: number; address: `0x${string}` | null; decimals: number; symbol: string }
 
-// Quote a flow. `direction` picks which side is USDG:
-//   in  → from external asset, to USDG (sign on the external chain).
-//   out → from USDG, to external asset (sign on Robinhood Chain).
-// `amount` is in human units of the SELL side. Returns the best signable DEX route.
+// Quote a flow. `direction` picks which side is the Robinhood asset (`robinhoodAsset`,
+// default USDG — the "fund/cash-out your USDG wallet" product):
+//   in  → from external asset, to the Robinhood asset (sign on the external chain).
+//   out → from the Robinhood asset, to external asset (sign on Robinhood Chain).
+// Passing robinhoodAsset:'ETH' gives the OTHER product — a direct ETH<->ETH bridge that
+// never touches USDG. `amount` is in human units of the SELL side. Returns the best
+// signable DEX route.
 export async function getHoudiniQuote(
   assetKey: string,
   amount: number,
   direction: HoudiniDirection,
   country?: string,
-): Promise<{ asset: HoudiniAsset; best: HoudiniRoute; all: HoudiniRoute[]; sign: HoudiniSignSide }> {
+  robinhoodAsset: RobinhoodAssetKey = 'USDG',
+): Promise<{ asset: HoudiniAsset; best: HoudiniRoute; all: HoudiniRoute[]; sign: HoudiniSignSide; robinhood: typeof ROBINHOOD_USDG | typeof ROBINHOOD_ETH }> {
   const asset = HOUDINI_ASSETS[assetKey]
   if (!asset) throw new Error(`Unsupported asset: ${assetKey}`)
-  const fromId = direction === 'in' ? asset.tokenId : ROBINHOOD_USDG.tokenId
-  const toId = direction === 'in' ? ROBINHOOD_USDG.tokenId : asset.tokenId
+  const rh = ROBINHOOD_ASSETS[robinhoodAsset]
+  const fromId = direction === 'in' ? asset.tokenId : rh.tokenId
+  const toId = direction === 'in' ? rh.tokenId : asset.tokenId
   const data = await hfetch(`/quotes?amount=${amount}&from=${fromId}&to=${toId}`)
   let quotes: HoudiniRoute[] = (data.quotes || []).filter(
     (q: any) => q && q.quoteId && q.type !== 'private' && (q.netAmountOut ?? q.amountOut) != null,
@@ -142,8 +172,8 @@ export async function getHoudiniQuote(
   const sign: HoudiniSignSide =
     direction === 'in'
       ? { chainId: asset.chainId, address: asset.address, decimals: asset.decimals, symbol: asset.symbol }
-      : { chainId: ROBINHOOD_USDG.chainId, address: ROBINHOOD_USDG.address, decimals: ROBINHOOD_USDG.decimals, symbol: ROBINHOOD_USDG.symbol }
-  return { asset, best, all: quotes, sign }
+      : { chainId: rh.chainId, address: rh.address, decimals: rh.decimals, symbol: rh.symbol }
+  return { asset, best, all: quotes, sign, robinhood: rh }
 }
 
 export type HoudiniOrder = {

@@ -6,7 +6,7 @@ import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balan
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { lookupLighterAccount, getLighterAccountBalance } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
-import { houdiniEnabled, getHoudiniQuote } from '@/lib/houdini'
+import { houdiniEnabled, getHoudiniQuote, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
@@ -715,27 +715,36 @@ async function handlePOST(request: Request) {
           const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
           const chainNote = chainDefaulted ? ` (assuming your ${direction === 'in' ? 'USDC' : 'USDC destination'} is on ${chainLabel} — say "Base" to use Base instead)` : ''
           const assetKey = `${chain}:${assetSymbol}`
+          // Which Robinhood-side asset this flow moves. Default USDG (fund/cash-out the
+          // USDG wallet — the only product for a USDC leg). If the external asset is ETH
+          // and the user never said "usdg", this is instead a direct ETH<->ETH bridge that
+          // never touches USDG (Houdini supports this natively both ways).
+          const robinhoodAsset: RobinhoodAssetKey = usdg ? 'USDG' : assetSymbol === 'ETH' ? 'ETH' : 'USDG'
           const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
           const m = dollarMatch || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|eth|usd|dollars)?/i)
           const amount = m ? parseFloat(m[1]) : null
           // Houdini enforces a per-transfer minimum (~$5 in practice, up to $10/$25 on some
           // routes). Use a clean $10 floor so the user gets a friendly heads-up instead of a
-          // raw API "amount too low" error. Only applies to USDC, which is ~1:1 with USD —
-          // ETH amounts are in ETH units (e.g. "0.01 eth"), not dollars, so this check doesn't
-          // translate; Houdini's own quote call surfaces a real error for a too-small amount.
+          // raw API "amount too low" error. Only applies when the SELL side is USDC/USDG,
+          // which are ~1:1 with USD — an ETH sell side is in ETH units (e.g. "0.01 eth"), so
+          // this check doesn't translate; Houdini's own quote call surfaces a real error for
+          // a too-small amount.
           const MIN_USD = 10
-          // Cash-out (direction 'out') always sells USDG (~1:1 USD) no matter which external
-          // asset is the destination, so a "$" amount is always safe there. Funding-IN with
-          // ETH is the one case where the sell amount is in the ASSET's own units — a "$"
-          // prefix there would misread "$20 eth" as 20 WHOLE ETH (~$37k) instead of $20 worth.
-          // Refuse to guess; ask for an explicit ETH amount instead.
-          if (assetSymbol === 'ETH' && direction === 'in' && dollarMatch) {
-            responseText = `For ETH, give the amount in ETH (not dollars) — e.g. "add 0.01 ETH from ${chain}".`
+          // The sell side is in ETH units (not USD) whenever funding-IN sells external ETH,
+          // OR cashing-OUT sells Robinhood-native ETH (the new ETH<->ETH bridge). A "$"
+          // prefix there would misread "$20 eth" as 20 WHOLE ETH (~$37k) instead of $20
+          // worth. Refuse to guess; ask for an explicit ETH amount instead.
+          const sellSideIsEth = (direction === 'in' && assetSymbol === 'ETH') || (direction === 'out' && robinhoodAsset === 'ETH')
+          if (sellSideIsEth && dollarMatch) {
+            responseText =
+              direction === 'in'
+                ? `For ETH, give the amount in ETH (not dollars) — e.g. "add 0.01 ETH from ${chain}".`
+                : `For ETH, give the amount in ETH (not dollars) — e.g. "bridge 0.01 ETH to ${chain}".`
           } else if (!amount || amount <= 0) {
             responseText =
               direction === 'in'
                 ? `How much would you like to add from ${chainLabel}? Give an amount in ${assetSymbol} (e.g. "add 50 ${assetSymbol} from ${chain}").`
-                : `How much USDG do you want to cash out to ${chainLabel}? e.g. "cash out 50 USDG to ${assetSymbol} on ${chain}".`
+                : `How much ${robinhoodAsset} do you want to ${robinhoodAsset === 'ETH' ? 'bridge' : 'cash out'} to ${chainLabel}? e.g. "${robinhoodAsset === 'ETH' ? `bridge 0.01 ETH to ${chain}` : `cash out 50 USDG to ${assetSymbol} on ${chain}`}".`
           } else if (assetSymbol === 'USDC' && amount < MIN_USD) {
             responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more — e.g. ${
               direction === 'in' ? `"add ${MIN_USD} USDC from ${chain}"` : `"cash out ${MIN_USD} USDG to USDC on ${chain}"`
@@ -743,21 +752,32 @@ async function handlePOST(request: Request) {
           } else {
             const country =
               request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
-            const { asset, best } = await getHoudiniQuote(assetKey, amount, direction, country || undefined)
+            const { asset, best } = await getHoudiniQuote(assetKey, amount, direction, country || undefined, robinhoodAsset)
             const out = best.netAmountOut ?? best.amountOut
+            // Dollar value of `out` — NOT the same number as `out` itself for a non-stablecoin
+            // side (ETH); falls back to `out` for USDG/USDC, which are ~1:1 with USD anyway.
+            const outUsd = best.amountOutUsd ?? out
             const etaMin = best.eta ?? best.duration ?? 5
+            // The symbol for whichever side `out` (the amount RECEIVED) represents.
+            const outSymbol = direction === 'in' ? robinhoodAsset : asset.symbol
+            const outStr = fmtHoudiniAmount(out, outSymbol)
+            const sellLabel = direction === 'in' ? `${amount} ${asset.symbol}` : `${amount} ${robinhoodAsset}`
             const headline =
               direction === 'in'
-                ? `Add ${amount} ${asset.symbol} from ${chainLabel} → ${out.toFixed(2)} USDG`
-                : `Cash out ${amount} USDG → ${out.toFixed(2)} ${asset.symbol} on ${chainLabel}`
-            const sendLine = direction === 'in' ? `${amount} ${asset.symbol} on ${chainLabel}` : `${amount} USDG on Robinhood`
-            const recvLine = direction === 'in' ? `~${out.toFixed(2)} USDG on Robinhood` : `~${out.toFixed(2)} ${asset.symbol} on ${chainLabel}`
+                ? `Add ${sellLabel} from ${chainLabel} → ${outStr} ${robinhoodAsset}`
+                : robinhoodAsset === 'ETH'
+                  ? `Bridge ${sellLabel} on Robinhood → ${outStr} ${asset.symbol} on ${chainLabel}`
+                  : `Cash out ${sellLabel} → ${outStr} ${asset.symbol} on ${chainLabel}`
+            const sendLine = direction === 'in' ? `${amount} ${asset.symbol} on ${chainLabel}` : `${amount} ${robinhoodAsset} on Robinhood`
+            const recvLine = direction === 'in' ? `~${outStr} ${robinhoodAsset} on Robinhood` : `~${outStr} ${asset.symbol} on ${chainLabel}`
             const signWhere = direction === 'in' ? chainLabel : 'Robinhood Chain'
+            const robinhoodOnRobinhoodText =
+              direction === 'in' ? `Brings funds onto Robinhood Chain as ${robinhoodAsset}` : `Sends funds off Robinhood Chain as ${asset.symbol}`
             action = {
               id: `act-${Date.now()}`,
               agent: 'swap',
               action: headline,
-              detail: `${direction === 'in' ? 'Brings funds onto Robinhood Chain as USDG' : `Sends funds off Robinhood Chain as ${asset.symbol}`} via Houdini. You sign one transaction on ${signWhere}; it arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
+              detail: `${robinhoodOnRobinhoodText} via Houdini. You sign one transaction on ${signWhere}; it arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
               metrics: [
                 { label: 'You send', value: sendLine },
                 { label: 'You receive', value: recvLine },
@@ -767,18 +787,21 @@ async function handlePOST(request: Request) {
               status: 'pending',
               outcome:
                 direction === 'in'
-                  ? { title: 'USDG on Robinhood', value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} USDG`, activityTitle: headline }
-                  : { title: `${asset.symbol} on ${chainLabel}`, value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} ${asset.symbol}`, activityTitle: headline },
+                  ? { title: `${robinhoodAsset} on Robinhood`, value: `~$${outUsd.toFixed(2)}`, meta: `${outStr} ${robinhoodAsset}`, activityTitle: headline }
+                  : { title: `${asset.symbol} on ${chainLabel}`, value: `~$${outUsd.toFixed(2)}`, meta: `${outStr} ${asset.symbol}`, activityTitle: headline },
               routeVia: 'houdini',
               houdiniAssetKey: assetKey,
               houdiniAmount: String(amount),
               houdiniDirection: direction,
+              houdiniRobinhoodAsset: robinhoodAsset,
               verified: true,
             } as any
             responseText =
               direction === 'in'
-                ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.${chainNote}`
-                : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
+                ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive ${robinhoodAsset} on Robinhood.${chainNote}`
+                : robinhoodAsset === 'ETH'
+                  ? `Here's your bridge preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
+                  : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.${chainNote}`
           }
           if (action || responseText) return NextResponse.json({ text: responseText, action, bridgeInfo })
         }

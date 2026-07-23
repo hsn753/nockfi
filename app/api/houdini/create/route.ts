@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
-import { getHoudiniQuote, createHoudiniExchange, HOUDINI_ASSETS, houdiniEnabled, type HoudiniDirection } from '@/lib/houdini'
+import { getHoudiniQuote, createHoudiniExchange, HOUDINI_ASSETS, houdiniEnabled, type HoudiniDirection, type RobinhoodAssetKey } from '@/lib/houdini'
 
 export const dynamic = 'force-dynamic'
 
@@ -24,11 +24,13 @@ async function handlePOST(req: NextRequest) {
     amount?: string | number
     addressFrom?: string
     addressTo?: string
+    robinhoodAsset?: RobinhoodAssetKey
   }
   const assetKey = body.assetKey || body.sourceKey
   const direction: HoudiniDirection = body.direction === 'out' ? 'out' : 'in'
   const { addressFrom, addressTo } = body
   const amount = Number(body.amount)
+  const robinhoodAsset: RobinhoodAssetKey = body.robinhoodAsset === 'ETH' ? 'ETH' : 'USDG'
 
   if (!assetKey || !HOUDINI_ASSETS[assetKey]) {
     return NextResponse.json({ error: 'Unsupported or missing assetKey' }, { status: 400 })
@@ -54,7 +56,7 @@ async function handlePOST(req: NextRequest) {
   try {
     const country =
       req.headers.get('x-vercel-ip-country') || req.headers.get('cf-ipcountry') || req.headers.get('x-country-code') || undefined
-    const { best, sign } = await getHoudiniQuote(assetKey, amount, direction, country || undefined)
+    const { best, sign } = await getHoudiniQuote(assetKey, amount, direction, country || undefined, robinhoodAsset)
     const order = await createHoudiniExchange(best.quoteId, addressFrom, addressTo)
     return NextResponse.json({
       houdiniId: order.houdiniId,

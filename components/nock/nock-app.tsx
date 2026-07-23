@@ -68,6 +68,13 @@ const HOUDINI_READ_RPC: Record<number, string> = {
   [base.id]: 'https://base-rpc.publicnode.com',
 }
 
+// Duplicated (not imported) from lib/houdini.ts, which is server-only and must never be
+// pulled into the client bundle. USDG/USDC round sensibly at 2 decimals; ETH amounts
+// (often < 0.01) need more precision or they'd display as a misleading "0.00".
+function fmtHoudiniAmount(value: number, symbol: string): string {
+  return symbol === 'ETH' ? value.toFixed(5) : value.toFixed(2)
+}
+
 export function NockApp() {
   const [activeView, setActiveView] = useState<NavView>('chat')
   const [selectedAgent, setSelectedAgent] = useState<AgentId | null>(null)
@@ -800,6 +807,12 @@ export function NockApp() {
         const assetKey = (action as any).houdiniAssetKey as string
         const amount = (action as any).houdiniAmount as string
         const direction = ((action as any).houdiniDirection as 'in' | 'out') || 'in'
+        // Which Robinhood-side asset this flow moves — 'USDG' (fund/cash-out the USDG
+        // wallet, the default) or 'ETH' (a direct ETH<->ETH bridge that never touches
+        // USDG). The external asset's symbol is always the second half of assetKey
+        // (e.g. "ethereum:ETH" -> "ETH"), regardless of direction.
+        const robinhoodAsset = (((action as any).houdiniRobinhoodAsset as 'USDG' | 'ETH') || 'USDG')
+        const externalSymbol = String(assetKey || '').split(':')[1] || 'the asset'
         const destLabel = String(assetKey || '').startsWith('base') ? 'Base' : 'Ethereum'
 
         const { identityToken, accessToken } = await getAuthTokens()
@@ -812,7 +825,7 @@ export function NockApp() {
             'X-Privy-Identity-Token': identityToken ?? '',
             'X-Privy-Access-Token': accessToken ?? '',
           },
-          body: JSON.stringify({ assetKey, direction, amount, addressFrom: walletAddress, addressTo: walletAddress }),
+          body: JSON.stringify({ assetKey, direction, amount, addressFrom: walletAddress, addressTo: walletAddress, robinhoodAsset }),
         })
         const data = await res.json()
         if (!res.ok || data.error) throw new Error(data.error || 'Could not set up the order.')
@@ -876,13 +889,14 @@ export function NockApp() {
               ? { ...m, action: { ...m.action, status: 'executed' as const } }
               : m,
           )
+          const outStr = isFinite(outEst) ? `${fmtHoudiniAmount(outEst, direction === 'in' ? robinhoodAsset : externalSymbol)} ` : ''
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
             text:
               direction === 'in'
-                ? `Sent ✅ Your ${amount} ${sign.symbol} is on its way — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}USDG will arrive on Robinhood Chain in a few minutes. I'll pick it up in your balance once it lands.`
-                : `Sent ✅ Cashing out ${amount} USDG — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}USDC will arrive at your wallet on ${destLabel} in a few minutes.`,
+                ? `Sent ✅ Your ${amount} ${sign.symbol} is on its way — about ${outStr}${robinhoodAsset} will arrive on Robinhood Chain in a few minutes. I'll pick it up in your balance once it lands.`
+                : `Sent ✅ Cashing out ${amount} ${robinhoodAsset} — about ${outStr}${externalSymbol} will arrive at your wallet on ${destLabel} in a few minutes.`,
           }
           return [...updated, confirm]
         })
@@ -895,7 +909,7 @@ export function NockApp() {
               const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
               if (s?.done) {
                 fetchPortfolioValue()
-                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: direction === 'in' ? `Funds landed 🎉 Your USDG is now on Robinhood Chain.` : `Done 🎉 Your USDC has arrived on ${destLabel}.` }])
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: direction === 'in' ? `Funds landed 🎉 Your ${robinhoodAsset} is now on Robinhood Chain.` : `Done 🎉 Your ${externalSymbol} has arrived on ${destLabel}.` }])
                 return
               }
               if (s?.failed) {
