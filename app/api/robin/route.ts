@@ -664,60 +664,90 @@ async function handlePOST(request: Request) {
       | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
-    // ── PRE-MODEL: cross-chain funding via Houdini ────────────────────────────────────
-    // "add/fund/deposit <amount> from ethereum/base" = bring funds INTO the wallet as USDG
-    // on Robinhood FROM another chain (v1: USDC on Ethereum/Base). Distinct from perps/yield
-    // deposits (which move USDG already on Robinhood) — the SOURCE-chain keyword + "from" is
-    // the trigger. Builds the preview card; the client signs ONE source-chain tx on Confirm
-    // (see nock-app routeVia:'houdini'). Deliberately excludes the word "bridge" so the
-    // informational get_bridge_info flow is untouched.
+    // ── PRE-MODEL: cross-chain funding IN / cash-out OUT via Houdini ───────────────────
+    // IN  : "add/fund/deposit <amt> FROM ethereum/base"  → external USDC → USDG on Robinhood.
+    // OUT : "cash out/withdraw/swap <amt> USDG TO ethereum/base" → USDG on Robinhood → USDC.
+    // Direction is set by "from <chain>" vs "to <chain>". v1 external asset is USDC. Distinct
+    // from perps/yield deposits (USDG already on Robinhood). Builds the preview card; the
+    // client signs ONE tx on the sell chain on Confirm (see nock-app routeVia:'houdini').
+    // Deliberately excludes "bridge" so the informational get_bridge_info flow is untouched.
     if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
-        const wantsFund = /\b(add|fund|deposit|bring|move|top\s*up|transfer)\b/i.test(txt)
-        const srcChain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|eth|mainnet|erc20)\b/i.test(txt) ? 'ethereum' : null
-        if (wantsFund && srcChain && /\bfrom\b/i.test(txt)) {
-          const chainLabel = srcChain === 'base' ? 'Base' : 'Ethereum'
-          const m = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usd|usdg|dollars)?/i)
+        const chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ethereum|mainnet)\b/i.test(txt) ? 'ethereum' : null
+        const fundVerb = /\b(add|fund|deposit|bring|top\s*up)\b/i.test(txt)
+        const cashVerb = /\b(cash\s*out|cashout|withdraw|off\s*ramp|take\s*out|send)\b/i.test(txt)
+        const swapVerb = /\b(swap|convert|move|transfer)\b/i.test(txt)
+        // Determine direction from prepositions first, then verbs.
+        let direction: 'in' | 'out' | null = null
+        if (chain && /\bfrom\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'in'
+        else if (chain && /\b(to|onto|into)\s+(ethereum|base|mainnet)\b/i.test(txt)) direction = 'out'
+        else if (chain && fundVerb) direction = 'in'
+        else if (chain && cashVerb) direction = 'out'
+        else if (chain && swapVerb && /\busdg\b/i.test(txt)) direction = 'out'
+
+        if (chain && direction && (fundVerb || cashVerb || swapVerb)) {
+          const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
+          // ETH as the external asset isn't supported yet (native-ETH token ids aren't
+          // discoverable via Houdini's API) — steer to USDC.
+          const asksEth = /\beth(ereum)?\b/i.test(txt) && /\b(to|for|into)\s+eth\b/i.test(txt)
+          const assetKey = `${chain}:USDC`
+          const m = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|usd|dollars)?/i)
           const amount = m ? parseFloat(m[1]) : null
-          const sourceKey = `${srcChain}:USDC`
-          if (!amount || amount <= 0) {
-            responseText = `How much would you like to add from ${chainLabel}? Tell me an amount in USDC (e.g. "add 50 USDC from ${srcChain}").`
+          if (asksEth && direction === 'out') {
+            responseText = `Right now cross-chain cash-out supports USDC (on ${chainLabel}), not native ETH yet. Want to send USDC instead? e.g. "cash out ${amount ?? 50} USDG to USDC on ${chain}".`
+          } else if (!amount || amount <= 0) {
+            responseText =
+              direction === 'in'
+                ? `How much would you like to add from ${chainLabel}? Give an amount in USDC (e.g. "add 50 USDC from ${chain}").`
+                : `How much USDG do you want to cash out to ${chainLabel}? e.g. "cash out 50 USDG to USDC on ${chain}".`
           } else {
             const country =
               request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
-            const { source, best } = await getHoudiniQuote(sourceKey, amount, country || undefined)
+            const { asset, best } = await getHoudiniQuote(assetKey, amount, direction, country || undefined)
             const out = best.netAmountOut ?? best.amountOut
             const etaMin = best.eta ?? best.duration ?? 5
-            const headline = `Add ${amount} ${source.symbol} from ${chainLabel} → ${out.toFixed(2)} USDG`
+            const headline =
+              direction === 'in'
+                ? `Add ${amount} ${asset.symbol} from ${chainLabel} → ${out.toFixed(2)} USDG`
+                : `Cash out ${amount} USDG → ${out.toFixed(2)} ${asset.symbol} on ${chainLabel}`
+            const sendLine = direction === 'in' ? `${amount} ${asset.symbol} on ${chainLabel}` : `${amount} USDG on Robinhood`
+            const recvLine = direction === 'in' ? `~${out.toFixed(2)} USDG on Robinhood` : `~${out.toFixed(2)} ${asset.symbol} on ${chainLabel}`
+            const signWhere = direction === 'in' ? chainLabel : 'Robinhood Chain'
             action = {
               id: `act-${Date.now()}`,
               agent: 'swap',
               action: headline,
-              detail: `Brings funds onto Robinhood Chain as USDG via Houdini. You sign one transaction on ${chainLabel}; the USDG arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
+              detail: `${direction === 'in' ? 'Brings funds onto Robinhood Chain as USDG' : `Sends funds off Robinhood Chain as ${asset.symbol}`} via Houdini. You sign one transaction on ${signWhere}; it arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
               metrics: [
-                { label: 'You send', value: `${amount} ${source.symbol} on ${chainLabel}` },
-                { label: 'You receive', value: `~${out.toFixed(2)} USDG on Robinhood` },
+                { label: 'You send', value: sendLine },
+                { label: 'You receive', value: recvLine },
                 { label: 'Route', value: best.swapName || 'Houdini' },
                 { label: 'ETA', value: `~${etaMin} min` },
               ],
               status: 'pending',
-              outcome: { title: 'USDG on Robinhood', value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} USDG`, activityTitle: headline },
+              outcome:
+                direction === 'in'
+                  ? { title: 'USDG on Robinhood', value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} USDG`, activityTitle: headline }
+                  : { title: `${asset.symbol} on ${chainLabel}`, value: `~$${out.toFixed(2)}`, meta: `${out.toFixed(2)} ${asset.symbol}`, activityTitle: headline },
               routeVia: 'houdini',
-              houdiniSourceKey: sourceKey,
+              houdiniAssetKey: assetKey,
               houdiniAmount: String(amount),
-              houdiniSourceChainId: source.chainId,
+              houdiniDirection: direction,
               verified: true,
             } as any
-            responseText = `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.`
+            responseText =
+              direction === 'in'
+                ? `Here's your cross-chain funding preview — press Confirm to sign on ${chainLabel} and receive USDG on Robinhood.`
+                : `Here's your cash-out preview — press Confirm to sign on Robinhood Chain and receive ${asset.symbol} on ${chainLabel}.`
           }
           if (action || responseText) return NextResponse.json({ text: responseText, action, bridgeInfo })
         }
       } catch (e) {
         const msg = (e as Error)?.message
-        console.error('[robin] houdini funding backstop failed:', msg)
-        return NextResponse.json({ text: `I couldn't set up cross-chain funding right now${msg ? `: ${msg}` : '.'}`, bridgeInfo })
+        console.error('[robin] houdini cross-chain backstop failed:', msg)
+        return NextResponse.json({ text: `I couldn't set up the cross-chain transfer right now${msg ? `: ${msg}` : '.'}`, bridgeInfo })
       }
     }
 

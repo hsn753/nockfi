@@ -1,40 +1,45 @@
-// Houdini Swap — cross-chain funding into Robinhood Chain.
+// Houdini Swap — cross-chain funding INTO and cashing OUT OF Robinhood Chain.
 //
-// Lets a NockFi user fund their wallet with USDG on Robinhood Chain starting from an
-// asset on another chain (v1: USDC on Ethereum or Base), replacing the old
-// Arbitrum-bridge deep-link with an in-app, one-signature flow. Houdini earns affiliate
-// commissions from its exchange partners and shares a markup with us (configured on the
-// partner account — supported routes already carry it).
+// Two non-custodial, one-signature flows via Houdini Swap:
+//   • IN  (fund):     an external asset on another chain → USDG on Robinhood.
+//   • OUT (cash out): USDG on Robinhood → an external asset on another chain.
+// v1 external asset is USDC on Ethereum/Base. Both directions use DEX/bridge routes
+// (NOT Houdini's private/CEX tier — that tier can't touch USDG, since no CEX lists it,
+// so it's unavailable for our assets anyway).
 //
-// Auth is a partner API key + partner code, joined with a colon in the Authorization
+// Auth is a partner API key + partner code joined with a colon in the Authorization
 // header ("<KEY>:<CODE>"). Both are server-only secrets — this module must never run
-// client-side, and the values must never reach the browser.
-//
-// Verified live against the real API (2026-07-22): Robinhood Chain is chainId 4663 /
-// shortName "Robinhood"; USDG there matches our on-chain USDG exactly. Quotes/orders use
-// Houdini's own token IDs (not symbols/addresses), cached below.
+// client-side. Verified live (2026-07-22): Robinhood Chain = chainId 4663; USDG matches
+// our on-chain USDG. Quotes/orders use Houdini's own token IDs (cached below).
 
 const HOUDINI_BASE = 'https://api-partner.houdiniswap.com/v2'
 
-// Destination: USDG on Robinhood Chain (Houdini token id).
-const DEST_USDG_ROBINHOOD = '6a4686845de9c7c6e77d3f0c'
+// USDG on Robinhood Chain — the Robinhood side of every flow.
+export const ROBINHOOD_USDG = {
+  chainId: 4663,
+  address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as `0x${string}`,
+  decimals: 6,
+  symbol: 'USDG',
+  tokenId: '6a4686845de9c7c6e77d3f0c',
+}
 
-export type HoudiniSource = {
+export type HoudiniAsset = {
   key: string
   chain: string // Houdini shortName
-  chainId: number // EVM chain id (source chain the user signs on)
+  chainId: number // EVM chain id of the external side
   symbol: string
-  address: `0x${string}` // source token contract (for the approval before the bridge tx)
+  address: `0x${string}` // external token contract (for approvals when it's the sell side)
   decimals: number
-  tokenId: string // Houdini token id (for /quotes)
+  tokenId: string // Houdini token id
   label: string
 }
 
-// Supported funding sources → USDG on Robinhood. USDC first (clean ~1:1 stablecoin
-// funding, low slippage). Token ids resolved live from Houdini's /tokens and cached here
-// to avoid per-request lookups (and its 5-exchange/min free-tier rate limit). Extend by
-// adding entries — resolve a token id via GET /tokens?chain=<shortName>&address=<addr>.
-export const HOUDINI_SOURCES: Record<string, HoudiniSource> = {
+// The external (non-Robinhood) asset in each flow. Used as the SOURCE for funding-in and
+// the DESTINATION for cashing-out. USDC first (clean ~1:1 vs USDG, low slippage). Token
+// ids verified live. Extend via GET /tokens?chain=<shortName>&address=<addr>.
+// NOTE: native ETH ids are NOT discoverable through Houdini's listing API (native tokens
+// are hidden from chain-filtered lists) — add ETH here once Houdini provides its token ids.
+export const HOUDINI_ASSETS: Record<string, HoudiniAsset> = {
   'ethereum:USDC': {
     key: 'ethereum:USDC', chain: 'ethereum', chainId: 1, symbol: 'USDC',
     address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6,
@@ -46,6 +51,8 @@ export const HOUDINI_SOURCES: Record<string, HoudiniSource> = {
     tokenId: '6689b757c90e45f3b3e51805', label: 'USDC on Base',
   },
 }
+
+export type HoudiniDirection = 'in' | 'out'
 
 export function houdiniEnabled(): boolean {
   return process.env.HOUDINI_ENABLED === 'true' && !!process.env.HOUDINI_API_KEY && !!process.env.HOUDINI_CODE
@@ -61,15 +68,10 @@ function houdiniAuth(): string {
 async function hfetch(path: string, init?: RequestInit): Promise<any> {
   const res = await fetch(`${HOUDINI_BASE}${path}`, {
     ...init,
-    headers: {
-      Authorization: houdiniAuth(),
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
+    headers: { Authorization: houdiniAuth(), 'Content-Type': 'application/json', ...(init?.headers || {}) },
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    // Surface the API's own message (e.g. rate-limit, validation) rather than a generic error.
     const msg = body?.message || body?.code || `Houdini API returned ${res.status}`
     const err = new Error(msg) as Error & { status?: number; body?: unknown }
     err.status = res.status
@@ -82,7 +84,7 @@ async function hfetch(path: string, init?: RequestInit): Promise<any> {
 export type HoudiniRoute = {
   quoteId: string
   swapName: string
-  type: string // 'dex' | 'cex' | ...
+  type: string
   amountIn: number
   amountOut: number
   netAmountOut: number
@@ -92,37 +94,43 @@ export type HoudiniRoute = {
   duration?: number
   requiresApproval?: boolean
   supportsSignatures?: boolean
-  markupSupported?: boolean
-  apiMarkupValue?: number
   restrictedCountries?: string[]
 }
 
-// Quote a funding route. Returns the best signable route (one-signature DEX/bridge flow
-// preferred) plus the full list. `amount` is in human units of the source token.
+// The token the user actually SIGNS with (the sell side), plus the chain they sign on.
+export type HoudiniSignSide = { chainId: number; address: `0x${string}`; decimals: number; symbol: string }
+
+// Quote a flow. `direction` picks which side is USDG:
+//   in  → from external asset, to USDG (sign on the external chain).
+//   out → from USDG, to external asset (sign on Robinhood Chain).
+// `amount` is in human units of the SELL side. Returns the best signable DEX route.
 export async function getHoudiniQuote(
-  sourceKey: string,
+  assetKey: string,
   amount: number,
+  direction: HoudiniDirection,
   country?: string,
-): Promise<{ source: HoudiniSource; best: HoudiniRoute; all: HoudiniRoute[] }> {
-  const source = HOUDINI_SOURCES[sourceKey]
-  if (!source) throw new Error(`Unsupported funding source: ${sourceKey}`)
-  const data = await hfetch(`/quotes?amount=${amount}&from=${source.tokenId}&to=${DEST_USDG_ROBINHOOD}`)
+): Promise<{ asset: HoudiniAsset; best: HoudiniRoute; all: HoudiniRoute[]; sign: HoudiniSignSide }> {
+  const asset = HOUDINI_ASSETS[assetKey]
+  if (!asset) throw new Error(`Unsupported asset: ${assetKey}`)
+  const fromId = direction === 'in' ? asset.tokenId : ROBINHOOD_USDG.tokenId
+  const toId = direction === 'in' ? ROBINHOOD_USDG.tokenId : asset.tokenId
+  const data = await hfetch(`/quotes?amount=${amount}&from=${fromId}&to=${toId}`)
   let quotes: HoudiniRoute[] = (data.quotes || []).filter(
-    (q: any) => q && q.quoteId && (q.netAmountOut ?? q.amountOut) != null,
+    (q: any) => q && q.quoteId && q.type !== 'private' && (q.netAmountOut ?? q.amountOut) != null,
   )
-  // Honor each route's own geo restriction (fail-closed): drop routes restricted in the
-  // user's country when we know it.
   if (country) {
     quotes = quotes.filter((q) => !(q.restrictedCountries || []).map((c) => c.toUpperCase()).includes(country.toUpperCase()))
   }
   if (!quotes.length) throw new Error('No route available for this amount right now.')
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
-  // Prefer routes we can settle with a single on-chain signature (DEX/bridge) over
-  // deposit-address (CEX) routes; among those pick the best net output for the user.
   const signable = quotes.filter((q) => q.type === 'dex' || q.supportsSignatures)
   const pool = signable.length ? signable : quotes
   const best = [...pool].sort((a, b) => out(b) - out(a))[0]
-  return { source, best, all: quotes }
+  const sign: HoudiniSignSide =
+    direction === 'in'
+      ? { chainId: asset.chainId, address: asset.address, decimals: asset.decimals, symbol: asset.symbol }
+      : { chainId: ROBINHOOD_USDG.chainId, address: ROBINHOOD_USDG.address, decimals: ROBINHOOD_USDG.decimals, symbol: ROBINHOOD_USDG.symbol }
+  return { asset, best, all: quotes, sign }
 }
 
 export type HoudiniOrder = {
@@ -132,7 +140,6 @@ export type HoudiniOrder = {
   inAmount?: number
   outAmount?: number
   isDex?: boolean
-  // For DEX/bridge routes: the ready-to-sign transaction on the SOURCE chain.
   metadata?: {
     to: `0x${string}`
     data: `0x${string}`
@@ -145,13 +152,11 @@ export type HoudiniOrder = {
     deadline?: number
     slippage?: number
   }
-  // For CEX/private routes: the address to send the source asset to.
   depositAddress?: string
 }
 
-// Create an exchange from a quote. addressFrom = the user's wallet on the source chain
-// (signer), addressTo = where USDG is delivered on Robinhood (same EVM address). Returns
-// the order incl. the source-chain tx to sign (DEX) or a deposit address (CEX).
+// addressFrom = the user's wallet on the SELL chain (signer); addressTo = where the bought
+// asset is delivered (same EVM address). Returns the sign-chain tx (DEX) or deposit address.
 export async function createHoudiniExchange(
   quoteId: string,
   addressFrom: string,
@@ -167,25 +172,17 @@ export async function getHoudiniOrder(houdiniId: string): Promise<HoudiniOrder> 
   return (await hfetch(`/orders/${encodeURIComponent(houdiniId)}`)) as HoudiniOrder
 }
 
-// Map Houdini's numeric status to a human label + terminal flags. Provisional mapping
-// (status 0 = awaiting deposit/processing observed live); unknown codes read as
-// "processing" so we never falsely claim completion. Negative codes = error.
+// Map Houdini's numeric status to a human label + terminal flags. Provisional (status 0 =
+// awaiting/processing observed live); unknown codes read as "processing" so completion is
+// never falsely claimed. Negative = error.
 export function houdiniStatusLabel(status: number): { label: string; done: boolean; failed: boolean } {
   switch (status) {
-    case 0:
-      return { label: 'Waiting for your deposit', done: false, failed: false }
-    case 1:
-      return { label: 'Confirming on-chain', done: false, failed: false }
-    case 2:
-      return { label: 'Exchanging', done: false, failed: false }
-    case 3:
-      return { label: 'Sending to your wallet', done: false, failed: false }
+    case 0: return { label: 'Waiting for your deposit', done: false, failed: false }
+    case 1: return { label: 'Confirming on-chain', done: false, failed: false }
+    case 2: return { label: 'Exchanging', done: false, failed: false }
+    case 3: return { label: 'Sending to your wallet', done: false, failed: false }
     case 4:
-    case 5:
-      return { label: 'Completed', done: true, failed: false }
-    default:
-      return status < 0
-        ? { label: 'Failed', done: false, failed: true }
-        : { label: 'Processing', done: false, failed: false }
+    case 5: return { label: 'Completed', done: true, failed: false }
+    default: return status < 0 ? { label: 'Failed', done: false, failed: true } : { label: 'Processing', done: false, failed: false }
   }
 }
