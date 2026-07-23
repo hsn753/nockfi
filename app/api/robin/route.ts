@@ -778,7 +778,12 @@ async function handlePOST(request: Request) {
             // Dollar value of `out` — NOT the same number as `out` itself for a non-stablecoin
             // side (ETH); falls back to `out` for USDG/USDC, which are ~1:1 with USD anyway.
             const outUsd = best.amountOutUsd ?? out
-            const etaMin = best.eta ?? best.duration ?? 5
+            // best.eta/best.duration are in SECONDS (confirmed live: a route with
+            // duration:600 arrives in ~10 min, not the "~600 min" a direct pass-through
+            // would show) — convert properly, floor at "< 1 min" for anything under a minute.
+            const etaSec = best.eta ?? best.duration ?? 300
+            const etaMin = Math.round(etaSec / 60)
+            const etaLabel = etaSec < 60 ? '< 1 min' : `~${etaMin} min`
             // The symbol for whichever side `out` (the amount RECEIVED) represents.
             const outSymbol = direction === 'in' ? robinhoodAsset : asset.symbol
             const outStr = fmtHoudiniAmount(out, outSymbol)
@@ -799,12 +804,12 @@ async function handlePOST(request: Request) {
               id: `act-${Date.now()}`,
               agent: 'swap',
               action: headline,
-              detail: `${robinhoodOnRobinhoodText} via Houdini. You sign one transaction on ${signWhere}; it arrives in ~${etaMin} min. The rate is live and may vary slightly at signing.`,
+              detail: `${robinhoodOnRobinhoodText} via Houdini. You sign one transaction on ${signWhere}; it arrives in ${etaLabel}. The rate is live and may vary slightly at signing.`,
               metrics: [
                 { label: 'You send', value: sendLine },
                 { label: 'You receive', value: recvLine },
                 { label: 'Route', value: best.swapName || 'Houdini' },
-                { label: 'ETA', value: `~${etaMin} min` },
+                { label: 'ETA', value: etaLabel },
               ],
               status: 'pending',
               outcome:

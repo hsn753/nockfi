@@ -168,7 +168,14 @@ export async function getHoudiniQuote(
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
   const signable = quotes.filter((q) => q.type === 'dex' || q.supportsSignatures)
   const pool = signable.length ? signable : quotes
-  const best = [...pool].sort((a, b) => out(b) - out(a))[0]
+  // `eta`/`duration` are in SECONDS. Rank by output alone can pick a route that's orders of
+  // magnitude slower for a marginal gain (seen live: a 600s route beat an 8s route by 0.02%
+  // output) — restrict to routes finishing within 2 minutes when any exist, then pick the
+  // best output among those; only fall back to the full (slow) pool if nothing qualifies.
+  const FAST_ETA_CAP_SEC = 120
+  const fastPool = pool.filter((q) => (q.eta ?? q.duration ?? Infinity) <= FAST_ETA_CAP_SEC)
+  const rankPool = fastPool.length ? fastPool : pool
+  const best = [...rankPool].sort((a, b) => out(b) - out(a))[0]
   const sign: HoudiniSignSide =
     direction === 'in'
       ? { chainId: asset.chainId, address: asset.address, decimals: asset.decimals, symbol: asset.symbol }
