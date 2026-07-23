@@ -201,7 +201,8 @@ When the user asks for their wallet address or deposit address:
 - If no wallet is connected, tell them to connect one first.
 
 When the user asks how to bridge, move, or send funds onto Robinhood Chain from Ethereum or another chain:
-- IMMEDIATELY call get_bridge_info. This is REQUIRED — never answer a bridging question from memory, always call the tool first.
+- FIRST: if they specifically want to move USDC ↔ USDG (fund with USDC, or cash out to USDC on Ethereum/Base), that is handled IN-APP via the one-signature cross-chain flow — do NOT call get_bridge_info or hand out the external Arbitrum bridge link for that. Just tell them they can do it right here, e.g. "convert 20 USDC to USDG" or "cash out 20 USDG to USDC on Base" (a $10 minimum applies). The app builds the preview card itself.
+- Otherwise (bringing in ETH or another asset, or a general "how do I bridge" question): IMMEDIATELY call get_bridge_info. This is REQUIRED — never answer a bridging question from memory, always call the tool first.
 - The app shows the link, chain, and ETA in a card with its own button right below your reply — do not repeat those details or include the URL yourself. Just say one short sentence confirming it's ready to bridge into their connected wallet, and mention you'll let them know once it lands.
 - If no wallet is connected, tell them to connect one first so you can give them the right deposit address.
 
@@ -706,6 +707,10 @@ async function handlePOST(request: Request) {
           const assetKey = `${chain}:USDC`
           const m = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:usdc|usdg|usd|dollars)?/i)
           const amount = m ? parseFloat(m[1]) : null
+          // Houdini enforces a per-transfer minimum (~$5 in practice, up to $10/$25 on some
+          // routes). Use a clean $10 floor so the user gets a friendly heads-up instead of a
+          // raw API "amount too low" error, and never hits a route that rejects it.
+          const MIN_USD = 10
           if (asksEth && direction === 'out') {
             responseText = `Right now cross-chain cash-out supports USDC (on ${chainLabel}), not native ETH yet. Want to send USDC instead? e.g. "cash out ${amount ?? 50} USDG to USDC on ${chain}".`
           } else if (!amount || amount <= 0) {
@@ -713,6 +718,10 @@ async function handlePOST(request: Request) {
               direction === 'in'
                 ? `How much would you like to add from ${chainLabel}? Give an amount in USDC (e.g. "add 50 USDC from ${chain}").`
                 : `How much USDG do you want to cash out to ${chainLabel}? e.g. "cash out 50 USDG to USDC on ${chain}".`
+          } else if (amount < MIN_USD) {
+            responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more — e.g. ${
+              direction === 'in' ? `"add ${MIN_USD} USDC from ${chain}"` : `"cash out ${MIN_USD} USDG to USDC on ${chain}"`
+            }.`
           } else {
             const country =
               request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined

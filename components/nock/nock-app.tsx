@@ -791,6 +791,7 @@ export function NockApp() {
         const assetKey = (action as any).houdiniAssetKey as string
         const amount = (action as any).houdiniAmount as string
         const direction = ((action as any).houdiniDirection as 'in' | 'out') || 'in'
+        const destLabel = String(assetKey || '').startsWith('base') ? 'Base' : 'Ethereum'
 
         const { identityToken, accessToken } = await getAuthTokens()
         // Server re-quotes + creates the order (KEY:CODE secret stays server-side) and
@@ -865,7 +866,7 @@ export function NockApp() {
             text:
               direction === 'in'
                 ? `Sent ✅ Your ${amount} ${sign.symbol} is on its way — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}USDG will arrive on Robinhood Chain in a few minutes. I'll pick it up in your balance once it lands.`
-                : `Sent ✅ Cashing out ${amount} USDG — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}worth will arrive at your wallet on the destination chain in a few minutes.`,
+                : `Sent ✅ Cashing out ${amount} USDG — about ${isFinite(outEst) ? `$${outEst.toFixed(2)} ` : ''}USDC will arrive at your wallet on ${destLabel} in a few minutes.`,
           }
           return [...updated, confirm]
         })
@@ -878,7 +879,7 @@ export function NockApp() {
               const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
               if (s?.done) {
                 fetchPortfolioValue()
-                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: direction === 'in' ? `Funds landed 🎉 Your USDG is now on Robinhood Chain.` : `Done 🎉 Your funds have arrived on the destination chain.` }])
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: direction === 'in' ? `Funds landed 🎉 Your USDG is now on Robinhood Chain.` : `Done 🎉 Your USDC has arrived on ${destLabel}.` }])
                 return
               }
               if (s?.failed) {
