@@ -26,3 +26,15 @@ export const PERPS_ENABLED = process.env.PERPS_ENABLED === 'true'
 // trade's Confirm button to sign+submit client-side (that's next). Off by default —
 // same one-flip convention as INSTANT_SWAPS_ENABLED.
 export const PERPS_KEY_ONBOARDING_ENABLED = true
+
+// Automated yield rebalancing (Settings › Automated yield switching) — see
+// lib/yield-automation.ts. Deliberately env-gated (like HOUDINI_ENABLED in lib/houdini.ts)
+// rather than a hardcoded boolean like the two flags above: the DB this reads/writes
+// (yield_automation_settings) is the SAME Neon instance shared by local, the EU test box,
+// AND production, and the EU box's cron sweep queries "every wallet with enabled=true"
+// globally, with no per-environment scoping. A hardcoded `true` here would ship live to
+// production the moment this code reaches it via the normal git+Vercel auto-deploy —
+// production users could see the toggle, authorize on-chain, and actually get swept by
+// the EU box's cron. Set NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED=true ONLY in the EU box's
+// env while this is being tested; leave it unset everywhere else.
+export const YIELD_AUTOMATION_ENABLED = process.env.NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED === 'true'

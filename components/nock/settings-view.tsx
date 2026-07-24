@@ -3,12 +3,12 @@
 import { useEffect, useState } from 'react'
 import { usePrivy, useWallets, useCreateWallet, useSigners, useExportWallet, getIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
-import { createWalletClient, custom } from 'viem'
+import { createWalletClient, custom, encodeFunctionData } from 'viem'
 import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
 import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED } from '@/lib/feature-flags'
+import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED, YIELD_AUTOMATION_ENABLED } from '@/lib/feature-flags'
 import { nockChain } from '@/lib/chain'
 import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLighterNextNonce, submitLighterTx, getLighterAccountBalance, LIGHTER_BASE, LIGHTER_CHAIN_ID } from '@/lib/lighter-account'
 import { loadStoredKeyMeta, clearStoredKey, wrapAndStore, buildWrapMessage } from '@/lib/lighter-key-storage'
@@ -152,6 +152,10 @@ export function SettingsView() {
           </section>
 
           {ready && authenticated && <GuardrailsSection />}
+
+          {/* Env-gated (NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED) — see lib/feature-flags.ts
+              for why this can't be a hardcoded boolean like the two flags below. */}
+          {YIELD_AUTOMATION_ENABLED && ready && authenticated && <YieldAutomationSection />}
 
           {/* Instant Swaps is hidden until the next version (see lib/feature-flags.ts) —
               not part of the current public spec. Component kept, just not rendered. */}
@@ -332,6 +336,223 @@ function GuardrailsSection() {
 
       {saved && <p className="mt-2 text-xs text-primary">Limit saved.</p>}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+    </section>
+  )
+}
+
+// Morpho Blue's own on-chain delegation primitive (setAuthorization) — NOT the
+// session-signer/Instant-Swaps mechanism above. Inlined here rather than imported from
+// lib/get-morpho-markets.ts (which is fine to import client-side — no secrets — but pulls
+// in the whole market-data module for one ABI entry). MORPHO_CORE mirrors the constant
+// there; keep both in sync if it ever changes (it won't — Morpho Blue's own address).
+const MORPHO_CORE = '0x9d53d5e3bd5e8d4cbfa6db1ca238aea02e651010' as const
+const SET_AUTHORIZATION_ABI = [
+  {
+    type: 'function', name: 'setAuthorization', stateMutability: 'nonpayable',
+    inputs: [{ type: 'address', name: 'authorized' }, { type: 'bool', name: 'newIsAuthorized' }],
+    outputs: [],
+  },
+] as const
+
+type YieldAutomationEventRow = {
+  id: string
+  fromMarket: string | null
+  toMarket: string
+  amountUsdg: string
+  fromApyPct: string | null
+  toApyPct: string
+  status: string
+  errorMessage: string | null
+  createdAt: string
+}
+
+type YieldAutomationStatus = {
+  enabled: boolean
+  lastCheckedAt: string | null
+  events: YieldAutomationEventRow[]
+}
+
+// Automated yield rebalancing — moves an EXISTING Morpho position to whichever approved
+// market currently pays the best rate. No session signer, no delegated "wallet": the user
+// grants a single Morpho Blue setAuthorization tx (normal wallet signature) letting a
+// dedicated automation key call supply/withdraw with onBehalf = them. See
+// lib/yield-automation.ts for the sweep logic and the risk note on why that key is a
+// genuinely sensitive secret (Morpho's withdraw `receiver` isn't protocol-restricted to
+// the authorizer, only app-code-restricted).
+function YieldAutomationSection() {
+  const { getAccessToken } = usePrivy()
+  const { wallets } = useWallets()
+  const publicClient = usePublicClient()
+  const activeWallet = wallets[0]
+  const walletAddress = activeWallet?.address
+
+  const automationAddress = process.env.NEXT_PUBLIC_YIELD_AUTOMATION_ADDRESS as `0x${string}` | undefined
+
+  const [status, setStatus] = useState<YieldAutomationStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [step, setStep] = useState('')
+  const [error, setError] = useState('')
+
+  const authHeaders = async () => {
+    const [accessToken, identityToken] = await Promise.all([
+      getAccessToken().catch(() => null),
+      getIdentityToken().catch(() => null),
+    ])
+    return {
+      'Content-Type': 'application/json',
+      'X-Privy-Access-Token': accessToken ?? '',
+      'X-Privy-Identity-Token': identityToken ?? '',
+    }
+  }
+
+  const refresh = async () => {
+    if (!walletAddress) return
+    const headers = await authHeaders()
+    const res = await fetch(`/api/yield-automation/status?address=${walletAddress}`, { headers }).catch(() => null)
+    const data = res && res.ok ? await res.json() : null
+    setStatus(data ? { enabled: !!data.enabled, lastCheckedAt: data.lastCheckedAt, events: data.events ?? [] } : null)
+  }
+
+  useEffect(() => {
+    if (!walletAddress) return
+    let cancelled = false
+    setLoading(true)
+    refresh().finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress])
+
+  const setAuthorization = async (enable: boolean) => {
+    if (!walletAddress || !activeWallet || !publicClient || !automationAddress) return
+    setError('')
+    setBusy(true)
+    try {
+      const provider = await activeWallet.getEthereumProvider()
+      const walletClient = createWalletClient({
+        account: walletAddress as `0x${string}`,
+        chain: nockChain,
+        transport: custom(provider),
+      })
+
+      setStep(enable ? 'Confirm the authorization in your wallet…' : 'Confirm the revocation in your wallet…')
+      const data = encodeFunctionData({
+        abi: SET_AUTHORIZATION_ABI,
+        functionName: 'setAuthorization',
+        args: [automationAddress, enable],
+      })
+      const hash = await walletClient.sendTransaction({
+        account: walletAddress as `0x${string}`,
+        chain: nockChain,
+        to: MORPHO_CORE,
+        data,
+        value: BigInt(0),
+      })
+
+      setStep('Waiting for confirmation…')
+      const receipt = await publicClient.waitForTransactionReceipt({ hash })
+      if (receipt.status !== 'success') {
+        throw new Error('The transaction reverted on-chain — nothing was changed.')
+      }
+
+      if (enable) {
+        setStep('Saving…')
+        const headers = await authHeaders()
+        const res = await fetch('/api/yield-automation/enable', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ address: walletAddress, authTxHash: hash }),
+        })
+        const body = await res.json()
+        if (!res.ok) throw new Error(body.error || 'Could not save this setting')
+      } else {
+        const headers = await authHeaders()
+        await fetch('/api/yield-automation/disable', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ address: walletAddress }),
+        }).catch(() => {})
+      }
+
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setBusy(false)
+      setStep('')
+    }
+  }
+
+  if (!automationAddress) return null
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Automated yield switching
+      </h2>
+      <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+        Moves USDG you&apos;ve already supplied to whichever approved Morpho market pays
+        the best rate, without a signature every time. You authorize one dedicated
+        address on-chain — funds always settle back to your own wallet, never a third
+        address, and you can revoke this at any time.
+      </p>
+
+      <div className="mt-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">Automation address</p>
+        <p className="break-all font-mono text-xs text-foreground">{automationAddress}</p>
+      </div>
+
+      <div className="mt-2.5 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">Status</p>
+        <p className="text-sm text-foreground">
+          {loading ? 'Loading…' : status?.enabled ? 'Enabled' : 'Disabled'}
+        </p>
+        {status?.lastCheckedAt && (
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Last checked {new Date(status.lastCheckedAt).toLocaleString()}
+          </p>
+        )}
+      </div>
+
+      <button
+        type="button"
+        disabled={busy || loading}
+        onClick={() => setAuthorization(!status?.enabled)}
+        className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+      >
+        {busy && <Loader2 className="size-3 animate-spin" />}
+        {busy ? step || 'Working…' : status?.enabled ? 'Disable' : 'Enable'}
+      </button>
+
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+
+      {!!status?.events.length && (
+        <div className="mt-3">
+          <p className="text-xs text-muted-foreground">Recent activity</p>
+          <div className="mt-1.5 space-y-1.5">
+            {status.events.slice(0, 5).map((ev) => (
+              <div key={ev.id} className="rounded-lg border border-border bg-background/40 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-foreground">
+                    {ev.fromMarket ?? '—'} → {ev.toMarket}
+                  </span>
+                  <span className={ev.status === 'success' ? 'text-primary' : 'text-destructive'}>
+                    {ev.status}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {ev.amountUsdg} USDG · {new Date(ev.createdAt).toLocaleString()}
+                </p>
+                {ev.errorMessage && <p className="mt-0.5 text-[11px] text-destructive">{ev.errorMessage}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   )
 }

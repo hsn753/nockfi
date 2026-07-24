@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, integer, jsonb, uuid, uniqueIndex, index, numeric } from 'drizzle-orm/pg-core'
+import { pgTable, text, timestamp, integer, jsonb, uuid, uniqueIndex, index, numeric, boolean } from 'drizzle-orm/pg-core'
 
 // Every table anchors on wallet_address (lowercased) — that's the identity every
 // existing code path (nock-app.tsx, app/api/robin/route.ts, app/api/activity/route.ts)
@@ -156,6 +156,46 @@ export const rateLimits = pgTable('rate_limits', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => [
   index('rate_limits_created_idx').on(t.createdAt),
+])
+
+// One row per wallet — whether automated yield rebalancing is on, and the user's own
+// threshold for triggering a switch. `enabled` here is the app's record of intent; the
+// real authority is Morpho's own on-chain isAuthorized(wallet, automationAddress) — every
+// write to this table is preceded by an independent on-chain check (see
+// lib/yield-automation.ts), never just trusting a client POST. authorizedAt/authTxHash
+// are the audit trail for when/how the user granted (or last re-confirmed) authorization.
+export const yieldAutomationSettings = pgTable('yield_automation_settings', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  enabled: boolean('enabled').notNull().default(false),
+  minApyDeltaPct: numeric('min_apy_delta_pct').notNull().default('0.5'),
+  authorizedAt: timestamp('authorized_at', { withTimezone: true }),
+  authTxHash: text('auth_tx_hash'),
+  lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex('yield_automation_settings_wallet_idx').on(t.walletId),
+])
+
+// Append-only audit log — one row per automated rebalance attempt (success or failure),
+// the transparency record a user can point to for "what did automation actually do."
+// fromMarket is null for nothing-to-compare-against edge cases; toMarket/toApyPct are
+// always the destination the sweep picked.
+export const yieldAutomationEvents = pgTable('yield_automation_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  fromMarket: text('from_market'),
+  toMarket: text('to_market').notNull(),
+  amountUsdg: numeric('amount_usdg').notNull(),
+  fromApyPct: numeric('from_apy_pct'),
+  toApyPct: numeric('to_apy_pct').notNull(),
+  withdrawTxHash: text('withdraw_tx_hash'),
+  supplyTxHash: text('supply_tx_hash'),
+  status: text('status').notNull(), // 'success' | 'failed'
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('yield_automation_events_wallet_idx').on(t.walletId, t.createdAt),
 ])
 
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration

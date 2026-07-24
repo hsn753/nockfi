@@ -129,6 +129,30 @@ const MORPHO_ABI = [
     ],
     outputs: [{ type: 'uint256' }, { type: 'uint256' }],
   },
+  // Morpho Blue's built-in delegation primitive: a user calls setAuthorization once (a
+  // normal wallet tx, no session-signer infra) to let another address call
+  // supply/withdraw with onBehalf = them. Used by yield automation — see
+  // lib/yield-automation.ts — instead of building any custom delegated-wallet mechanism.
+  // NOTE: withdraw's `receiver` above is NOT restricted on-chain to equal `onBehalf` — an
+  // authorized address can send withdrawn funds anywhere. This app always hardcodes
+  // receiver=user (see buildMarketWithdraw above), but that's an app-level guarantee, not
+  // a protocol one: whatever key holds authorization is a genuinely sensitive secret.
+  {
+    type: 'function', name: 'setAuthorization', stateMutability: 'nonpayable',
+    inputs: [
+      { type: 'address', name: 'authorized' },
+      { type: 'bool', name: 'newIsAuthorized' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function', name: 'isAuthorized', stateMutability: 'view',
+    inputs: [
+      { type: 'address', name: 'authorizer' },
+      { type: 'address', name: 'authorized' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
 ] as const
 
 const IRM_ABI = [
@@ -360,4 +384,25 @@ export async function buildMarketWithdraw(
     supplyApyPct: marketData.supplyApyPct,
     amount: cleanAmount,
   }
+}
+
+// Builds the user's own setAuthorization tx (signed by their own wallet, no session
+// signer) that opts in/out of yield automation for `authorizedAddress`.
+export function buildSetAuthorizationTx(authorizedAddress: `0x${string}`, enable: boolean) {
+  const data = encodeFunctionData({
+    abi: MORPHO_ABI,
+    functionName: 'setAuthorization',
+    args: [authorizedAddress, enable],
+  })
+  return { to: MORPHO_CORE, data, value: '0' }
+}
+
+// Independent on-chain check — never trust a client's claim that setAuthorization
+// succeeded. Used both when a user enables automation and defensively on every cron
+// sweep (a user can always revoke directly on-chain, bypassing our /disable endpoint).
+export async function isAutomationAuthorized(user: string, authorizedAddress: string): Promise<boolean> {
+  return rpcClient.readContract({
+    address: MORPHO_CORE, abi: MORPHO_ABI, functionName: 'isAuthorized',
+    args: [user as `0x${string}`, authorizedAddress as `0x${string}`],
+  })
 }
