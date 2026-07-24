@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, http, type Hash } from 'viem'
+import { createWalletClient, createPublicClient, http, erc20Abi, encodeFunctionData, parseUnits, type Hash } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { nockChain } from './chain'
 import {
@@ -8,6 +8,8 @@ import {
   buildMarketSupply,
   buildMarketWithdraw,
   isAutomationAuthorized,
+  USDG_ADDRESS,
+  USDG_DECIMALS,
 } from './get-morpho-markets'
 import {
   getEnabledYieldAutomationWallets,
@@ -154,6 +156,13 @@ export async function runYieldAutomationSweep(): Promise<SweepSummary> {
 
 type RebalanceResult = { ok: true; withdrawTxHash: Hash; supplyTxHash: Hash } | { ok: false; error: string; withdrawTxHash?: Hash; supplyTxHash?: Hash }
 
+// Morpho Blue's supply() pulls the loan token from msg.sender, NOT from `onBehalf` — so
+// the automation key must actually receive the withdrawn USDG itself (receiver = the
+// automation address, not the user) to be able to approve + re-supply it a moment later.
+// This means funds pass THROUGH the automation key's own wallet for the few seconds
+// between the two legs. Every failure path from here on attempts to send the withdrawn
+// amount straight back to the user (returnFundsToUser) rather than leaving it stranded —
+// this is the safety net that makes the transient custody window acceptable.
 async function rebalancePosition(
   userAddress: string,
   fromMarket: MorphoMarketKey,
@@ -162,7 +171,7 @@ async function rebalancePosition(
 ): Promise<RebalanceResult> {
   const { account, walletClient, publicClient } = getClients()
 
-  const withdrawQuote = await buildMarketWithdraw(userAddress, amount, fromMarket)
+  const withdrawQuote = await buildMarketWithdraw(userAddress, amount, fromMarket, account.address)
   if ('error' in withdrawQuote) return { ok: false, error: withdrawQuote.error }
 
   let withdrawTxHash: Hash
@@ -176,6 +185,7 @@ async function rebalancePosition(
       gas: BigInt(withdrawQuote.transaction.gas),
     })
   } catch (err) {
+    // Nothing was pulled anywhere yet — funds are exactly where they started, in fromMarket.
     return { ok: false, error: err instanceof Error ? err.message : 'Withdraw failed to submit' }
   }
   const withdrawReceipt = await publicClient.waitForTransactionReceipt({ hash: withdrawTxHash })
@@ -183,9 +193,37 @@ async function rebalancePosition(
     return { ok: false, error: `Withdraw from ${fromMarket} reverted on-chain — funds stayed in ${fromMarket}.`, withdrawTxHash }
   }
 
+  // Past this point the automation key HOLDS the withdrawn USDG — every remaining failure
+  // path must try to return it to the user before giving up.
+  const amountWei = parseUnits(amount, USDG_DECIMALS)
+  const bail = async (reason: string) => {
+    const returned = await returnFundsToUser(walletClient, publicClient, account, userAddress, amountWei)
+    const fate = returned
+      ? `Funds were sent back to your wallet automatically.`
+      : `Could not automatically return funds — they are temporarily held at the automation address (${account.address}); this needs manual follow-up, they are not lost.`
+    return { ok: false as const, error: `Withdrew from ${fromMarket} but ${reason}. ${fate}`, withdrawTxHash }
+  }
+
   const supplyQuote = await buildMarketSupply(userAddress, amount, toMarket)
   if ('error' in supplyQuote) {
-    return { ok: false, error: `Withdrew from ${fromMarket} but couldn't re-supply to ${toMarket}: ${supplyQuote.error}. Funds are in the user's wallet, not lost.`, withdrawTxHash }
+    return bail(`couldn't re-supply to ${toMarket}: ${supplyQuote.error}`)
+  }
+
+  // supply() pulls from msg.sender (the automation key) — approve Morpho for the exact
+  // amount if the current allowance is short (matches lib/execute-swap.ts's convention of
+  // approving the exact amount, not an unlimited allowance).
+  try {
+    const currentAllowance = await publicClient.readContract({
+      address: USDG_ADDRESS, abi: erc20Abi, functionName: 'allowance', args: [account.address, supplyQuote.transaction.to as `0x${string}`],
+    })
+    if (currentAllowance < amountWei) {
+      const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [supplyQuote.transaction.to as `0x${string}`, amountWei] })
+      const approveHash = await walletClient.sendTransaction({ account, chain: nockChain, to: USDG_ADDRESS, data: approveData, value: BigInt(0) })
+      const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
+      if (approveReceipt.status !== 'success') return bail(`the approval to re-supply to ${toMarket} reverted on-chain`)
+    }
+  } catch (err) {
+    return bail(`approving the re-supply to ${toMarket} failed: ${err instanceof Error ? err.message : 'unknown error'}`)
   }
 
   let supplyTxHash: Hash
@@ -199,12 +237,34 @@ async function rebalancePosition(
       gas: BigInt(supplyQuote.transaction.gas),
     })
   } catch (err) {
-    return { ok: false, error: `Withdrew from ${fromMarket} but the re-supply to ${toMarket} failed to submit: ${err instanceof Error ? err.message : 'unknown error'}. Funds are in the user's wallet, not lost.`, withdrawTxHash }
+    return bail(`the re-supply to ${toMarket} failed to submit: ${err instanceof Error ? err.message : 'unknown error'}`)
   }
   const supplyReceipt = await publicClient.waitForTransactionReceipt({ hash: supplyTxHash })
   if (supplyReceipt.status !== 'success') {
-    return { ok: false, error: `Withdrew from ${fromMarket} but the re-supply to ${toMarket} reverted on-chain. Funds are in the user's wallet, not lost.`, withdrawTxHash, supplyTxHash }
+    const result = await bail(`the re-supply to ${toMarket} reverted on-chain`)
+    return { ...result, supplyTxHash }
   }
 
   return { ok: true, withdrawTxHash, supplyTxHash }
+}
+
+// Last-resort safety net: send the automation key's own USDG balance back to the user via
+// a plain ERC20 transfer. Best-effort — returns false (never throws) so callers can still
+// report a clear "needs manual follow-up" message rather than crashing the sweep.
+async function returnFundsToUser(
+  walletClient: ReturnType<typeof getClients>['walletClient'],
+  publicClient: ReturnType<typeof getClients>['publicClient'],
+  account: ReturnType<typeof getClients>['account'],
+  userAddress: string,
+  amountWei: bigint,
+): Promise<boolean> {
+  try {
+    const data = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [userAddress as `0x${string}`, amountWei] })
+    const hash = await walletClient.sendTransaction({ account, chain: nockChain, to: USDG_ADDRESS, data, value: BigInt(0) })
+    const receipt = await publicClient.waitForTransactionReceipt({ hash })
+    return receipt.status === 'success'
+  } catch (err) {
+    console.error('[yield-automation] returnFundsToUser failed:', err)
+    return false
+  }
 }

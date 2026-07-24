@@ -13,8 +13,8 @@ import { cached } from './cache'
 // core design.
 export const MORPHO_CORE = '0x9d53d5e3bd5e8d4cbfa6db1ca238aea02e651010' as const
 
-const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const
-const USDG_DECIMALS = 6
+export const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const
+export const USDG_DECIMALS = 6
 
 export type MorphoMarketKey = 'USDe' | 'syrupUSDG' | 'spUSDG'
 
@@ -332,6 +332,12 @@ export async function buildMarketWithdraw(
   user: string,
   amount: string,
   marketKey: MorphoMarketKey,
+  // Defaults to the user themselves — every caller except yield automation's rebalance
+  // step wants this (a manual withdraw should never send funds anywhere else). Automation
+  // passes its OWN address here because Morpho's supply() pulls the loan token from
+  // msg.sender, not from onBehalf — the automation key must actually hold the withdrawn
+  // funds itself to be able to re-supply them into a new market a moment later.
+  receiver: string = user,
 ): Promise<{ error: string } | MorphoQuote> {
   const m = MORPHO_MARKETS[marketKey]
   if (!m) return { error: `Unknown market "${marketKey}". Valid markets: ${Object.keys(MORPHO_MARKETS).join(', ')}.` }
@@ -368,8 +374,7 @@ export async function buildMarketWithdraw(
   const data = encodeFunctionData({
     abi: MORPHO_ABI,
     functionName: 'withdraw',
-    // Receiver is always the user themselves — never a third address.
-    args: [m.params, assets, BigInt(0), user as `0x${string}`, user as `0x${string}`],
+    args: [m.params, assets, BigInt(0), user as `0x${string}`, receiver as `0x${string}`],
   })
 
   const marketData = (await getMorphoMarketData()).find((d) => d.key === marketKey)!
