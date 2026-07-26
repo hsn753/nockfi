@@ -1905,6 +1905,17 @@ async function handlePOST(request: Request) {
       const match = lastUser?.text.match(
         /\b(withdraw|lend|deposit|supply)\s+\$?([\d,.]+)\s*(?:usdg)?\s+(?:from|to|into)\s+(?:the\s+)?(usde|syrupusdg|spusdg)\b/i,
       )
+      const userText = lastUser?.text || ''
+      // "Close/withdraw ALL / everything / my (yield) position(s) fully" — no amount, no
+      // market named. The model kept answering these with no card at all (a user unable to
+      // reach their own funds is the worst failure this app can have — same reason the
+      // amount+market path above is deterministic). Resolve the amount/market from the
+      // user's ACTUAL on-chain positions instead of needing them restated. Guarded to
+      // yield (excludes "perp*" so it never hijacks a perps-close).
+      const isCloseAll =
+        /\b(withdraw|close|exit|remove|pull\s*out|take\s*out|cash\s*out|unstake)\b/i.test(userText) &&
+        /\b(all|everything|fully|full|entire|max|my\s+(?:yield|position))/i.test(userText) &&
+        !/\bperp/i.test(userText)
       if (match) {
         const [, verb, rawAmount, rawMarket] = match
         const marketKey = (Object.keys(MORPHO_MARKETS) as MorphoMarketKey[]).find(
@@ -1923,6 +1934,27 @@ async function handlePOST(request: Request) {
           } catch (err) {
             console.error('[robin] deterministic yield command failed:', err)
           }
+        }
+      } else if (isCloseAll) {
+        try {
+          const positions = await getUserMarketPositions(walletAddress)
+          if (positions.length === 0) {
+            responseText = "You don't have any USDG supplied to a yield market right now — there's nothing to withdraw."
+          } else if (positions.length === 1) {
+            // One position → build a full-balance withdraw card straight away.
+            const p = positions[0]
+            const quote = await buildMarketWithdraw(walletAddress, p.suppliedUsd.toFixed(6), p.market)
+            if ('transaction' in quote) lastYieldQuote = quote
+            else responseText = quote.error
+          } else {
+            // Multiple positions can't collapse into one confirmable card — the whole
+            // downstream flow (lastYieldQuote) is single-quote. Ask which, with the exact
+            // phrasing the deterministic amount+market path above accepts.
+            const list = positions.map((p) => `${p.market} ($${p.suppliedUsd.toFixed(2)})`).join(' and ')
+            responseText = `You have USDG in more than one market: ${list}. Tell me which to withdraw, e.g. "withdraw ${positions[0].suppliedUsd.toFixed(2)} USDG from ${positions[0].market} market" — then repeat for the other.`
+          }
+        } catch (err) {
+          console.error('[robin] deterministic close-all yield command failed:', err)
         }
       }
     }
