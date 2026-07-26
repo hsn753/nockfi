@@ -12,7 +12,9 @@ import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
-import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
+import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, buildSetAuthorizationTx, isAutomationAuthorized, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
+import { getAutomationAddress, yieldAutomationEnabled } from '@/lib/yield-automation'
+import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { resolvePerpsGeo } from '@/lib/geo-gate'
 import { PERPS_ENABLED } from '@/lib/feature-flags'
@@ -670,6 +672,41 @@ async function handlePOST(request: Request) {
     let yieldDepositAutoPicked: { market: string; apyPct: number } | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
+    // AUTO-SWITCH-ON-DEPOSIT (see the "Authorize once, then default-on" design). A yield
+    // DEPOSIT card, by default, also carries a one-time Morpho setAuthorization tx that the
+    // client runs as a pre-step in the same Confirm — after which the automation cron keeps
+    // the position in the best-APY market. Attached ONLY when: the feature is configured,
+    // the user did NOT opt out ("don't switch"/"no auto"), and they aren't already
+    // authorized on-chain (a repeat depositor needs no second grant). Memoized so the two
+    // card-build sites (propose_action + the deterministic synthesis) share one on-chain
+    // read. If the user opts out, we also best-effort DISABLE any existing enabled flag.
+    let autoSwitchDecided = false
+    let autoSwitchAuthorizeTx: { to: string; data: string } | null = null
+    const resolveAutoSwitchAuthorize = async (): Promise<{ to: string; data: string } | null> => {
+      if (autoSwitchDecided) return autoSwitchAuthorizeTx
+      autoSwitchDecided = true
+      try {
+        if (!yieldAutomationEnabled() || !walletAddress || !isAddress(walletAddress)) return null
+        const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.text || ''
+        const optedOut = /\b(don'?t|do\s+not|no)\s+(auto|switch)|don'?t\s+switch|no\s+auto[-\s]?switch|keep\s+it\s+(here|there|put)|stay\s+in|manual(ly)?\b/i.test(lastUserText)
+        if (optedOut) {
+          // Honor an explicit opt-out — stop the sweep from acting even if they'd enabled
+          // before (the on-chain grant may still exist, but enabled=false skips them).
+          await disableYieldAutomationByAddress(walletAddress).catch(() => {})
+          return null
+        }
+        const automationAddress = getAutomationAddress()
+        const already = await isAutomationAuthorized(walletAddress, automationAddress)
+        if (already) return null // repeat depositor — already authorized, no second signature
+        const tx = buildSetAuthorizationTx(automationAddress, true)
+        autoSwitchAuthorizeTx = { to: tx.to, data: tx.data }
+        return autoSwitchAuthorizeTx
+      } catch (err) {
+        console.error('[robin] resolveAutoSwitchAuthorize failed:', err)
+        return null
+      }
+    }
+
     // ── PRE-MODEL: cross-chain funding IN / cash-out OUT via Houdini ───────────────────
     // IN  : "add/fund/deposit <amt> FROM ethereum/base"  → external USDC → USDG on Robinhood.
     // OUT : "cash out/withdraw/swap <amt> USDG TO ethereum/base" → USDG on Robinhood → USDC.
@@ -1277,6 +1314,13 @@ async function handlePOST(request: Request) {
                 ]
               : input.metrics
 
+            // Auto-switch: a yield SUPPLY (not a withdrawal) carries the one-time
+            // authorization pre-step by default (unless opted out / already authorized).
+            const proposeAuthorizeTx =
+              input.agent === 'yield' && !isWithdrawal && lastYieldQuote && 'transaction' in lastYieldQuote
+                ? await resolveAutoSwitchAuthorize()
+                : null
+
             action = {
               id: `act-${Date.now()}`,
               agent: input.agent,
@@ -1285,6 +1329,7 @@ async function handlePOST(request: Request) {
               metrics: boundMetrics,
               status: 'pending',
               outcome: { ...input.outcome, value: outcomeValue },
+              ...(proposeAuthorizeTx ? { authorizeAutomation: proposeAuthorizeTx } : {}),
               ...((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction ? {
                 transactionData: lastSwapQuote.transaction,
                 fromToken: lastSwapQuote.fromSymbol,
@@ -2203,11 +2248,18 @@ async function handlePOST(request: Request) {
             direction: q.direction,
           } as object),
         } as any
+        // Auto-switch: attach the one-time authorization pre-step on a deposit (not a
+        // withdrawal) unless opted out / already authorized.
+        const synthAuthorizeTx = !isW ? await resolveAutoSwitchAuthorize() : null
+        if (synthAuthorizeTx) (action as any).authorizeAutomation = synthAuthorizeTx
         const autoPickNote =
           !isW && yieldDepositAutoPicked && yieldDepositAutoPicked.market === q.market
             ? `${q.market} is the highest-yielding market right now at ${yieldDepositAutoPicked.apyPct.toFixed(2)}% APY, so I picked it for you (say a specific market if you'd rather choose). `
             : ''
-        responseText = `${autoPickNote}Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
+        const autoSwitchNote = synthAuthorizeTx
+          ? " I'll also switch on auto-rebalancing (a one-time approval in the same Confirm) so your USDG keeps moving to the best rate automatically — say \"don't switch\" if you'd rather I leave it put."
+          : ''
+        responseText = `${autoPickNote}Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.${autoSwitchNote}`
       }
     }
 

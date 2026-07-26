@@ -944,6 +944,45 @@ export function NockApp() {
         // Reused for all the authenticated requests below.
         const { identityToken, accessToken } = await getAuthTokens()
 
+        // AUTO-SWITCH one-time authorization (see "Authorize once, then default-on"): a
+        // first yield deposit may carry a Morpho setAuthorization tx to run in the SAME
+        // Confirm, right before the deposit, so the automation cron can keep the position
+        // in the best market afterward. Deliberately a pre-step, NOT threaded into the
+        // shared executeSwap path. Failure-SAFE: if the user rejects this popup (or it
+        // errors), we log it and STILL do the deposit below — they just won't have
+        // auto-switch on, which they can enable later in Settings. Only for a real
+        // external wallet (a delegated/instant-swap wallet can't prompt this signature).
+        const authorizeAutomation = (action as any).authorizeAutomation as { to: string; data: string } | undefined
+        if (authorizeAutomation && action.agent === 'yield' && activeWallet && publicClient) {
+          try {
+            if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+            const provider = await activeWallet.getEthereumProvider()
+            const authClient = createWalletClient({
+              account: activeWallet.address as `0x${string}`,
+              chain: nockChain,
+              transport: custom(provider),
+            })
+            const authHash = await authClient.sendTransaction({
+              account: activeWallet.address as `0x${string}`,
+              chain: nockChain,
+              to: authorizeAutomation.to as `0x${string}`,
+              data: authorizeAutomation.data as `0x${string}`,
+              value: BigInt(0),
+            })
+            await publicClient.waitForTransactionReceipt({ hash: authHash })
+            // Record intent server-side (it independently re-verifies isAuthorized on-chain
+            // before enabling — never trusts this call alone).
+            await fetch('/api/yield-automation/enable', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Privy-Identity-Token': identityToken ?? '', 'X-Privy-Access-Token': accessToken ?? '' },
+              body: JSON.stringify({ address: activeWallet.address, authTxHash: authHash }),
+            }).catch(() => {})
+          } catch (authErr) {
+            // Rejected or failed — proceed with the deposit anyway, without auto-switch.
+            console.warn('[Nock] Auto-switch authorization skipped:', authErr)
+          }
+        }
+
         // Extract transaction data from action
         // The transaction data is stored in the action from the swap quote
         const txData = (action as any).transactionData
