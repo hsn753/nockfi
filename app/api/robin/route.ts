@@ -16,6 +16,7 @@ import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMa
 import { getAutomationAddress, yieldAutomationEnabled } from '@/lib/yield-automation'
 import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
 import { createCondition, getConditionsForWallet, deleteCondition, deleteConditionsBySymbol } from '@/lib/db/conditions'
+import { setRebalanceTarget, getRebalanceSettings, disableRebalanceByAddress, type RebalanceTarget } from '@/lib/db/portfolio-rebalance'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { resolvePerpsGeo } from '@/lib/geo-gate'
 import { PERPS_ENABLED } from '@/lib/feature-flags'
@@ -1030,6 +1031,96 @@ async function handlePOST(request: Request) {
         }
       } catch (err) {
         console.error('[robin] conditions pre-model handler failed:', err)
+      }
+    }
+
+    // ── PRE-MODEL: portfolio rebalance target (set / show / stop) ───────────────────────
+    // "rebalance my portfolio to 60% USDG 40% WETH" / "keep me 50% usdg 50% nock" sets a
+    // target allocation the cron keeps in line via allowance-model swaps through USDG.
+    // USDG is the balancing bucket; non-USDG assets must be ERC20 (native ETH can't be
+    // approved — steered to WETH). Arms the needed approvals with a token-approve card.
+    if (walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const txt = (lastUser?.text || '').trim()
+      const mentionsRebal =
+        /(rebalanc|re-?balanc|allocation|portfolio (mix|target)|my target)/i.test(txt) || /\bkeep me\b[\s\S]*%/i.test(txt)
+      try {
+        if (mentionsRebal && /\b(stop|disable|turn off|cancel)\b/i.test(txt)) {
+          await disableRebalanceByAddress(walletAddress)
+          return NextResponse.json({ text: 'Turned off automatic portfolio rebalancing. Your target is kept but I won’t act on it until you re-enable.' })
+        }
+        if (mentionsRebal && /\b(show|what|my|current)\b/i.test(txt) && !/%/.test(txt)) {
+          const s = await getRebalanceSettings(walletAddress)
+          if (!s || !s.enabled || !s.targets?.length) return NextResponse.json({ text: 'You don’t have a rebalance target set. Try: "rebalance my portfolio to 60% USDG 40% WETH".' })
+          const nonUsdg = s.targets.map((t) => `${t.targetPct}% ${t.symbol}`)
+          const usdgPct = Math.max(0, 100 - s.targets.reduce((a, t) => a + t.targetPct, 0))
+          return NextResponse.json({ text: `Your target: ${usdgPct}% USDG, ${nonUsdg.join(', ')} (rebalanced when any drifts more than ${Number(s.driftThresholdPct)}%). Say "stop rebalancing" to turn it off.` })
+        }
+        // SET — needs percentage/symbol pairs.
+        const pairs = [...txt.matchAll(/(\d+(?:\.\d+)?)\s*%\s*(?:in\s+|of\s+)?([A-Za-z]{2,6})/gi)].map((m) => ({ pct: parseFloat(m[1]), sym: m[2].toUpperCase() }))
+        if (mentionsRebal && pairs.length >= 1) {
+          const targets: RebalanceTarget[] = []
+          let usdgPct = 0
+          for (const p of pairs) {
+            if (p.sym === 'USDG' || p.sym === 'USD') { usdgPct += p.pct; continue }
+            const known = SWAP_TOKENS[p.sym]
+            if (known && known.address.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()) {
+              return NextResponse.json({ text: `Native ETH can't be auto-rebalanced (it can't be pre-approved). Use WETH instead, e.g. "rebalance to 60% USDG 40% WETH".` })
+            }
+            if (known && p.sym !== 'USDG') targets.push({ symbol: p.sym, address: known.address, decimals: known.decimals, targetPct: p.pct })
+            else if (!known) {
+              const stock = await findStockToken(p.sym).catch(() => null)
+              if (stock) targets.push({ symbol: p.sym, address: stock.address, decimals: 18, targetPct: p.pct })
+              else return NextResponse.json({ text: `I don't recognize "${p.sym}" as a tradable asset. Use USDG, WETH, NOCK, or an official stock ticker.` })
+            }
+          }
+          if (targets.length === 0) return NextResponse.json({ text: 'Give me at least one non-USDG asset, e.g. "rebalance to 60% USDG 40% WETH".' })
+          const sumNonUsdg = targets.reduce((a, t) => a + t.targetPct, 0)
+          const totalPct = sumNonUsdg + usdgPct
+          if (totalPct < 95 || totalPct > 105) {
+            return NextResponse.json({ text: `Those add up to ${totalPct}% — they need to total about 100%. e.g. "rebalance to ${100 - sumNonUsdg}% USDG ${targets.map((t) => `${t.targetPct}% ${t.symbol}`).join(' ')}".` })
+          }
+          await setRebalanceTarget(walletAddress, targets)
+
+          // Arm approvals: the automation key needs allowance for USDG (to buy) + each
+          // targeted asset (to trim). Build a token-approve card for the first missing one.
+          const automationAddress = getAutomationAddress()
+          const toCheck = [{ symbol: 'USDG', address: SWAP_TOKENS.USDG.address }, ...targets.map((t) => ({ symbol: t.symbol, address: t.address }))]
+          const missing: { symbol: string; address: string }[] = []
+          for (const c of toCheck) {
+            const allow = (await getReadClient().readContract({ address: c.address as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0))) as bigint
+            if (allow === BigInt(0)) missing.push(c)
+          }
+          const usdgTargetPct = Math.max(0, 100 - sumNonUsdg)
+          const mixStr = `${usdgTargetPct}% USDG, ${targets.map((t) => `${t.targetPct}% ${t.symbol}`).join(', ')}`
+          if (missing.length > 0) {
+            const first = missing[0]
+            const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+            const approveCard = {
+              id: `act-${Date.now()}`,
+              agent: 'vault',
+              action: `Approve rebalancing of ${first.symbol}`,
+              detail: `Grants the Nock automation address permission to move your ${first.symbol} when rebalancing your portfolio to ${mixStr}. Standard token approval — your key never leaves your wallet, revocable anytime.`,
+              metrics: [
+                { label: 'Target', value: mixStr },
+                { label: 'This approval', value: first.symbol },
+                { label: 'Still to approve', value: missing.length > 1 ? missing.slice(1).map((m) => m.symbol).join(', ') : 'none' },
+              ],
+              status: 'pending',
+              outcome: { title: 'Rebalancing', value: first.symbol, meta: mixStr, activityTitle: `Approved ${first.symbol} for rebalancing` },
+              routeVia: 'token-approve',
+              transactionData: { to: first.address, data: approveData, value: '0' },
+              verified: true,
+            }
+            return NextResponse.json({
+              text: `Target set: ${mixStr}. To let me rebalance automatically I need approval for ${missing.map((m) => m.symbol).join(', ')}. Press Confirm to approve ${first.symbol}${missing.length > 1 ? `, then say "rebalance" again to approve the next` : ''}.`,
+              action: approveCard,
+            })
+          }
+          return NextResponse.json({ text: `Done — I'll keep your portfolio at ${mixStr}, rebalancing whenever an asset drifts more than 5%. Everything's already approved. I check hourly. Say "show my target" or "stop rebalancing" anytime.` })
+        }
+      } catch (err) {
+        console.error('[robin] rebalance pre-model handler failed:', err)
       }
     }
 

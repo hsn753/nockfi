@@ -101,7 +101,7 @@ export async function runConditionSweep(): Promise<ConditionSweepSummary> {
           const res = await executeSellToUsdg(cond.address, cond.tokenAddress, decimals, cond.symbol ?? 'token')
           const msg =
             res.status === 'executed'
-              ? `Stop-loss hit — sold ${Number(res.soldAmount).toLocaleString()} ${cond.symbol ?? ''} for ${Number(res.usdgReceived).toFixed(2)} USDG (${cond.symbol} was ${cond.comparator} $${Number(cond.threshold)}).`
+              ? `Stop-loss hit — sold ${Number(res.soldAmount).toLocaleString()} ${cond.symbol ?? ''} for ${Number(res.boughtAmount).toFixed(2)} USDG (${cond.symbol} was ${cond.comparator} $${Number(cond.threshold)}).`
               : res.status === 'not_authorized'
                 ? `${cond.symbol} ${cond.comparator} $${Number(cond.threshold)} — but I'm not approved to sell it. Re-approve the automation address for ${cond.symbol} to arm this.`
                 : `Tried to sell ${cond.symbol} on your stop-loss but it didn't complete: ${res.message}`

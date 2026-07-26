@@ -1,88 +1,83 @@
-import { erc20Abi, encodeFunctionData, formatUnits, type Hash } from 'viem'
+import { erc20Abi, encodeFunctionData, formatUnits, parseUnits, type Hash } from 'viem'
 import { nockChain } from './chain'
 import { getAutomationClients, getAutomationAddress } from './yield-automation'
 import { fetchSwapQuote, SWAP_TOKENS } from './get-swap-quote'
 
-// Conditional swap execution via the ALLOWANCE model (user's choice). The user grants a
-// standard ERC20 allowance to the automation key for a specific token (a normal approve()
-// tx — their private key never leaves their wallet). When a strategy fires (e.g. a
-// stop-loss), the automation key:
-//   1. transferFrom(user -> key) the token (up to the granted allowance / balance),
-//   2. swaps it to USDG via 0x (key is the taker),
-//   3. transfers the USDG back to the user.
-// Native ETH is unsupported (can't be approved). Every failure after step 1 tries to
-// return the pulled token to the user (safety net) rather than stranding it at the key.
+// Conditional / rebalance swap execution via the ALLOWANCE model (user's choice). The user
+// grants a standard ERC20 allowance to the automation key for a token (a normal approve()
+// tx — their private key never leaves their wallet). To move funds the automation key:
+//   1. transferFrom(user -> key) the sell token (up to the granted allowance),
+//   2. swaps it to the buy token via 0x (key is the taker),
+//   3. transfers the bought token back to the user.
+// Native ETH is unsupported on the sell side (can't be approved). Every failure after
+// step 1 tries to return the pulled token to the user (safety net).
 
 const USDG_ADDRESS = SWAP_TOKENS.USDG.address as `0x${string}`
 
-export type SellToUsdgResult =
-  | { status: 'executed'; soldAmount: string; usdgReceived: string; swapTxHash: Hash }
+export type TokenRef = { address: string; decimals: number; symbol: string }
+
+export type SwapForUserResult =
+  | { status: 'executed'; soldAmount: string; boughtAmount: string; swapTxHash: Hash }
   | { status: 'not_authorized'; message: string }
   | { status: 'nothing_to_sell'; message: string }
   | { status: 'failed'; message: string }
 
-// Sells the user's FULL balance of `tokenAddress` to USDG on a trigger, using the automation
-// key + the user's pre-granted allowance. tokenDecimals/symbol for display + quoting.
-export async function executeSellToUsdg(
-  userAddress: string,
-  tokenAddress: string,
-  tokenDecimals: number,
-  tokenSymbol: string,
-): Promise<SellToUsdgResult> {
+// Core: swap `amountRaw` of `from` (user's) into `to`, returning the proceeds to the user.
+// amountRaw is in `from`'s smallest units; omit to sell the user's FULL `from` balance
+// (capped by their allowance).
+export async function swapForUser(userAddress: string, from: TokenRef, to: TokenRef, amountRaw?: bigint): Promise<SwapForUserResult> {
   const { account, walletClient, publicClient } = getAutomationClients()
   const keyAddr = getAutomationAddress()
-  const token = tokenAddress as `0x${string}`
+  const fromToken = from.address as `0x${string}`
 
   try {
     const [balance, allowance] = await Promise.all([
-      publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as Promise<bigint>,
-      publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [userAddress as `0x${string}`, keyAddr] }) as Promise<bigint>,
+      publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as Promise<bigint>,
+      publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'allowance', args: [userAddress as `0x${string}`, keyAddr] }) as Promise<bigint>,
     ])
-    if (balance === BigInt(0)) return { status: 'nothing_to_sell', message: `No ${tokenSymbol} balance to sell.` }
-    if (allowance === BigInt(0)) {
-      return { status: 'not_authorized', message: `Not authorized to sell your ${tokenSymbol} — approve the automation address for ${tokenSymbol} first.` }
-    }
+    if (balance === BigInt(0)) return { status: 'nothing_to_sell', message: `No ${from.symbol} balance to sell.` }
+    if (allowance === BigInt(0)) return { status: 'not_authorized', message: `Not authorized to move your ${from.symbol} — approve the automation address for ${from.symbol} first.` }
 
-    // Pull what we're allowed to (min of balance and allowance).
-    const pullAmount = balance < allowance ? balance : allowance
+    // Pull the requested amount, capped by both balance and allowance.
+    let pullAmount = amountRaw ?? balance
+    if (pullAmount > balance) pullAmount = balance
+    if (pullAmount > allowance) pullAmount = allowance
+    if (pullAmount === BigInt(0)) return { status: 'nothing_to_sell', message: `Nothing to move for ${from.symbol}.` }
 
-    // 1. transferFrom(user -> key).
     const tfData = encodeFunctionData({ abi: erc20Abi, functionName: 'transferFrom', args: [userAddress as `0x${string}`, keyAddr, pullAmount] })
     let pullHash: Hash
     try {
-      pullHash = await walletClient.sendTransaction({ account, chain: nockChain, to: token, data: tfData, value: BigInt(0) })
+      pullHash = await walletClient.sendTransaction({ account, chain: nockChain, to: fromToken, data: tfData, value: BigInt(0) })
     } catch (err) {
-      return { status: 'failed', message: `Couldn't pull your ${tokenSymbol}: ${err instanceof Error ? err.message : 'unknown error'}` }
+      return { status: 'failed', message: `Couldn't pull your ${from.symbol}: ${err instanceof Error ? err.message : 'unknown error'}` }
     }
     const pullRcpt = await publicClient.waitForTransactionReceipt({ hash: pullHash })
-    if (pullRcpt.status !== 'success') return { status: 'failed', message: `The ${tokenSymbol} transfer reverted — nothing was sold.` }
+    if (pullRcpt.status !== 'success') return { status: 'failed', message: `The ${from.symbol} transfer reverted — nothing was moved.` }
 
-    // From here the key HOLDS the token — every failure returns it to the user.
-    const keyBalance = (await publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
-    const bail = async (reason: string): Promise<SellToUsdgResult> => {
-      const returned = await returnTokenToUser(token, userAddress, keyBalance)
-      return { status: 'failed', message: `${reason}. ${returned ? `Your ${tokenSymbol} was returned to your wallet.` : `Your ${tokenSymbol} is temporarily at the automation address (${keyAddr}); needs manual follow-up, not lost.`}` }
+    // Key now holds the token — every failure returns it to the user.
+    const keyBalance = (await publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
+    const bail = async (reason: string): Promise<SwapForUserResult> => {
+      const returned = await returnTokenToUser(fromToken, userAddress, keyBalance)
+      return { status: 'failed', message: `${reason}. ${returned ? `Your ${from.symbol} was returned to your wallet.` : `Your ${from.symbol} is temporarily at the automation address (${keyAddr}); needs manual follow-up, not lost.`}` }
     }
 
-    // 2. Quote token -> USDG with the automation key as taker.
-    const quote = await fetchSwapQuote({ fromToken: token, toToken: USDG_ADDRESS, amount: formatUnits(keyBalance, tokenDecimals), taker: keyAddr })
-    if (!quote.transaction || !quote.liquidityAvailable) return bail(`No swap route for ${tokenSymbol} -> USDG right now`)
+    const quote = await fetchSwapQuote({ fromToken, toToken: to.address, amount: formatUnits(keyBalance, from.decimals), taker: keyAddr })
+    if (!quote.transaction || !quote.liquidityAvailable) return bail(`No swap route for ${from.symbol} -> ${to.symbol} right now`)
 
-    // 3. Approve the 0x router for the token if needed (key's own approval).
     try {
-      const routerAllowance = (await publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [keyAddr, quote.transaction.to as `0x${string}`] })) as bigint
+      const routerAllowance = (await publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'allowance', args: [keyAddr, quote.transaction.to as `0x${string}`] })) as bigint
       if (routerAllowance < keyBalance) {
         const apData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [quote.transaction.to as `0x${string}`, keyBalance] })
-        const apHash = await walletClient.sendTransaction({ account, chain: nockChain, to: token, data: apData, value: BigInt(0) })
+        const apHash = await walletClient.sendTransaction({ account, chain: nockChain, to: fromToken, data: apData, value: BigInt(0) })
         const apRcpt = await publicClient.waitForTransactionReceipt({ hash: apHash })
-        if (apRcpt.status !== 'success') return bail(`The ${tokenSymbol} router approval reverted`)
+        if (apRcpt.status !== 'success') return bail(`The ${from.symbol} router approval reverted`)
       }
     } catch (err) {
       return bail(`Approving the swap failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     }
 
-    // 4. Execute the swap.
-    const usdgBefore = (await publicClient.readContract({ address: USDG_ADDRESS, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
+    const toAddr = to.address as `0x${string}`
+    const boughtBefore = (await publicClient.readContract({ address: toAddr, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
     let swapHash: Hash
     try {
       swapHash = await walletClient.sendTransaction({
@@ -95,22 +90,40 @@ export async function executeSellToUsdg(
       return bail(`The swap failed to submit: ${err instanceof Error ? err.message : 'unknown error'}`)
     }
     const swapRcpt = await publicClient.waitForTransactionReceipt({ hash: swapHash })
-    if (swapRcpt.status !== 'success') return bail(`The ${tokenSymbol} -> USDG swap reverted`)
+    if (swapRcpt.status !== 'success') return bail(`The ${from.symbol} -> ${to.symbol} swap reverted`)
 
-    // 5. Send the USDG proceeds to the user.
-    const usdgAfter = (await publicClient.readContract({ address: USDG_ADDRESS, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
-    const usdgReceived = usdgAfter - usdgBefore
-    if (usdgReceived > BigInt(0)) {
-      const sendData = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [userAddress as `0x${string}`, usdgReceived] })
-      const sendHash = await walletClient.sendTransaction({ account, chain: nockChain, to: USDG_ADDRESS, data: sendData, value: BigInt(0) })
+    const boughtAfter = (await publicClient.readContract({ address: toAddr, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
+    const bought = boughtAfter - boughtBefore
+    if (bought > BigInt(0)) {
+      const sendData = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [userAddress as `0x${string}`, bought] })
+      const sendHash = await walletClient.sendTransaction({ account, chain: nockChain, to: toAddr, data: sendData, value: BigInt(0) })
       await publicClient.waitForTransactionReceipt({ hash: sendHash })
     }
 
-    return { status: 'executed', soldAmount: formatUnits(keyBalance, tokenDecimals), usdgReceived: formatUnits(usdgReceived, 6), swapTxHash: swapHash }
+    return { status: 'executed', soldAmount: formatUnits(keyBalance, from.decimals), boughtAmount: formatUnits(bought, to.decimals), swapTxHash: swapHash }
   } catch (err) {
-    console.error('[strategy-execution] executeSellToUsdg failed:', err)
+    console.error('[strategy-execution] swapForUser failed:', err)
     return { status: 'failed', message: err instanceof Error ? err.message : 'Unknown error' }
   }
+}
+
+// Sells the user's FULL balance of a token to USDG (stop-loss / take-profit).
+export async function executeSellToUsdg(userAddress: string, tokenAddress: string, tokenDecimals: number, tokenSymbol: string): Promise<SwapForUserResult> {
+  return swapForUser(userAddress, { address: tokenAddress, decimals: tokenDecimals, symbol: tokenSymbol }, { address: USDG_ADDRESS, decimals: 6, symbol: 'USDG' })
+}
+
+// Sell a specific USD-worth of a token to USDG (rebalance: trim an over-weight asset).
+export async function sellUsdWorthToUsdg(userAddress: string, token: TokenRef, usdAmount: number, tokenPriceUsd: number): Promise<SwapForUserResult> {
+  if (tokenPriceUsd <= 0) return { status: 'failed', message: `No price for ${token.symbol}.` }
+  const units = usdAmount / tokenPriceUsd
+  const amountRaw = parseUnits(units.toFixed(Math.min(token.decimals, 12)), token.decimals)
+  return swapForUser(userAddress, token, { address: USDG_ADDRESS, decimals: 6, symbol: 'USDG' }, amountRaw)
+}
+
+// Buy a token with a specific USD-worth of USDG (rebalance: top up an under-weight asset).
+export async function buyWithUsdg(userAddress: string, token: TokenRef, usdgAmount: number): Promise<SwapForUserResult> {
+  const amountRaw = parseUnits(usdgAmount.toFixed(6), 6)
+  return swapForUser(userAddress, { address: USDG_ADDRESS, decimals: 6, symbol: 'USDG' }, token, amountRaw)
 }
 
 async function returnTokenToUser(token: `0x${string}`, userAddress: string, amount: bigint): Promise<boolean> {

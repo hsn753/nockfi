@@ -270,6 +270,37 @@ export const automationConditionEvents = pgTable('automation_condition_events', 
   index('automation_condition_events_wallet_idx').on(t.walletId, t.createdAt),
 ])
 
+// Target-allocation portfolio rebalancing — one row per wallet. `targets` is a JSON array
+// of { symbol, address, decimals, targetPct } for the NON-USDG assets; USDG is the implicit
+// balancing bucket (its target = 100 - sum(targetPct)). When any asset drifts more than
+// driftThresholdPct from its target, the rebalance sweep trims/tops it up via allowance-model
+// swaps through USDG. Shares the allowance/automation-key model with strategies.
+export const portfolioRebalanceSettings = pgTable('portfolio_rebalance_settings', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  enabled: boolean('enabled').notNull().default(false),
+  driftThresholdPct: numeric('drift_threshold_pct').notNull().default('5'),
+  targets: jsonb('targets').notNull(), // [{ symbol, address, decimals, targetPct }]
+  lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex('portfolio_rebalance_settings_wallet_idx').on(t.walletId),
+])
+
+// Append-only audit log — one row per rebalance swap (trim or top-up).
+export const portfolioRebalanceEvents = pgTable('portfolio_rebalance_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  fromSymbol: text('from_symbol').notNull(),
+  toSymbol: text('to_symbol').notNull(),
+  usdAmount: numeric('usd_amount'),
+  status: text('status').notNull(), // 'executed' | 'not_authorized' | 'failed' | 'skipped'
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('portfolio_rebalance_events_wallet_idx').on(t.walletId, t.createdAt),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {
