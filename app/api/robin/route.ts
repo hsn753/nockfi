@@ -15,6 +15,7 @@ import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, buildSetAuthorizationTx, isAutomationAuthorized, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getAutomationAddress, yieldAutomationEnabled } from '@/lib/yield-automation'
 import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
+import { createCondition, getConditionsForWallet, deleteCondition, deleteConditionsBySymbol } from '@/lib/db/conditions'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
 import { resolvePerpsGeo } from '@/lib/geo-gate'
 import { PERPS_ENABLED } from '@/lib/feature-flags'
@@ -878,6 +879,101 @@ async function handlePOST(request: Request) {
         const msg = (e as Error)?.message
         console.error('[robin] houdini cross-chain backstop failed:', msg)
         return NextResponse.json({ text: `I couldn't set up the cross-chain transfer right now${msg ? `: ${msg}` : '.'}`, bridgeInfo })
+      }
+    }
+
+    // ── PRE-MODEL: monitor conditions / price alerts (create / list / remove) ───────────
+    // A user setting up "alert me if ETH drops below $1500" / "stop-loss my TSLA at 200" /
+    // "alert me if my loan hits 80%" — or listing/removing them. Handled deterministically
+    // (the model is unreliable at structured create + confirm) and returned early. These
+    // are the "monitor positions" + trigger substrate; v1 fires an in-app alert, and the
+    // conditions are the hook the execution engine will act on later.
+    if (walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const txt = (lastUser?.text || '').trim()
+      const mentionsAlert = /\b(alerts?|notify|warn|ping|remind|tell me|let me know|watch|monitor|stop\s*-?\s*loss|take\s*-?\s*profit|conditions?|triggers?)\b/i.test(txt)
+      const wantsRemove = mentionsAlert && /\b(remove|delete|clear|cancel|stop watching|turn off)\b/i.test(txt)
+      try {
+        // List — but never when it's actually a remove ("remove my ETH alert" contains "my").
+        if (mentionsAlert && !wantsRemove && /\b(list|show|what|which|my|any|see)\b/i.test(txt) && !/\b(if|when|below|above|under|over|hits?|reach|drop|fall|dip|at\s+\$?\d)/i.test(txt)) {
+          // LIST
+          const conds = await getConditionsForWallet(walletAddress)
+          if (conds.length === 0) {
+            return NextResponse.json({ text: "You don't have any alerts set up yet. Try: \"alert me if ETH drops below $1500\" or \"alert me if my TSLA loan hits 80%\"." })
+          }
+          const lines = conds.map((c) => {
+            if (c.kind === 'loan_ltv') return `- ${c.symbol ?? 'Any'} loan ${c.comparator} ${Number(c.threshold)}% LTV`
+            return `- ${c.symbol ?? 'Asset'} price ${c.comparator} $${Number(c.threshold)}`
+          })
+          return NextResponse.json({ text: `Your active alerts:\n${lines.join('\n')}\n\nSay "remove my <asset> alert" to delete one.` })
+        }
+
+        if (wantsRemove) {
+          // REMOVE
+          const symMatch = txt.match(/\b(remove|delete|clear|cancel)\s+(?:my\s+)?([A-Za-z]{2,6})\b/i)
+          if (/\ball\b/i.test(txt)) {
+            const conds = await getConditionsForWallet(walletAddress)
+            let n = 0
+            for (const c of conds) { if (await deleteCondition(walletAddress, c.id)) n++ }
+            return NextResponse.json({ text: n > 0 ? `Removed all ${n} alert${n === 1 ? '' : 's'}.` : 'You had no alerts to remove.' })
+          }
+          const sym = symMatch?.[2]?.toUpperCase()
+          if (sym) {
+            const n = await deleteConditionsBySymbol(walletAddress, sym)
+            return NextResponse.json({ text: n > 0 ? `Removed your ${sym} alert${n === 1 ? '' : 's'}.` : `You don't have an alert for ${sym}.` })
+          }
+          return NextResponse.json({ text: 'Which alert would you like to remove? e.g. "remove my ETH alert", or "remove all alerts".' })
+        }
+
+        // CREATE — needs a threshold number and a direction.
+        const wantsCreate = mentionsAlert || /\bif\b.*\b(below|above|under|over|hits?|reach|drop|fall|dip)/i.test(txt)
+        if (wantsCreate && /\d/.test(txt)) {
+          const isLoan = /\b(loan|ltv|liquidat|collateral)\b/i.test(txt)
+          const isStopLoss = /\bstop\s*-?\s*loss\b/i.test(txt)
+          const isTakeProfit = /\btake\s*-?\s*profit\b/i.test(txt)
+          let comparator: 'below' | 'above' | null =
+            isStopLoss ? 'below'
+            : isTakeProfit ? 'above'
+            : /\b(below|under|drops?|falls?|dips?|less than|beneath|down to)\b/i.test(txt) ? 'below'
+            : /\b(above|over|exceeds?|more than|reach(es)?|goes? (above|over|up)|up to)\b/i.test(txt) ? 'above'
+            : /\bhits?\b/i.test(txt) ? (isLoan ? 'above' : 'above')
+            : null
+          // Loan LTV: threshold is a percentage; price: a dollar amount.
+          const pctMatch = txt.match(/(\d+(?:\.\d+)?)\s*%/) || (isLoan ? txt.match(/(\d+(?:\.\d+)?)/) : null)
+          const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:dollars?|usd)?/i)
+          // Symbol: a known token or an UPPERCASE-ish ticker in the message (not a stopword).
+          const KNOWN = ['ETH', 'WETH', 'NOCK', 'USDG', 'USDC', 'BTC', 'WBTC']
+          const upperTokens = (txt.toUpperCase().match(/\b[A-Z]{2,6}\b/g) || []).filter(
+            (w) => !['ALERT', 'NOTIFY', 'WARN', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'LOAN', 'LTV', 'USD', 'THE', 'MY', 'IF', 'WHEN', 'AT', 'TO', 'ON', 'HIT', 'HITS', 'DROP', 'FALL', 'ABOVE', 'BELOW', 'OVER', 'UNDER'].includes(w),
+          )
+          const symbol = upperTokens[0] || null
+
+          if (comparator && (isLoan ? pctMatch : dollarMatch)) {
+            const threshold = parseFloat((isLoan ? pctMatch! : dollarMatch!)[1])
+            const tokenAddress = symbol === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null
+            const created = await createCondition({
+              walletAddress,
+              kind: isLoan ? 'loan_ltv' : 'token_price',
+              symbol,
+              tokenAddress,
+              comparator,
+              threshold,
+            })
+            const desc = isLoan
+              ? `${symbol ?? 'any'} loan going ${comparator} ${threshold}% of its liquidation ceiling`
+              : `${symbol ?? 'that asset'} going ${comparator} $${threshold}`
+            return NextResponse.json({
+              text: `Done — I'll alert you if ${desc}. I check about every 10 minutes; the alert shows up in the app when it triggers. Say "my alerts" to see all of them.${created.kind === 'token_price' && !symbol ? ' (Heads up: I couldn’t tell which asset you meant — say the ticker, like ETH, if this looks wrong.)' : ''}`,
+            })
+          }
+          if (mentionsAlert) {
+            return NextResponse.json({
+              text: 'I can set price and loan alerts. Try: "alert me if ETH drops below $1500", "stop-loss my TSLA at $200", or "alert me if my loan hits 85%".',
+            })
+          }
+        }
+      } catch (err) {
+        console.error('[robin] conditions pre-model handler failed:', err)
       }
     }
 

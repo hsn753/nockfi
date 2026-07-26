@@ -287,7 +287,17 @@ export function NockApp() {
         return [...perpsCards, ...stockCards, ...loanCards, ...yieldCards, ...kept]
       })
       setAttention((prev) => {
-        const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-') && !a.id.startsWith('loan-event-'))
+        const withoutLoanRisk = prev.filter((a) => !a.id.startsWith('loan-risk-') && !a.id.startsWith('loan-event-') && !a.id.startsWith('cond-alert-'))
+        // Monitor-condition alerts (price/LTV triggers the user set up) — most recent first.
+        type CondAlert = { id: string; message: string; createdAt: string }
+        const condAlerts: CondAlert[] = (data.conditionAlerts || []).slice(0, 5)
+        const condItems = condAlerts.map((e) => ({
+          id: `cond-alert-${e.id}`,
+          agent: 'vault' as AgentId,
+          title: 'Alert triggered',
+          subtitle: `${e.message} · ${new Date(e.createdAt).toLocaleString()}`,
+          meta: 'Alert',
+        }))
         const risky = loans.filter((p) => p.ltvUtilizationPct >= 80)
         const liveSymbols = new Set(risky.map((p) => p.stockSymbol))
         // Server-persisted events from the monitoring sweep cover what happened
@@ -312,6 +322,7 @@ export function NockApp() {
             subtitle: `Hit ${parseFloat(e.ltvUtilizationPct).toFixed(0)}% of the liquidation ceiling on ${new Date(e.createdAt).toLocaleString()}. Check the position and consider repaying or adding collateral.`,
             meta: 'Review',
           })),
+          ...condItems,
           ...withoutLoanRisk,
         ]
       })

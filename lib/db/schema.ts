@@ -236,6 +236,40 @@ export const liquidationProtectionEvents = pgTable('liquidation_protection_event
   index('liquidation_protection_events_wallet_idx').on(t.walletId, t.createdAt),
 ])
 
+// User-defined monitor conditions — the "monitor positions" + trigger substrate. One row
+// per condition. kind + symbol + comparator + threshold describe WHAT to watch; action is
+// what happens when it fires (v1: 'alert' only — auto-execute actions land with the
+// session-signer path). lastTriggeredAt gates re-firing (a condition that stays true
+// shouldn't spam an alert every sweep).
+export const automationConditions = pgTable('automation_conditions', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  kind: text('kind').notNull(), // 'token_price' | 'loan_ltv'
+  symbol: text('symbol'), // token/stock symbol the condition watches (null = any loan for loan_ltv)
+  tokenAddress: text('token_address'), // resolved token address for price lookups, when applicable
+  comparator: text('comparator').notNull(), // 'below' | 'above'
+  threshold: numeric('threshold').notNull(),
+  action: text('action').notNull().default('alert'), // 'alert' (v1); future: 'sell_to_usdg' | 'yield_move'
+  enabled: boolean('enabled').notNull().default(true),
+  lastValue: numeric('last_value'),
+  lastTriggeredAt: timestamp('last_triggered_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('automation_conditions_wallet_idx').on(t.walletId, t.enabled),
+])
+
+// Append-only log — one row each time a condition fires (the history behind the alert).
+export const automationConditionEvents = pgTable('automation_condition_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  conditionId: uuid('condition_id').notNull().references(() => automationConditions.id, { onDelete: 'cascade' }),
+  message: text('message').notNull(),
+  observedValue: numeric('observed_value'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('automation_condition_events_wallet_idx').on(t.walletId, t.createdAt),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {

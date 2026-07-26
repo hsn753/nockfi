@@ -5,6 +5,7 @@ import { getStockBorrowPositions } from '@/lib/get-stock-collateral'
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { getWalletByAddress } from '@/lib/db/wallets'
 import { getUnresolvedRiskEvents } from '@/lib/db/loan-risk'
+import { getRecentConditionEvents } from '@/lib/db/conditions'
 import { getWeeklyBaseline } from '@/lib/db/portfolio-snapshots'
 import { withRateLimit } from '@/lib/api-guard'
 import { cached } from '@/lib/cache'
@@ -28,7 +29,7 @@ async function handleGET(req: NextRequest) {
       // Collateral positions ride along with balances: stock posted as loan collateral is
       // still the user's asset (net of debt). Best-effort — a read failure here must not
       // take down the balances everything else depends on.
-      const [balances, collateralPositions, perps, riskEvents, weeklyBaseline] = await Promise.all([
+      const [balances, collateralPositions, perps, riskEvents, weeklyBaseline, conditionAlerts] = await Promise.all([
         fetchWalletBalances(raw),
         getStockBorrowPositions(raw).catch((err) => {
           console.error('[/api/balances] Collateral positions fetch failed:', err)
@@ -42,6 +43,9 @@ async function handleGET(req: NextRequest) {
         }),
         wallet ? getUnresolvedRiskEvents(wallet.id).catch(() => []) : Promise.resolve([]),
         wallet ? getWeeklyBaseline(wallet.id).catch(() => null) : Promise.resolve(null),
+        // Recent monitor-condition alerts (price/LTV triggers) — surfaced as attention items,
+        // same pattern as riskEvents. Best-effort.
+        getRecentConditionEvents(raw, 10).catch(() => []),
       ])
 
       // Perps equity (margin + unrealized PnL) counts toward the total; it left the wallet
@@ -57,7 +61,7 @@ async function handleGET(req: NextRequest) {
           ? ((currentTotal - weeklyBaseline) / weeklyBaseline) * 100
           : null
 
-      return { balances, collateralPositions, perps, riskEvents, weeklyChangePct }
+      return { balances, collateralPositions, perps, riskEvents, weeklyChangePct, conditionAlerts }
     })
 
     return NextResponse.json(data)
