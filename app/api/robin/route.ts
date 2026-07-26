@@ -208,6 +208,7 @@ When the user asks how to bridge, move, or send funds onto Robinhood Chain from 
 
 When the user asks what they hold, their portfolio, their balances, or anything about their specific holdings:
 - IMMEDIATELY call get_wallet_holdings tool. This is REQUIRED - you MUST call this tool, never skip it.
+- A plain holdings question ("what am I holding", "my portfolio", "my balances") means EVERYTHING: get_wallet_holdings now returns wallet tokens AND perps AND a 'yieldPositions' array in one call. When yieldPositions is non-empty you MUST list each one (as USDG "supplied to the <market> market") right alongside the wallet tokens — supplied yield is part of what they hold, not a separate topic they have to ask about. It's already in totalPortfolioUsd. Do NOT make the user ask a second "what are my yield positions" question to see them.
 - Do not ask if they have a wallet connected - just call the tool, it will tell you if no wallet is connected.
 - Each holding includes a real usdValue (ETH and WETH from CoinGecko, USDG hardcoded at 1). usdValue is a number — including 0 for a zero balance, which just means $0, not "unavailable." It is only null if a price feed failed for that specific asset; only then say its dollar value isn't available right now. Present both the token amount and its $ value, and total everything with a usdValue into a portfolio $ figure.
 - These balances are specifically on Robinhood Chain, not the user's other wallets or chains (Ethereum mainnet, etc). If everything comes back at 0, say so plainly and mention they likely need to bridge funds onto Robinhood Chain first (canonical Arbitrum bridge or a supported cross-chain route) before they show up here — don't imply something is broken.
@@ -326,7 +327,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_wallet_holdings',
-      description: `Returns the user's real on-chain balances from their connected wallet, each with a live usdValue, across all supported tokens: ${SUPPORTED_TOKENS_LIST}. Also returns a 'perps' object when the user has a Lighter perps account — their deposited margin balance and any open positions. Call this whenever the user asks what they hold, their portfolio, their balances, their perps, or anything about their specific holdings. Never answer holdings questions from memory.`,
+      description: `Returns the user's real on-chain balances from their connected wallet, each with a live usdValue, across all supported tokens: ${SUPPORTED_TOKENS_LIST}. Also returns a 'perps' object when the user has a Lighter perps account (deposited margin + open positions) AND a 'yieldPositions' array of any USDG they've lent into Morpho yield markets. Call this whenever the user asks what they hold, their portfolio, their balances, their perps, or anything about their specific holdings — this ONE call now covers wallet + perps + yield, so a plain "what am I holding" surfaces everything. Never answer holdings questions from memory.`,
       parameters: {
         type: 'object',
         properties: {},
@@ -663,6 +664,10 @@ async function handlePOST(request: Request) {
       | Awaited<ReturnType<typeof buildMarketSupply>>
       | Awaited<ReturnType<typeof buildMarketWithdraw>>
       | null = null
+    // Set when the deterministic smart-deposit path AUTO-PICKED the best-APY market for a
+    // "put my $x to work" (no market named) request — so the synthesis can tell the user
+    // which market was chosen and why, instead of silently landing in one.
+    let yieldDepositAutoPicked: { market: string; apyPct: number } | null = null
     let bridgeInfo: { link: string; sourceChain: string; destinationChain: string; etaMinutes: number } | undefined
 
     // ── PRE-MODEL: cross-chain funding IN / cash-out OUT via Houdini ───────────────────
@@ -1347,10 +1352,11 @@ async function handlePOST(request: Request) {
               // collateral silently vanishes from the answer (seen live: a borrow
               // made TSLA "disappear" and the stated portfolio total drop, when the
               // user still owned it and owed 2 USDG against it).
-              const [balances, collateralPositions, lighter] = await Promise.all([
+              const [balances, collateralPositions, lighter, yieldPositions] = await Promise.all([
                 fetchWalletBalances(walletAddress),
                 getStockBorrowPositions(walletAddress).catch(() => []),
                 getLighterPortfolio(walletAddress).catch(() => null),
+                getUserMarketPositions(walletAddress).catch(() => []),
               ])
               console.log('[robin] Balances fetched:', balances)
               // The total is computed HERE, never left to the model's arithmetic —
@@ -1364,11 +1370,18 @@ async function handlePOST(request: Request) {
               const perps = lighter?.hasAccount
                 ? { balanceUsd: lighter.collateralUsd, availableUsd: lighter.availableUsd, equityUsd: lighter.equityUsd, positions: lighter.positions }
                 : null
+              // Yield (Morpho lending) positions — USDG the user has supplied into a market.
+              // Like perps margin, this USDG LEFT the wallet on deposit, so it's not double-
+              // counted with wallet USDG; it must be added to the total (it was missing from
+              // both the holdings answer AND the portfolio total before this — supplied USDG
+              // silently vanished from "what am I holding").
+              const yieldUsd = yieldPositions.reduce((s, p) => s + p.suppliedUsd, 0)
               result = {
                 balances,
                 collateralPositions,
                 perps,
-                totalPortfolioUsd: Number((walletUsd + netCollateralUsd + perpsEquityUsd).toFixed(2)),
+                yieldPositions,
+                totalPortfolioUsd: Number((walletUsd + netCollateralUsd + perpsEquityUsd + yieldUsd).toFixed(2)),
                 note: [
                   'Live on-chain balances with live USD reference prices.',
                   collateralPositions.length > 0
@@ -1376,6 +1389,9 @@ async function handlePOST(request: Request) {
                     : '',
                   perps && (perps.positions.length > 0 || perps.balanceUsd > 0)
                     ? `perps is the user's Lighter perpetual-futures account (separate from the wallet). ALWAYS surface it: state the perps balance (balanceUsd, the USDG margin deposited there) as its own line, and list EACH open position in perps.positions with its side (long/short), symbol, notional (notionalUsd), leverage, and unrealized PnL (unrealizedPnlUsd, + or −). This balance is already folded into totalPortfolioUsd (as equity = margin + unrealized PnL); the position notionals are leveraged exposure and are NOT separately added.`
+                    : '',
+                  yieldPositions.length > 0
+                    ? 'yieldPositions is USDG the user has LENT into Morpho yield markets (each: market name + suppliedUsd, accrued interest included). ALWAYS surface it: list EACH position as its own line ("supplied to the <market> market"). This supplied USDG is already folded into totalPortfolioUsd — it left the wallet, so it is NOT double-counted with the wallet USDG balance.'
                     : '',
                   'State totalPortfolioUsd as the total portfolio value EXACTLY as given — never compute your own total.',
                 ].filter(Boolean).join(' '),
@@ -1916,6 +1932,26 @@ async function handlePOST(request: Request) {
         /\b(withdraw|close|exit|remove|pull\s*out|take\s*out|cash\s*out|unstake)\b/i.test(userText) &&
         /\b(all|everything|fully|full|entire|max|my\s+(?:yield|position))/i.test(userText) &&
         !/\bperp/i.test(userText)
+      // SMART DEPOSIT — a deposit intent with an amount but NO market named ("put my $7 to
+      // work", "open a yield position with 10", "start earning with $5", "lend 20"): pick
+      // the highest-APY market automatically rather than making the user choose. Excludes
+      // withdraw/close (isCloseAll handles those), perps deposits, and anything that names a
+      // market (the amount+market `match` above owns that). Morpho supply is permissionless
+      // and uncapped, so there's no liquidity constraint on a deposit — highest APY wins.
+      const namesMarket = /\b(usde|syrupusdg|spusdg)\b/i.test(userText)
+      const smartAmountM = userText.match(/\$?\s*([\d,]+(?:\.\d+)?)/)
+      const isSmartDeposit =
+        !isCloseAll &&
+        !namesMarket &&
+        !!smartAmountM &&
+        !/\bperp/i.test(userText) &&
+        !/\b(withdraw|close|exit|remove|pull\s*out|take\s*out|cash\s*out|unstake)\b/i.test(userText) &&
+        (
+          /\bput\b[\s\S]{0,25}\b(to\s+work|to\s+use|in(to)?\s+yield|in(to)?\s+earn)/i.test(userText) ||
+          /\b(open|start|create|enter)\b[\s\S]{0,25}\b(yield|earn|lend|position)/i.test(userText) ||
+          /\b(earn|lend|invest|supply|deposit)\b/i.test(userText) ||
+          /\b(best|highest|top)\b[\s\S]{0,15}\b(yield|apy|rate|market|return)/i.test(userText)
+        )
       if (match) {
         const [, verb, rawAmount, rawMarket] = match
         const marketKey = (Object.keys(MORPHO_MARKETS) as MorphoMarketKey[]).find(
@@ -1955,6 +1991,23 @@ async function handlePOST(request: Request) {
           }
         } catch (err) {
           console.error('[robin] deterministic close-all yield command failed:', err)
+        }
+      } else if (isSmartDeposit) {
+        try {
+          const amount = smartAmountM![1].replace(/,/g, '')
+          // Highest live APY wins — supply is uncapped, so no liquidity filter needed.
+          const best = [...(await getMorphoMarketData())].sort((a, b) => b.supplyApyPct - a.supplyApyPct)[0]
+          if (best) {
+            const quote = await buildMarketSupply(walletAddress, amount, best.key)
+            if ('transaction' in quote) {
+              lastYieldQuote = quote
+              yieldDepositAutoPicked = { market: best.key, apyPct: best.supplyApyPct }
+            } else {
+              responseText = quote.error
+            }
+          }
+        } catch (err) {
+          console.error('[robin] deterministic smart-deposit command failed:', err)
         }
       }
     }
@@ -2150,7 +2203,11 @@ async function handlePOST(request: Request) {
             direction: q.direction,
           } as object),
         } as any
-        responseText = `Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
+        const autoPickNote =
+          !isW && yieldDepositAutoPicked && yieldDepositAutoPicked.market === q.market
+            ? `${q.market} is the highest-yielding market right now at ${yieldDepositAutoPicked.apyPct.toFixed(2)}% APY, so I picked it for you (say a specific market if you'd rather choose). `
+            : ''
+        responseText = `${autoPickNote}Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.`
       }
     }
 
