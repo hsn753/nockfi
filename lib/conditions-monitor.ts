@@ -1,12 +1,17 @@
+import { erc20Abi } from 'viem'
 import { getReferencePrices } from './get-prices'
+import { getReadClient } from './rpc'
 import { getTokenPriceByAddress } from './get-trending-tokens'
 import { findStockToken } from './get-stock-tokens'
 import { getStockBorrowPositions } from './get-stock-collateral'
+import { SWAP_TOKENS } from './get-swap-quote'
+import { executeSellToUsdg } from './strategy-execution'
 import {
   getAllEnabledConditions,
   markConditionTriggered,
   markConditionReset,
   recordConditionEvent,
+  disableCondition,
   type ConditionRow,
 } from './db/conditions'
 
@@ -47,6 +52,19 @@ async function observe(cond: ConditionRow, ctx: { address: string; prices: Recor
   }
 }
 
+// Decimals for the sell token — from the known-token map when possible, else read on-chain
+// (stock tokens are 18, but never assume: a wrong decimals would misprice the whole sell).
+async function resolveDecimals(symbol: string | null, tokenAddress: string): Promise<number> {
+  const known = symbol ? SWAP_TOKENS[symbol.toUpperCase()] : undefined
+  if (known) return known.decimals
+  try {
+    const d = (await getReadClient().readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'decimals' })) as number
+    return Number(d)
+  } catch {
+    return 18
+  }
+}
+
 function isTrue(cond: ConditionRow, observed: number): boolean {
   const threshold = Number(cond.threshold)
   return cond.comparator === 'below' ? observed < threshold : observed > threshold
@@ -75,7 +93,23 @@ export async function runConditionSweep(): Promise<ConditionSweepSummary> {
       const alreadyFired = cond.lastTriggeredAt != null
 
       if (currentlyTrue && !alreadyFired) {
-        await recordConditionEvent(cond.walletId, cond.id, alertMessage(cond, observed), observed)
+        if (cond.action === 'sell_to_usdg' && cond.tokenAddress) {
+          // Execute the sell (allowance model) instead of only alerting. A stop-loss is
+          // one-shot — disable the condition after a successful sell so it never re-fires
+          // on a token the user no longer holds.
+          const decimals = await resolveDecimals(cond.symbol, cond.tokenAddress)
+          const res = await executeSellToUsdg(cond.address, cond.tokenAddress, decimals, cond.symbol ?? 'token')
+          const msg =
+            res.status === 'executed'
+              ? `Stop-loss hit — sold ${Number(res.soldAmount).toLocaleString()} ${cond.symbol ?? ''} for ${Number(res.usdgReceived).toFixed(2)} USDG (${cond.symbol} was ${cond.comparator} $${Number(cond.threshold)}).`
+              : res.status === 'not_authorized'
+                ? `${cond.symbol} ${cond.comparator} $${Number(cond.threshold)} — but I'm not approved to sell it. Re-approve the automation address for ${cond.symbol} to arm this.`
+                : `Tried to sell ${cond.symbol} on your stop-loss but it didn't complete: ${res.message}`
+          await recordConditionEvent(cond.walletId, cond.id, msg, observed)
+          if (res.status === 'executed') await disableCondition(cond.id)
+        } else {
+          await recordConditionEvent(cond.walletId, cond.id, alertMessage(cond, observed), observed)
+        }
         await markConditionTriggered(cond.id, observed)
         summary.fired++
       } else if (!currentlyTrue && alreadyFired) {

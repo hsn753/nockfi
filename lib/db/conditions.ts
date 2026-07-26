@@ -87,6 +87,12 @@ export async function deleteConditionsBySymbol(walletAddress: string, symbol: st
   return n
 }
 
+// Turn a condition off (used for one-shot actions like a stop-loss after it executes).
+export async function disableCondition(conditionId: string): Promise<void> {
+  const db = getDb()
+  await db.update(automationConditions).set({ enabled: false }).where(eq(automationConditions.id, conditionId))
+}
+
 export async function markConditionTriggered(conditionId: string, observedValue: number): Promise<void> {
   const db = getDb()
   await db

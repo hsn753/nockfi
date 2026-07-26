@@ -808,6 +808,35 @@ export function NockApp() {
       return
     }
 
+    // TOKEN APPROVE (routeVia:'token-approve'): a one-off ERC20 approve() that arms an
+    // auto-sell strategy — grants the automation address an allowance so it can sell the
+    // token to USDG when the user's stop-loss triggers. Just signs the one approval tx; the
+    // cron does the actual selling later. Standard approval, revocable anytime.
+    if ((action as any).routeVia === 'token-approve') {
+      try {
+        if (!walletAddress || !activeWallet || !publicClient) throw new Error('Please connect your wallet first.')
+        if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+        const provider = await activeWallet.getEthereumProvider()
+        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+        const tx = (action as any).transactionData as { to: string; data: string; value?: string }
+        const hash = await wc.sendTransaction({ account: walletAddress as `0x${string}`, chain: nockChain, to: tx.to as `0x${string}`, data: tx.data as `0x${string}`, value: BigInt(tx.value || '0') })
+        const rcpt = await publicClient.waitForTransactionReceipt({ hash })
+        if (rcpt.status !== 'success') throw new Error('The approval reverted on-chain.')
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
+          { id: `${Date.now()}-c`, role: 'robin', text: 'Armed ✅ Your auto-sell is active — I’ll sell to USDG when your trigger hits. You can revoke this approval anytime.' },
+        ])
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'pending' as const } } : m)),
+          { id: `${Date.now()}-error`, role: 'robin', text: `Couldn't arm the auto-sell: ${rawMessage}` },
+        ])
+      }
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
     // CROSS-CHAIN via Houdini (routeVia:'houdini'): fund IN (external asset → USDG on
     // Robinhood) or cash OUT (USDG on Robinhood → external asset). It signs on the SELL
     // chain — the external chain for funding-in, Robinhood Chain for cash-out — so it has

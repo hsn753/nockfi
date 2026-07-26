@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import { isAddress, formatUnits, erc20Abi } from 'viem'
+import { isAddress, formatUnits, erc20Abi, encodeFunctionData } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
@@ -950,20 +950,76 @@ async function handlePOST(request: Request) {
 
           if (comparator && (isLoan ? pctMatch : dollarMatch)) {
             const threshold = parseFloat((isLoan ? pctMatch! : dollarMatch!)[1])
-            const tokenAddress = symbol === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null
-            const created = await createCondition({
+            // SELL intent (stop-loss / take-profit / "...and sell it") on a PRICE condition →
+            // auto-execute a sell-to-USDG when it fires (allowance model). Resolve the token
+            // to an ERC20 address+decimals; native ETH can't be auto-sold (not approvable).
+            const sellIntent = !isLoan && (isStopLoss || isTakeProfit || /\bsell\b/i.test(txt))
+            let condAction = 'alert'
+            let tokenAddress: string | null = symbol === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null
+            if (sellIntent && symbol) {
+              const known = SWAP_TOKENS[symbol.toUpperCase()]
+              if (known && known.address.toLowerCase() === NATIVE_ETH_ADDRESS.toLowerCase()) {
+                return NextResponse.json({ text: `I can't auto-sell native ETH (it can't be pre-approved). Wrap it to WETH first, then "stop-loss my WETH at $${threshold}".` })
+              }
+              if (known && symbol.toUpperCase() !== 'USDG') {
+                condAction = 'sell_to_usdg'; tokenAddress = known.address
+              } else if (!known) {
+                const stock = await findStockToken(symbol).catch(() => null)
+                if (stock) { condAction = 'sell_to_usdg'; tokenAddress = stock.address }
+              }
+            }
+
+            await createCondition({
               walletAddress,
               kind: isLoan ? 'loan_ltv' : 'token_price',
               symbol,
               tokenAddress,
               comparator,
               threshold,
+              action: condAction,
             })
+
+            // For a sell action, arm it: if the automation key isn't yet approved to sell
+            // this token, build an approve() card the user signs once (returned directly —
+            // this pre-model block doesn't touch the outer `action`/synthesis machinery).
+            if (condAction === 'sell_to_usdg' && tokenAddress) {
+              const automationAddress = getAutomationAddress()
+              const allowance = (await getReadClient().readContract({
+                address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress],
+              }).catch(() => BigInt(0))) as bigint
+              if (allowance === BigInt(0)) {
+                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+                const approveCard = {
+                  id: `act-${Date.now()}`,
+                  agent: 'vault',
+                  action: `Approve auto-sell of ${symbol}`,
+                  detail: `Grants the Nock automation address permission to sell your ${symbol} to USDG when your stop-loss triggers. Standard token approval — your wallet key never leaves your wallet, and you can revoke it anytime.`,
+                  metrics: [
+                    { label: 'Token', value: symbol ?? 'token' },
+                    { label: 'Trigger', value: `${comparator} $${threshold}` },
+                    { label: 'Action on trigger', value: 'Sell to USDG' },
+                  ],
+                  status: 'pending',
+                  outcome: { title: 'Auto-sell armed', value: symbol ?? '', meta: `sell ${comparator} $${threshold}`, activityTitle: `Approved auto-sell of ${symbol}` },
+                  routeVia: 'token-approve',
+                  transactionData: { to: tokenAddress, data: approveData, value: '0' },
+                  verified: true,
+                }
+                return NextResponse.json({
+                  text: `Set up — I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. One thing to arm it: press Confirm to approve me to sell your ${symbol} (a standard token approval, revocable anytime). Until then it acts as an alert only.`,
+                  action: approveCard,
+                })
+              }
+              return NextResponse.json({
+                text: `Armed — I'll automatically sell your ${symbol} to USDG if it goes ${comparator} $${threshold} (you've already approved ${symbol}). I check about every 10 minutes.`,
+              })
+            }
+
             const desc = isLoan
               ? `${symbol ?? 'any'} loan going ${comparator} ${threshold}% of its liquidation ceiling`
               : `${symbol ?? 'that asset'} going ${comparator} $${threshold}`
             return NextResponse.json({
-              text: `Done — I'll alert you if ${desc}. I check about every 10 minutes; the alert shows up in the app when it triggers. Say "my alerts" to see all of them.${created.kind === 'token_price' && !symbol ? ' (Heads up: I couldn’t tell which asset you meant — say the ticker, like ETH, if this looks wrong.)' : ''}`,
+              text: `Done — I'll alert you if ${desc}. I check about every 10 minutes; the alert shows up in the app when it triggers. Say "my alerts" to see all of them.${!isLoan && !symbol ? ' (Heads up: I couldn’t tell which asset you meant — say the ticker, like ETH, if this looks wrong.)' : ''}`,
             })
           }
           if (mentionsAlert) {
