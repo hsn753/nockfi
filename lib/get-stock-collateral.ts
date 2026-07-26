@@ -453,6 +453,31 @@ function step(label: string, data: `0x${string}`, gasPrice: string): CollateralS
   return { label, to: MORPHO_CORE, data, value: '0', gas: COLLATERAL_GAS_LIMIT, gasPrice }
 }
 
+// Repay-only tx builder for AUTOMATED liquidation protection (lib/liquidation-protection.ts).
+// The automation key — already holding USDG (withdrawn from the user's yield position) —
+// calls Morpho repay(onBehalf=user) to pay down the user's loan. Unlike buildStockRepay,
+// this is a single repay tx (no collateral withdrawal), by a fixed USDG amount, and does
+// NOT read/validate the caller's own balance (the engine funds + approves first). Returns
+// the encoded repay against MORPHO_CORE plus the market id/lltv for the caller's math.
+export async function buildLiquidationRepayTx(
+  stockSymbol: string,
+  repayUsdg: string,
+  onBehalf: string,
+): Promise<{ error: string } | { to: `0x${string}`; data: `0x${string}`; marketId: `0x${string}`; usdgAddress: `0x${string}`; repayAssetsWei: string }> {
+  const m = await getMarketBySymbol(stockSymbol)
+  if (!m) return { error: `No collateral market for ${stockSymbol}.` }
+  const clean = repayUsdg.replace(/,/g, '')
+  const assets = parseUnits(clean, USDG_DECIMALS)
+  if (assets <= BigInt(0)) return { error: 'Repay amount must be greater than zero.' }
+  const data = encodeFunctionData({
+    abi: MORPHO_WRITE_ABI,
+    functionName: 'repay',
+    // Repay by ASSETS (not shares) — a fixed USDG amount to bring LTV down to target.
+    args: [m.params, assets, BigInt(0), onBehalf as `0x${string}`, '0x'],
+  })
+  return { to: MORPHO_CORE as `0x${string}`, data, marketId: m.id, usdgAddress: USDG_ADDRESS as `0x${string}`, repayAssetsWei: assets.toString() }
+}
+
 export async function buildStockBorrow(
   user: string,
   stockSymbol: string,

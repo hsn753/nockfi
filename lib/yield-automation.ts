@@ -61,6 +61,14 @@ export function getAutomationAddress(): `0x${string}` {
 }
 
 function getClients() {
+  return getAutomationClients()
+}
+
+// Shared factory for the automation key's viem clients — reused by liquidation protection
+// (lib/liquidation-protection.ts), which signs with the SAME automation key and the SAME
+// Morpho setAuthorization grant (Morpho authorization is global per (authorizer,
+// authorized), so one grant covers yield supply/withdraw AND collateral repay).
+export function getAutomationClients() {
   const account = getAutomationAccount()
   const transport = http(process.env.RPC_URL)
   const walletClient = createWalletClient({ account, chain: nockChain, transport })

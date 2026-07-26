@@ -8,7 +8,7 @@ import type { DelegatedWalletEventType } from '@/lib/log-delegated-event'
 import { logDelegatedWalletEventClient } from '@/lib/log-delegated-event'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED, YIELD_AUTOMATION_ENABLED } from '@/lib/feature-flags'
+import { INSTANT_SWAPS_ENABLED, PERPS_KEY_ONBOARDING_ENABLED, YIELD_AUTOMATION_ENABLED, LIQUIDATION_PROTECTION_ENABLED } from '@/lib/feature-flags'
 import { nockChain } from '@/lib/chain'
 import { lookupLighterAccount, listLighterApiKeys, pickFreeApiKeyIndex, getLighterNextNonce, submitLighterTx, getLighterAccountBalance, LIGHTER_BASE, LIGHTER_CHAIN_ID } from '@/lib/lighter-account'
 import { loadStoredKeyMeta, clearStoredKey, wrapAndStore, buildWrapMessage } from '@/lib/lighter-key-storage'
@@ -156,6 +156,8 @@ export function SettingsView() {
           {/* Env-gated (NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED) — see lib/feature-flags.ts
               for why this can't be a hardcoded boolean like the two flags below. */}
           {YIELD_AUTOMATION_ENABLED && ready && authenticated && <YieldAutomationSection />}
+
+          {LIQUIDATION_PROTECTION_ENABLED && ready && authenticated && <LiquidationProtectionSection />}
 
           {/* Instant Swaps is hidden until the next version (see lib/feature-flags.ts) —
               not part of the current public spec. Component kept, just not rendered. */}
@@ -546,6 +548,196 @@ function YieldAutomationSection() {
                 </div>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
                   {ev.amountUsdg} USDG · {new Date(ev.createdAt).toLocaleString()}
+                </p>
+                {ev.errorMessage && <p className="mt-0.5 text-[11px] text-destructive">{ev.errorMessage}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+type LiquidationEventRow = {
+  id: string
+  stockSymbol: string
+  ltvBeforePct: string
+  ltvTargetPct: string
+  repaidUsdg: string | null
+  status: string
+  errorMessage: string | null
+  createdAt: string
+}
+type LiquidationStatus = {
+  enabled: boolean
+  triggerLtvPct: string
+  targetLtvPct: string
+  lastCheckedAt: string | null
+  events: LiquidationEventRow[]
+}
+
+// Auto-repay liquidation protection. Shares the SAME automation address + Morpho
+// setAuthorization grant as auto-yield-switching (Morpho authorization is global per
+// address), so a user who already enabled auto-switch turns this on with NO new signature;
+// a first-timer signs the one-time authorization. Funds a repay from the user's own yield
+// position only — never their wallet — so no second approval is ever needed.
+function LiquidationProtectionSection() {
+  const { getAccessToken } = usePrivy()
+  const { wallets } = useWallets()
+  const publicClient = usePublicClient()
+  const activeWallet = wallets[0]
+  const walletAddress = activeWallet?.address
+  const automationAddress = process.env.NEXT_PUBLIC_YIELD_AUTOMATION_ADDRESS as `0x${string}` | undefined
+
+  const [status, setStatus] = useState<LiquidationStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [step, setStep] = useState('')
+  const [error, setError] = useState('')
+
+  const authHeaders = async () => {
+    const [accessToken, identityToken] = await Promise.all([
+      getAccessToken().catch(() => null),
+      getIdentityToken().catch(() => null),
+    ])
+    return { 'Content-Type': 'application/json', 'X-Privy-Access-Token': accessToken ?? '', 'X-Privy-Identity-Token': identityToken ?? '' }
+  }
+
+  const refresh = async () => {
+    if (!walletAddress) return
+    const headers = await authHeaders()
+    const res = await fetch(`/api/liquidation-protection/status?address=${walletAddress}`, { headers }).catch(() => null)
+    const data = res && res.ok ? await res.json() : null
+    setStatus(
+      data
+        ? { enabled: !!data.enabled, triggerLtvPct: data.triggerLtvPct, targetLtvPct: data.targetLtvPct, lastCheckedAt: data.lastCheckedAt, events: data.events ?? [] }
+        : null,
+    )
+  }
+
+  useEffect(() => {
+    if (!walletAddress) return
+    let cancelled = false
+    setLoading(true)
+    refresh().finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress])
+
+  const authorizeOnChain = async (): Promise<string> => {
+    if (!walletAddress || !activeWallet || !publicClient || !automationAddress) throw new Error('Wallet not ready')
+    const provider = await activeWallet.getEthereumProvider()
+    const walletClient = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+    setStep('Confirm the one-time authorization in your wallet…')
+    const data = encodeFunctionData({ abi: SET_AUTHORIZATION_ABI, functionName: 'setAuthorization', args: [automationAddress, true] })
+    const hash = await walletClient.sendTransaction({ account: walletAddress as `0x${string}`, chain: nockChain, to: MORPHO_CORE, data, value: BigInt(0) })
+    setStep('Waiting for confirmation…')
+    const receipt = await publicClient.waitForTransactionReceipt({ hash })
+    if (receipt.status !== 'success') throw new Error('The authorization reverted on-chain.')
+    return hash
+  }
+
+  const toggle = async (enable: boolean) => {
+    if (!walletAddress) return
+    setError('')
+    setBusy(true)
+    try {
+      if (enable) {
+        // Try to enable first — if the shared Morpho grant already exists (e.g. from
+        // auto-yield-switching), this succeeds with NO wallet popup. Only if the server
+        // reports the grant is missing (409) do we prompt the one-time authorization.
+        const headers = await authHeaders()
+        let res = await fetch('/api/liquidation-protection/enable', {
+          method: 'POST', headers, body: JSON.stringify({ address: walletAddress }),
+        })
+        if (res.status === 409) {
+          const authHash = await authorizeOnChain()
+          setStep('Saving…')
+          const h2 = await authHeaders()
+          res = await fetch('/api/liquidation-protection/enable', {
+            method: 'POST', headers: h2, body: JSON.stringify({ address: walletAddress, authTxHash: authHash }),
+          })
+        }
+        const body = await res.json()
+        if (!res.ok) throw new Error(body.message || body.error || 'Could not enable protection')
+      } else {
+        const headers = await authHeaders()
+        await fetch('/api/liquidation-protection/disable', {
+          method: 'POST', headers, body: JSON.stringify({ address: walletAddress }),
+        }).catch(() => {})
+      }
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
+    } finally {
+      setBusy(false)
+      setStep('')
+    }
+  }
+
+  if (!automationAddress) return null
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Liquidation protection</h2>
+      <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
+        If a stock-collateral loan approaches liquidation, Robin automatically repays it down
+        to a safe level using USDG from your own yield position — no third party, and never
+        from your wallet. Uses the same one-time authorization as auto-switching; if you
+        haven&apos;t any yield to draw on, you just get an urgent alert instead.
+      </p>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <p className="text-xs text-muted-foreground">Repays when LTV hits</p>
+          <p className="text-sm text-foreground">{loading ? '…' : `${Number(status?.triggerLtvPct ?? 85)}%`}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <p className="text-xs text-muted-foreground">Repays down to</p>
+          <p className="text-sm text-foreground">{loading ? '…' : `${Number(status?.targetLtvPct ?? 65)}%`}</p>
+        </div>
+      </div>
+
+      <div className="mt-2.5 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">Status</p>
+        <p className="text-sm text-foreground">{loading ? 'Loading…' : status?.enabled ? 'Enabled' : 'Disabled'}</p>
+        {status?.lastCheckedAt && (
+          <p className="mt-0.5 text-[11px] text-muted-foreground">Last checked {new Date(status.lastCheckedAt).toLocaleString()}</p>
+        )}
+      </div>
+
+      <button
+        type="button"
+        disabled={busy || loading}
+        onClick={() => toggle(!status?.enabled)}
+        className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+      >
+        {busy && <Loader2 className="size-3 animate-spin" />}
+        {busy ? step || 'Working…' : status?.enabled ? 'Disable' : 'Enable'}
+      </button>
+
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+
+      {!!status?.events.length && (
+        <div className="mt-3">
+          <p className="text-xs text-muted-foreground">Recent activity</p>
+          <div className="mt-1.5 space-y-1.5">
+            {status.events.slice(0, 5).map((ev) => (
+              <div key={ev.id} className="rounded-lg border border-border bg-background/40 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-foreground">
+                    {ev.stockSymbol} — repaid to {Number(ev.ltvTargetPct)}%
+                  </span>
+                  <span className={ev.status === 'protected' ? 'text-primary' : 'text-destructive'}>{ev.status}</span>
+                </div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {ev.repaidUsdg ? `${Number(ev.repaidUsdg).toFixed(2)} USDG · ` : ''}
+                  from {Number(ev.ltvBeforePct).toFixed(0)}% · {new Date(ev.createdAt).toLocaleString()}
                 </p>
                 {ev.errorMessage && <p className="mt-0.5 text-[11px] text-destructive">{ev.errorMessage}</p>}
               </div>

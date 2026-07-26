@@ -198,6 +198,44 @@ export const yieldAutomationEvents = pgTable('yield_automation_events', {
   index('yield_automation_events_wallet_idx').on(t.walletId, t.createdAt),
 ])
 
+// Liquidation protection opt-in — one row per wallet. Shares the SAME on-chain Morpho
+// setAuthorization grant as yield automation (Morpho authorization is global per address,
+// so it covers collateral-market repay too), but is a SEPARATE opt-in toggle because it's
+// a different risk posture. triggerLtvPct = the LTV-utilization at which auto-repay fires
+// (100% = liquidatable now); targetLtvPct = what it repays back down to.
+export const liquidationProtectionSettings = pgTable('liquidation_protection_settings', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  enabled: boolean('enabled').notNull().default(false),
+  triggerLtvPct: numeric('trigger_ltv_pct').notNull().default('85'),
+  targetLtvPct: numeric('target_ltv_pct').notNull().default('65'),
+  authorizedAt: timestamp('authorized_at', { withTimezone: true }),
+  authTxHash: text('auth_tx_hash'),
+  lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex('liquidation_protection_settings_wallet_idx').on(t.walletId),
+])
+
+// Append-only audit log — one row per auto-repay attempt (success, insufficient-funds, or
+// failure). status: 'protected' | 'insufficient_funds' | 'failed'.
+export const liquidationProtectionEvents = pgTable('liquidation_protection_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  walletId: uuid('wallet_id').notNull().references(() => wallets.id),
+  stockSymbol: text('stock_symbol').notNull(),
+  ltvBeforePct: numeric('ltv_before_pct').notNull(),
+  ltvTargetPct: numeric('ltv_target_pct').notNull(),
+  repaidUsdg: numeric('repaid_usdg'),
+  fundedFromMarket: text('funded_from_market'),
+  withdrawTxHash: text('withdraw_tx_hash'),
+  repayTxHash: text('repay_tx_hash'),
+  status: text('status').notNull(),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index('liquidation_protection_events_wallet_idx').on(t.walletId, t.createdAt),
+])
+
 // Append-only — durable even if Privy's own dashboard-side policy/signer registration
 // later changes. Records every instant-swap wallet lifecycle event.
 export const delegatedWalletEvents = pgTable('delegated_wallet_events', {

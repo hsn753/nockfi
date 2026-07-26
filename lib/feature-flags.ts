@@ -38,3 +38,10 @@ export const PERPS_KEY_ONBOARDING_ENABLED = true
 // the EU box's cron. Set NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED=true ONLY in the EU box's
 // env while this is being tested; leave it unset everywhere else.
 export const YIELD_AUTOMATION_ENABLED = process.env.NEXT_PUBLIC_YIELD_AUTOMATION_ENABLED === 'true'
+
+// Automated liquidation protection (Settings › Liquidation protection) — see
+// lib/liquidation-protection.ts. Same env-gate rationale as YIELD_AUTOMATION_ENABLED (shared
+// DB, a cron sweep that acts on every enabled wallet globally). Shares the automation key +
+// Morpho setAuthorization grant with yield automation. Set
+// NEXT_PUBLIC_LIQUIDATION_PROTECTION_ENABLED=true ONLY on the EU test box for now.
+export const LIQUIDATION_PROTECTION_ENABLED = process.env.NEXT_PUBLIC_LIQUIDATION_PROTECTION_ENABLED === 'true'
