@@ -849,6 +849,34 @@ export function NockApp() {
       return
     }
 
+    // PLAIN SEND (routeVia:'plain-send'): a straightforward same-chain transfer of ETH or an
+    // ERC20 to a user-specified address. Signs one tx from the user's own wallet.
+    if ((action as any).routeVia === 'plain-send') {
+      try {
+        if (!walletAddress || !activeWallet || !publicClient) throw new Error('Please connect your wallet first.')
+        if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+        const provider = await activeWallet.getEthereumProvider()
+        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+        const tx = (action as any).transactionData as { to: string; data: string; value?: string }
+        const hash = await wc.sendTransaction({ account: walletAddress as `0x${string}`, chain: nockChain, to: tx.to as `0x${string}`, data: (tx.data || '0x') as `0x${string}`, value: BigInt(tx.value || '0') })
+        const rcpt = await publicClient.waitForTransactionReceipt({ hash })
+        if (rcpt.status !== 'success') throw new Error('The transfer reverted on-chain.')
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
+          { id: `${Date.now()}-c`, role: 'robin', text: `Sent ✅ ${action.action?.replace(/^Send /, '') ?? 'Transfer'} is on its way. TX: ${hash.slice(0, 10)}…${hash.slice(-8)}` },
+        ])
+        void fetchPortfolioValue()
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'pending' as const } } : m)),
+          { id: `${Date.now()}-error`, role: 'robin', text: `The transfer didn't complete: ${rawMessage}` },
+        ])
+      }
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
     // PERPS AUTO-CLOSE ARM (routeVia:'perps-autoclose-arm'): compliance-critical — this and
     // the watcher below are the ONLY perps-close path, and both run in the browser. Capture
     // ONE wrap signature now (unlocks the trading key for this session, kept in memory only),

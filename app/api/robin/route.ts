@@ -883,6 +883,93 @@ async function handlePOST(request: Request) {
       }
     }
 
+    // ── PRE-MODEL: plain SEND / transfer to an address ─────────────────────────────────
+    // "send $2 of ETH to 0x08014…", "transfer 5 USDG to 0x…", "send 100 NOCK to 0x…". A
+    // straightforward same-chain transfer the user signs from their own wallet — the card
+    // shows the recipient prominently so they can verify it. Native ETH = value transfer;
+    // ERC20 = transfer(to, amount). USD ($) amounts convert at the live price.
+    if (walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const txt = (lastUser?.text || '').trim()
+      const addrMatch = txt.match(/0x[a-fA-F0-9]{40}/)
+      const sendVerb = /\b(send|transfer|pay)\b/i.test(txt)
+      // Exclude phrasings the other flows own (bridge/swap/close/withdraw etc.) so this only
+      // catches a genuine "send X to <address>".
+      const notOtherFlow = !/\b(bridge|swap|convert|close|withdraw|deposit|lend|rebalance|stop\s*-?\s*loss|perp)\b/i.test(txt)
+      if (sendVerb && addrMatch && notOtherFlow && /\d/.test(txt)) {
+        try {
+          const recipient = addrMatch[0] as `0x${string}`
+          // Token: a named symbol, else default ETH (the common "send gas" case).
+          const symUp = (txt.toUpperCase().match(/\b(ETH|WETH|USDG|USDC|NOCK|NVDA|TSLA)\b/) || [])[0] || null
+          const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
+          const bareAmt = txt.match(/\b(\d+(?:\.\d+)?)\s*(?:eth|weth|usdg|usdc|nock|nvda|tsla|tokens?)?\b/i)
+          const rawAmt = dollarMatch ? parseFloat(dollarMatch[1]) : bareAmt ? parseFloat(bareAmt[1]) : null
+          if (!rawAmt || rawAmt <= 0) {
+            return NextResponse.json({ text: 'How much would you like to send? e.g. "send $2 of ETH to 0x…" or "send 5 USDG to 0x…".' })
+          }
+          const sym = symUp ?? 'ETH'
+          // Resolve token address + decimals + a price for $→units.
+          let tokenAddress: string | null = null
+          let decimals = 18
+          const prices = await getReferencePrices()
+          let priceUsd = 1
+          if (sym === 'ETH') { tokenAddress = null; decimals = 18; priceUsd = prices.ETH ?? 0 }
+          else {
+            const known = SWAP_TOKENS[sym]
+            if (known && known.address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase()) {
+              tokenAddress = known.address; decimals = known.decimals
+              priceUsd = sym === 'USDG' ? 1 : (prices[sym] ?? 0)
+            } else {
+              const stock = await findStockToken(sym).catch(() => null)
+              if (stock) { tokenAddress = stock.address; decimals = 18; priceUsd = stock.priceUsd ?? 0 }
+            }
+          }
+          // Amount in token units. A "$" amount needs a price to convert.
+          let units = rawAmt
+          if (dollarMatch) {
+            if (!(priceUsd > 0)) {
+              return NextResponse.json({ text: `I couldn't get a live ${sym} price to convert $${rawAmt}. Give the amount in ${sym} directly, e.g. "send 0.001 ${sym} to ${recipient.slice(0, 8)}…".` })
+            }
+            units = rawAmt / priceUsd
+          }
+          const usdEstimate = dollarMatch ? rawAmt : priceUsd > 0 ? units * priceUsd : null
+          const amountLabel = `${units.toFixed(sym === 'ETH' || sym === 'WETH' ? 6 : 4)} ${sym}`
+
+          let transactionData: { to: string; data: string; value: string }
+          if (tokenAddress === null) {
+            // Native ETH: value transfer.
+            transactionData = { to: recipient, data: '0x', value: parseUnits(String(units.toFixed(18)), 18).toString() }
+          } else {
+            const data = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [recipient, parseUnits(units.toFixed(Math.min(decimals, 18)), decimals)] })
+            transactionData = { to: tokenAddress, data, value: '0' }
+          }
+          return NextResponse.json({
+            text: `Here's the transfer — double-check the recipient address, then Confirm to send from your wallet.`,
+            action: {
+              id: `act-${Date.now()}`,
+              agent: 'swap',
+              action: `Send ${amountLabel}`,
+              detail: `Sends ${amountLabel}${usdEstimate ? ` (~$${usdEstimate.toFixed(2)})` : ''} from your wallet to ${recipient}. A plain transfer on Robinhood Chain — verify the address is right; transfers can't be reversed.`,
+              metrics: [
+                { label: 'Send', value: amountLabel },
+                { label: 'To', value: `${recipient.slice(0, 10)}…${recipient.slice(-6)}` },
+                ...(usdEstimate ? [{ label: 'Value', value: `~$${usdEstimate.toFixed(2)}` }] : []),
+              ],
+              status: 'pending',
+              outcome: { title: 'Sent', value: usdEstimate ? `~$${usdEstimate.toFixed(2)}` : amountLabel, meta: amountLabel, activityTitle: `Sent ${amountLabel} to ${recipient.slice(0, 8)}…` },
+              routeVia: 'plain-send',
+              transactionData,
+              sendRecipient: recipient,
+              verified: true,
+            },
+          })
+        } catch (err) {
+          console.error('[robin] send handler failed:', err)
+          return NextResponse.json({ text: 'I couldn\'t set up that transfer — try again in a moment.' })
+        }
+      }
+    }
+
     // ── PRE-MODEL: perps auto-close (arm an eligibility-gated browser watcher) ──────────
     // "close my ETH short if ETH goes above $2000" / "auto-close my perps if eth drops
     // below $1800". COMPLIANCE: perps execution is client-side ONLY (the Lighter key never
