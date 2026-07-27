@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import { isAddress, formatUnits, erc20Abi, encodeFunctionData } from 'viem'
+import { isAddress, formatUnits, parseUnits, erc20Abi, encodeFunctionData } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
@@ -1060,18 +1060,20 @@ async function handlePOST(request: Request) {
               if (!buyToken) { const st = await findStockToken(symbol).catch(() => null); if (st) buyToken = st.address }
               if (!buyToken) return NextResponse.json({ text: `I can't resolve ${symbol} as a tradable asset.` })
               await createCondition({ walletAddress, kind: 'token_price', symbol, tokenAddress: buyToken, comparator, threshold, action: 'buy_with_usdg', actionAmountUsd: buyUsd })
-              // Arm: the automation key needs a USDG allowance to spend on the buy.
+              // Arm: approve EXACTLY the USDG to spend on this buy — a bounded amount, not
+              // unlimited. One-shot buy consumes it. USDG is 6-decimals.
               const automationAddress = getAutomationAddress()
               const usdgAddr = SWAP_TOKENS.USDG.address
+              const buyWei = parseUnits(String(buyUsd), 6)
               const allow = (await getReadClient().readContract({ address: usdgAddr as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0))) as bigint
-              if (allow === BigInt(0)) {
-                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+              if (allow < buyWei) {
+                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, buyWei] })
                 return NextResponse.json({
-                  text: `Set up — I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve me to spend your USDG (standard approval, revocable anytime); then it's armed.`,
+                  text: `Set up — I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve exactly $${buyUsd} USDG for it — a bounded amount, not unlimited, revocable anytime; then it's armed.`,
                   action: {
-                    id: `act-${Date.now()}`, agent: 'vault', action: `Approve USDG for auto-buy of ${symbol}`,
-                    detail: `Lets the Nock automation address spend up to your approved USDG to buy ${symbol} when your trigger hits. Your key never leaves your wallet; revocable anytime.`,
-                    metrics: [{ label: 'Buy', value: `$${buyUsd} of ${symbol}` }, { label: 'When', value: `price ${comparator} $${threshold}` }, { label: 'Spend from', value: 'USDG' }],
+                    id: `act-${Date.now()}`, agent: 'vault', action: `Approve $${buyUsd} USDG for auto-buy of ${symbol}`,
+                    detail: `Approves exactly $${buyUsd} USDG (not unlimited) for the Nock automation address to buy ${symbol} when your trigger hits. Your key never leaves your wallet; revocable anytime.`,
+                    metrics: [{ label: 'Buy', value: `$${buyUsd} of ${symbol}` }, { label: 'Approve exactly', value: `$${buyUsd} USDG` }, { label: 'When', value: `price ${comparator} $${threshold}` }],
                     status: 'pending', outcome: { title: 'Auto-buy armed', value: symbol, meta: `$${buyUsd} ${comparator} $${threshold}`, activityTitle: `Armed ${symbol} auto-buy` },
                     routeVia: 'token-approve', transactionData: { to: usdgAddr, data: approveData, value: '0' }, verified: true,
                   },
@@ -1116,20 +1118,25 @@ async function handlePOST(request: Request) {
             // this pre-model block doesn't touch the outer `action`/synthesis machinery).
             if (condAction === 'sell_to_usdg' && tokenAddress) {
               const automationAddress = getAutomationAddress()
-              const allowance = (await getReadClient().readContract({
-                address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress],
-              }).catch(() => BigInt(0))) as bigint
-              if (allowance === BigInt(0)) {
-                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+              // Approve only the CURRENT balance of the token — never "unlimited". The
+              // wallet then shows a real, finite number the user can reason about, and a
+              // one-shot stop-loss consumes it. (If they later hold more and want that
+              // covered too, re-arming re-approves.)
+              const [allowance, balance] = (await Promise.all([
+                getReadClient().readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0)),
+                getReadClient().readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] }).catch(() => BigInt(0)),
+              ])) as [bigint, bigint]
+              if (balance > BigInt(0) && allowance < balance) {
+                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, balance] })
                 const approveCard = {
                   id: `act-${Date.now()}`,
                   agent: 'vault',
                   action: `Approve auto-sell of ${symbol}`,
-                  detail: `Grants the Nock automation address permission to sell your ${symbol} to USDG when your stop-loss triggers. Standard token approval — your wallet key never leaves your wallet, and you can revoke it anytime.`,
+                  detail: `Approves selling up to your current ${symbol} balance to USDG when your stop-loss triggers — a bounded amount, NOT unlimited. Your wallet key never leaves your wallet, and you can revoke it anytime.`,
                   metrics: [
                     { label: 'Token', value: symbol ?? 'token' },
-                    { label: 'Trigger', value: `${comparator} $${threshold}` },
-                    { label: 'Action on trigger', value: 'Sell to USDG' },
+                    { label: 'Approve up to', value: `${formatUnits(balance, 18)} ${symbol}` },
+                    { label: 'Trigger', value: `sell if ${comparator} $${threshold}` },
                   ],
                   status: 'pending',
                   outcome: { title: 'Auto-sell armed', value: symbol ?? '', meta: `sell ${comparator} $${threshold}`, activityTitle: `Approved auto-sell of ${symbol}` },
@@ -1138,7 +1145,7 @@ async function handlePOST(request: Request) {
                   verified: true,
                 }
                 return NextResponse.json({
-                  text: `Set up — I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. One thing to arm it: press Confirm to approve me to sell your ${symbol} (a standard token approval, revocable anytime). Until then it acts as an alert only.`,
+                  text: `Set up — I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. Press Confirm to approve it — this approves only your current ${symbol} balance, not an unlimited amount, and you can revoke anytime. Until then it acts as an alert only.`,
                   action: approveCard,
                 })
               }
@@ -1216,25 +1223,31 @@ async function handlePOST(request: Request) {
           // Arm approvals: the automation key needs allowance for USDG (to buy) + each
           // targeted asset (to trim). Build a token-approve card for the first missing one.
           const automationAddress = getAutomationAddress()
-          const toCheck = [{ symbol: 'USDG', address: SWAP_TOKENS.USDG.address }, ...targets.map((t) => ({ symbol: t.symbol, address: t.address }))]
-          const missing: { symbol: string; address: string }[] = []
+          const toCheck = [{ symbol: 'USDG', address: SWAP_TOKENS.USDG.address, decimals: 6 }, ...targets.map((t) => ({ symbol: t.symbol, address: t.address, decimals: t.decimals }))]
+          // Bound each approval to the token's CURRENT balance — a finite, real number, not
+          // "unlimited". Covers a run of rebalances; if one is ever exhausted the sweep logs
+          // not_authorized and the user re-approves. `missing` = needs a (larger) approval.
+          const missing: { symbol: string; address: string; decimals: number; balance: bigint }[] = []
           for (const c of toCheck) {
-            const allow = (await getReadClient().readContract({ address: c.address as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0))) as bigint
-            if (allow === BigInt(0)) missing.push(c)
+            const [allow, balance] = (await Promise.all([
+              getReadClient().readContract({ address: c.address as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0)),
+              getReadClient().readContract({ address: c.address as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`] }).catch(() => BigInt(0)),
+            ])) as [bigint, bigint]
+            if (balance > BigInt(0) && allow < balance) missing.push({ ...c, balance })
           }
           const usdgTargetPct = Math.max(0, 100 - sumNonUsdg)
           const mixStr = `${usdgTargetPct}% USDG, ${targets.map((t) => `${t.targetPct}% ${t.symbol}`).join(', ')}`
           if (missing.length > 0) {
             const first = missing[0]
-            const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+            const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, first.balance] })
             const approveCard = {
               id: `act-${Date.now()}`,
               agent: 'vault',
               action: `Approve rebalancing of ${first.symbol}`,
-              detail: `Grants the Nock automation address permission to move your ${first.symbol} when rebalancing your portfolio to ${mixStr}. Standard token approval — your key never leaves your wallet, revocable anytime.`,
+              detail: `Approves up to your current ${first.symbol} balance (a bounded amount, NOT unlimited) for the Nock automation address to rebalance toward ${mixStr}. Your key never leaves your wallet, revocable anytime.`,
               metrics: [
+                { label: 'Approve up to', value: `${formatUnits(first.balance, first.decimals)} ${first.symbol}` },
                 { label: 'Target', value: mixStr },
-                { label: 'This approval', value: first.symbol },
                 { label: 'Still to approve', value: missing.length > 1 ? missing.slice(1).map((m) => m.symbol).join(', ') : 'none' },
               ],
               status: 'pending',
