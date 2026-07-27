@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, http, erc20Abi, encodeFunctionData, parseUnits, type Hash } from 'viem'
+import { createWalletClient, createPublicClient, http, erc20Abi, encodeFunctionData, parseUnits, nonceManager, type Hash } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { nockChain } from './chain'
 import {
@@ -44,7 +44,12 @@ function getAutomationAccount() {
   if (!automationAccount) {
     const pk = process.env.YIELD_AUTOMATION_PRIVATE_KEY
     if (!pk) throw new Error('YIELD_AUTOMATION_PRIVATE_KEY not configured')
-    automationAccount = privateKeyToAccount(pk as `0x${string}`)
+    // nonceManager: the ONE automation key signs for every user across all four cron
+    // sweeps (yield / liquidation / conditions / rebalance) in the same server process.
+    // Without managed nonces, two automated txs firing close together collided ("nonce too
+    // low: tx 9, state 10") — seen live on a real second tester's rebalance. viem's
+    // nonceManager serializes nonce assignment in-process so concurrent sweeps don't race.
+    automationAccount = privateKeyToAccount(pk as `0x${string}`, { nonceManager })
     const expected = process.env.NEXT_PUBLIC_YIELD_AUTOMATION_ADDRESS
     if (expected && automationAccount.address.toLowerCase() !== expected.toLowerCase()) {
       // Fail loud rather than silently signing with an address that doesn't match what
