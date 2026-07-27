@@ -942,12 +942,23 @@ async function handlePOST(request: Request) {
           // Loan LTV: threshold is a percentage; price: a dollar amount.
           const pctMatch = txt.match(/(\d+(?:\.\d+)?)\s*%/) || (isLoan ? txt.match(/(\d+(?:\.\d+)?)/) : null)
           const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:dollars?|usd)?/i)
-          // Symbol: a known token or an UPPERCASE-ish ticker in the message (not a stopword).
-          const KNOWN = ['ETH', 'WETH', 'NOCK', 'USDG', 'USDC', 'BTC', 'WBTC']
-          const upperTokens = (txt.toUpperCase().match(/\b[A-Z]{2,6}\b/g) || []).filter(
-            (w) => !['ALERT', 'NOTIFY', 'WARN', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'LOAN', 'LTV', 'USD', 'THE', 'MY', 'IF', 'WHEN', 'AT', 'TO', 'ON', 'HIT', 'HITS', 'DROP', 'FALL', 'ABOVE', 'BELOW', 'OVER', 'UNDER'].includes(w),
-          )
-          const symbol = upperTokens[0] || null
+          // Symbol resolution — RESOLVE candidate words against REAL assets instead of
+          // grabbing the first uppercase word. Verbs like "CLOSE" and "ME" were being
+          // mis-read as tickers ("CLOSE price below $1950"), creating phantom alerts that
+          // could never price or fire. Take the first candidate that's a known verified
+          // token OR an official stock token; ignore everything else.
+          const STOPWORDS = new Set(['ALERT', 'ALERTS', 'NOTIFY', 'WARN', 'PING', 'REMIND', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'LOAN', 'LTV', 'USD', 'USDT', 'THE', 'MY', 'ME', 'IF', 'WHEN', 'AT', 'TO', 'ON', 'IN', 'OF', 'IS', 'IT', 'A', 'AND', 'OR', 'HIT', 'HITS', 'DROP', 'DROPS', 'FALL', 'FALLS', 'DIP', 'DIPS', 'ABOVE', 'BELOW', 'OVER', 'UNDER', 'CLOSE', 'OPEN', 'SELL', 'BUY', 'PRICE', 'GOES', 'GOING', 'REACH', 'REACHES', 'POSITION', 'PERP', 'PERPS', 'SHORT', 'LONG', 'DOLLARS', 'CENTS'])
+          const candidates = (txt.toUpperCase().match(/\b[A-Z]{2,6}\b/g) || []).filter((w) => !STOPWORDS.has(w))
+          let symbol: string | null = null
+          for (const cand of candidates) {
+            if (SWAP_TOKENS[cand]) { symbol = cand; break }
+            const st = await findStockToken(cand).catch(() => null)
+            if (st) { symbol = cand; break }
+          }
+          // A PRICE alert with no resolvable asset can never fire — don't create a phantom.
+          if (!isLoan && !symbol) {
+            return NextResponse.json({ text: 'I couldn\'t tell which asset to watch. Name a ticker, e.g. "alert me if ETH drops below $1500" or "alert me if NVDA goes above $200".' })
+          }
 
           if (comparator && (isLoan ? pctMatch : dollarMatch)) {
             const threshold = parseFloat((isLoan ? pctMatch! : dollarMatch!)[1])
