@@ -4,7 +4,7 @@ import { isAddress, formatUnits, parseUnits, erc20Abi, encodeFunctionData } from
 import { withRateLimit } from '@/lib/api-guard'
 import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balances'
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
-import { lookupLighterAccount, getLighterAccountBalance } from '@/lib/lighter-account'
+import { lookupLighterAccount, getLighterAccountBalance, resolveLighterMarket } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { houdiniEnabled, getHoudiniQuote, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
 import { getReadClient } from '@/lib/rpc'
@@ -1013,6 +1013,35 @@ async function handlePOST(request: Request) {
           if (!marginUsd || !triggerPrice || !comparator || !sym) {
             return NextResponse.json({ text: 'Tell me the market, side, margin, and trigger. e.g. "open a long on XRP with $2 when XRP goes above $1.5".' })
           }
+
+          // ARM-TIME validation — catch min-order-size and insufficient-margin UP FRONT
+          // (these used to only surface after the trigger fired, forcing an
+          // arm -> fail -> adjust -> re-arm loop). Read-only Lighter data server-side; the
+          // browser still does all execution. The position opens near the TRIGGER price, so
+          // size the min-order check against that (fewer units at a higher open price).
+          let market
+          try {
+            market = await resolveLighterMarket(sym)
+          } catch {
+            return NextResponse.json({ text: `${sym} isn't a market I can trade perps on. Try a listed one like ETH, BTC, SOL, XRP, or SUI.` })
+          }
+          const notional = marginUsd * leverage
+          const unitsAtTrigger = notional / triggerPrice
+          if (unitsAtTrigger < market.minBaseAmount) {
+            const minMargin = Math.ceil(((market.minBaseAmount * triggerPrice) / leverage) * 100) / 100
+            return NextResponse.json({ text: `That's below ${sym}'s minimum order size (${market.minBaseAmount} ${sym}). At ${leverage}x opening around $${triggerPrice}, $${marginUsd} only buys ${unitsAtTrigger.toFixed(2)} ${sym}. Use at least $${minMargin} margin (or higher leverage). e.g. "open a ${sideWord} on ${sym} with $${minMargin} when price ${comparator} $${triggerPrice}".` })
+          }
+          // Available-margin heads-up (advisory — margin can change before the trigger fires).
+          try {
+            const acct = await lookupLighterAccount(walletAddress)
+            if (acct) {
+              const bal = await getLighterAccountBalance(acct.accountIndex)
+              if (bal && bal.availableUsd + 1e-6 < marginUsd) {
+                return NextResponse.json({ text: `Heads up: your perps account has $${bal.availableUsd.toFixed(2)} available but this needs $${marginUsd} margin. Add funds first ("add $${Math.ceil(marginUsd - bal.availableUsd)} to my perps account") or use a smaller margin, then arm it.` })
+              }
+            }
+          } catch { /* balance check is best-effort */ }
+
           return NextResponse.json({
             text: `Ready to arm: I'll open a ${leverage}x ${sideWord} on ${sym} with $${marginUsd} margin when the price goes ${comparator} $${triggerPrice}. Press Confirm. You'll sign once to unlock your trading key for this session, then it watches and opens automatically while the app is open. (Perps automation runs in your browser only, by design; it stops if you close the tab.)`,
             action: {
