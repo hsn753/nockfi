@@ -1037,7 +1037,9 @@ async function handlePOST(request: Request) {
             // SELL intent (stop-loss / take-profit / "...and sell it") on a PRICE condition →
             // auto-execute a sell-to-USDG when it fires (allowance model). Resolve the token
             // to an ERC20 address+decimals; native ETH can't be auto-sold (not approvable).
-            const sellIntent = !isLoan && (isStopLoss || isTakeProfit || /\bsell\b/i.test(txt))
+            // "swap/convert <asset> to USDG" (in a conditional) is also a sell-on-trigger.
+            const swapToUsdg = /\b(swap|convert|move|dump)\b/i.test(txt) && /\busdg\b/i.test(txt)
+            const sellIntent = !isLoan && (isStopLoss || isTakeProfit || /\bsell\b/i.test(txt) || swapToUsdg)
             let condAction = 'alert'
             let tokenAddress: string | null = symbol === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null
             if (sellIntent && symbol) {
