@@ -277,34 +277,43 @@ export type StockCollateralMarketData = {
 
 export async function getStockCollateralMarketData(): Promise<StockCollateralMarketData[]> {
   const markets = await getStockCollateralMarkets()
-  return Promise.all(markets.map(async (m) => {
-    const [state, oraclePrice] = await Promise.all([
-      rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
-      rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
-    ])
-    const marketState = {
-      totalSupplyAssets: state[0], totalSupplyShares: state[1],
-      totalBorrowAssets: state[2], totalBorrowShares: state[3],
-      lastUpdate: state[4], fee: state[5],
-    }
-    const borrowRatePerSecond = await rpcClient.readContract({
-      address: m.params.irm, abi: IRM_ABI, functionName: 'borrowRateView',
-      args: [m.params, marketState],
-    })
-    const borrowApr = (Number(borrowRatePerSecond) / 1e18) * SECONDS_PER_YEAR
-    const supply = Number(formatUnits(state[0], USDG_DECIMALS))
-    const borrow = Number(formatUnits(state[2], USDG_DECIMALS))
-    return {
-      stockSymbol: m.stockSymbol,
-      stockName: m.stockName,
-      collateralAddress: m.params.collateralToken,
-      lltvPct: Number(m.params.lltv) / 1e16,
-      borrowApyPct: (Math.exp(borrowApr) - 1) * 100,
-      oraclePriceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE,
-      availableLiquidityUsd: supply - borrow,
-      totalBorrowedUsd: borrow,
+  // Isolated per market — a single market's oracle/IRM read failing (a price() revert,
+  // an RPC hiccup) used to fail the WHOLE Promise.all, hiding every other market from the
+  // borrow listing too. Now that market is just omitted from this pass.
+  const results = await Promise.all(markets.map(async (m) => {
+    try {
+      const [state, oraclePrice] = await Promise.all([
+        rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
+        rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
+      ])
+      const marketState = {
+        totalSupplyAssets: state[0], totalSupplyShares: state[1],
+        totalBorrowAssets: state[2], totalBorrowShares: state[3],
+        lastUpdate: state[4], fee: state[5],
+      }
+      const borrowRatePerSecond = await rpcClient.readContract({
+        address: m.params.irm, abi: IRM_ABI, functionName: 'borrowRateView',
+        args: [m.params, marketState],
+      })
+      const borrowApr = (Number(borrowRatePerSecond) / 1e18) * SECONDS_PER_YEAR
+      const supply = Number(formatUnits(state[0], USDG_DECIMALS))
+      const borrow = Number(formatUnits(state[2], USDG_DECIMALS))
+      return {
+        stockSymbol: m.stockSymbol,
+        stockName: m.stockName,
+        collateralAddress: m.params.collateralToken,
+        lltvPct: Number(m.params.lltv) / 1e16,
+        borrowApyPct: (Math.exp(borrowApr) - 1) * 100,
+        oraclePriceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE,
+        availableLiquidityUsd: supply - borrow,
+        totalBorrowedUsd: borrow,
+      }
+    } catch (err) {
+      console.error(`[get-stock-collateral] Market data read failed for ${m.stockSymbol}, omitting from this pass:`, err)
+      return null
     }
   }))
+  return results.filter((r): r is Exclude<typeof r, null> => r !== null)
 }
 
 export type StockBorrowPosition = {
@@ -337,13 +346,23 @@ export async function getAllStockBorrowPositions(addresses: string[]): Promise<M
   const markets = await getStockCollateralMarkets()
   if (markets.length === 0) return out
 
-  // One state + oracle read per market.
+  // One state + oracle read per market, isolated per market — this used to be a single
+  // Promise.all with no per-market try/catch, so ONE market's oracle price() reverting
+  // (seen live: a stale-price revert on the TSLA oracle) failed the WHOLE sweep, silently
+  // dropping loan-risk monitoring for every user until the next cron tick. Now a failed
+  // market is just skipped (null) for this pass; marketLive stays index-aligned with
+  // `markets` since the position loop below indexes into both by the same `mi`.
   const marketLive = await Promise.all(markets.map(async (m) => {
-    const [state, oraclePrice] = await Promise.all([
-      rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
-      rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
-    ])
-    return { m, totalBorrowAssets: state[2], totalBorrowShares: state[3], priceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE }
+    try {
+      const [state, oraclePrice] = await Promise.all([
+        rpcClient.readContract({ address: MORPHO_CORE, abi: MORPHO_VIEW_ABI, functionName: 'market', args: [m.id] }),
+        rpcClient.readContract({ address: m.params.oracle, abi: ORACLE_ABI, functionName: 'price' }),
+      ])
+      return { m, totalBorrowAssets: state[2], totalBorrowShares: state[3], priceUsd: Number(oraclePrice) / ORACLE_PRICE_SCALE }
+    } catch (err) {
+      console.error(`[get-stock-collateral] Market/oracle read failed for ${m.stockSymbol}, skipping this pass:`, err)
+      return null
+    }
   }))
 
   // Every (wallet, market) position via multicall, chunked.
@@ -362,6 +381,7 @@ export async function getAllStockBorrowPositions(addresses: string[]): Promise<M
   addresses.forEach((addr, ai) => {
     const positions: StockBorrowPosition[] = []
     marketLive.forEach((live, mi) => {
+      if (!live) return
       const r = results[ai * markets.length + mi] as { status: string; result?: readonly [bigint, bigint, bigint] }
       if (r.status !== 'success' || !r.result) return
       const [, borrowShares, collateralRaw] = r.result
