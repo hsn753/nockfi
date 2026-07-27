@@ -460,7 +460,7 @@ export function NockApp() {
   // wrapSignature captured once at arm time, kept in MEMORY ONLY (never persisted — a page
   // refresh disarms and the user re-arms, so a key-unlocking signature is never written to
   // disk). The watcher below reads these and closes the position from the browser on a hit.
-  const perpsAutoCloseRef = useRef<Array<{ symbol: string; comparator: 'above' | 'below'; triggerPrice: number; wrapSignature: string }>>([])
+  const perpsAutoCloseRef = useRef<Array<{ kind?: 'open' | 'close'; symbol: string; comparator: 'above' | 'below'; triggerPrice: number; side?: 'long' | 'short'; marginUsd?: number; leverage?: number; wrapSignature: string }>>([])
   // Mirror just the display fields into state so the watcher effect re-subscribes when the
   // armed set changes (the ref alone wouldn't trigger the effect).
   const [perpsAutoCloseArmed, setPerpsAutoCloseArmed] = useState<Array<{ symbol: string; comparator: 'above' | 'below'; triggerPrice: number }>>([])
@@ -885,19 +885,20 @@ export function NockApp() {
       try {
         if (!walletAddress || !activeWallet) throw new Error('Please connect your wallet first.')
         if (!hasClientPerpsKey(walletAddress)) throw new Error('Set up your perps trading key first (Settings → Perps trading key), then arm this.')
-        const cfg = (action as any).perpsAutoClose as { symbol: string; comparator: 'above' | 'below'; triggerPrice: number }
+        const cfg = (action as any).perpsAutoClose as { kind?: 'open' | 'close'; symbol: string; comparator: 'above' | 'below'; triggerPrice: number; side?: 'long' | 'short'; marginUsd?: number; leverage?: number }
         if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
         const provider = await activeWallet.getEthereumProvider()
         const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
-        // One signature — unlocks the key for this session so the watcher can close hands-free.
+        // One signature — unlocks the key for this session so the watcher can act hands-free.
         const wrapSignature = await wc.signMessage({ account: walletAddress as `0x${string}`, message: buildWrapMessage(walletAddress) })
         // Replace any existing arm for the same market, then add this one.
         perpsAutoCloseRef.current = perpsAutoCloseRef.current.filter((c) => c.symbol !== cfg.symbol)
-        perpsAutoCloseRef.current.push({ symbol: cfg.symbol, comparator: cfg.comparator, triggerPrice: cfg.triggerPrice, wrapSignature })
+        perpsAutoCloseRef.current.push({ ...cfg, kind: cfg.kind ?? 'close', wrapSignature })
         setPerpsAutoCloseArmed(perpsAutoCloseRef.current.map((c) => ({ symbol: c.symbol, comparator: c.comparator, triggerPrice: c.triggerPrice })))
+        const isOpen = (cfg.kind ?? 'close') === 'open'
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
-          { id: `${Date.now()}-c`, role: 'robin', text: `Armed ✅ Watching ${cfg.symbol}. I'll close your position at market if the price goes ${cfg.comparator} $${cfg.triggerPrice}. This runs in this browser tab; if you close or refresh the app, re-arm it (that's the compliance trade-off; it can't run on a server).` },
+          { id: `${Date.now()}-c`, role: 'robin', text: `Armed ✅ Watching ${cfg.symbol}. I'll ${isOpen ? `open a ${cfg.leverage ?? 2}x ${cfg.side} with $${cfg.marginUsd} margin` : 'close your position at market'} if the price goes ${cfg.comparator} $${cfg.triggerPrice}. This runs in this browser tab; if you close or refresh the app, re-arm it (that's the compliance trade-off; it can't run on a server).` },
         ])
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -1524,26 +1525,29 @@ export function NockApp() {
         try {
           const meta = loadStoredKeyMeta(walletAddress)
           if (!meta) continue
+          const isOpen = cfg.kind === 'open'
           const market = await resolveLighterMarket(cfg.symbol)
-          const pos = await getLighterPosition(meta.accountIndex, market.marketId)
-          if (!pos || Math.abs(pos.signedSize) === 0) continue
-          const markPrice = Math.abs(pos.positionValue / pos.signedSize)
+          // OPEN watches the market's own mark price (no position yet); CLOSE derives it from
+          // the user's live position (and needs one to exist).
+          const pos = isOpen ? null : await getLighterPosition(meta.accountIndex, market.marketId)
+          if (!isOpen && (!pos || Math.abs(pos.signedSize) === 0)) continue
+          const markPrice = isOpen ? market.markPrice : Math.abs(pos!.positionValue / pos!.signedSize)
           if (!(markPrice > 0)) continue
           const hit = cfg.comparator === 'above' ? markPrice >= cfg.triggerPrice : markPrice <= cfg.triggerPrice
           if (!hit || cancelled) continue
 
           perpsAutoCloseFiringRef.current.add(fireKey)
-          const res = await placeClientPerpsOrder({
-            walletAddress,
-            activeWallet,
-            symbol: cfg.symbol,
-            side: pos.signedSize > 0 ? 'long' : 'short',
-            marginUsd: 0,
-            leverage: 1,
-            markPrice,
-            reduceOnly: true,
-            wrapSignature: cfg.wrapSignature, // hands-free unlock — no popup on fire
-          })
+          const res = isOpen
+            ? await placeClientPerpsOrder({
+                walletAddress, activeWallet, symbol: cfg.symbol,
+                side: cfg.side ?? 'long', marginUsd: cfg.marginUsd ?? 0, leverage: cfg.leverage ?? 2,
+                markPrice, wrapSignature: cfg.wrapSignature,
+              })
+            : await placeClientPerpsOrder({
+                walletAddress, activeWallet, symbol: cfg.symbol,
+                side: pos!.signedSize > 0 ? 'long' : 'short', marginUsd: 0, leverage: 1,
+                markPrice, reduceOnly: true, wrapSignature: cfg.wrapSignature, // hands-free unlock, no popup on fire
+              })
           // Disarm this trigger regardless of outcome (avoid a hot retry loop); the user can
           // re-arm. Keep others.
           perpsAutoCloseRef.current = perpsAutoCloseRef.current.filter((c) => c !== cfg)
@@ -1555,8 +1559,10 @@ export function NockApp() {
               id: `${Date.now()}-pac`,
               role: 'robin',
               text: res.ok
-                ? `Auto-closed your ${cfg.symbol} position at ~$${markPrice.toFixed(2)} — your trigger was price ${cfg.comparator} $${cfg.triggerPrice}. The freed margin is back in your perps account.`
-                : `Your ${cfg.symbol} auto-close triggered at ~$${markPrice.toFixed(2)} but didn't complete: ${res.error} I've disarmed it — re-arm to try again.`,
+                ? isOpen
+                  ? `Opened a ${cfg.leverage ?? 2}x ${cfg.side} on ${cfg.symbol} at ~$${markPrice.toFixed(4)} with $${cfg.marginUsd} margin. Your trigger was price ${cfg.comparator} $${cfg.triggerPrice}.`
+                  : `Auto-closed your ${cfg.symbol} position at ~$${markPrice.toFixed(2)}. Your trigger was price ${cfg.comparator} $${cfg.triggerPrice}. The freed margin is back in your perps account.`
+                : `Your ${cfg.symbol} auto-${isOpen ? 'open' : 'close'} triggered at ~$${markPrice.toFixed(4)} but didn't complete: ${res.error} I've disarmed it; re-arm to try again.`,
             },
           ])
           void fetchPortfolioValue()

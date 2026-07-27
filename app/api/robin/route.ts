@@ -981,6 +981,63 @@ async function handlePOST(request: Request) {
     if (walletAddress && isAddress(walletAddress)) {
       const lastUser = [...messages].reverse().find((m) => m.role === 'user')
       const txt = (lastUser?.text || '').trim()
+
+      // CONDITIONAL PERPS OPEN — "open a long position on XRP with $2 when the price goes
+      // above $1.5". Same compliance model as auto-close: eligibility-gated, browser-only
+      // execution (the arm below is client-side; the server only gates + hands back the card).
+      const openVerb = /\b(open|enter|go)\b/i.test(txt)
+      const sideWord: 'long' | 'short' | null = /\blong\b/i.test(txt) ? 'long' : /\bshort\b/i.test(txt) ? 'short' : null
+      const hasTrigger = /\b(when|whenever|if|once)\b/i.test(txt)
+      if (openVerb && sideWord && hasTrigger && /\d/.test(txt)) {
+        try {
+          const geo = await resolvePerpsGeo(request)
+          if (!geo.allowed) {
+            return NextResponse.json({ text: `Automated perps trading isn't available in your region (${PERPS_RESTRICTED_LABEL} are restricted). This is a regulatory limit, not a bug. Everything else Nock automates (yield, alerts, stop-loss on tokens, rebalancing) still works for you.` })
+          }
+          // Margin ($X) is in the action clause; the trigger price is after when/if.
+          const parts = txt.split(/\b(?:when|whenever|if|once)\b/i)
+          const actionPart = parts[0]
+          const triggerPart = parts.slice(1).join(' ')
+          const marginM = actionPart.match(/\$\s*(\d+(?:\.\d+)?)/) || actionPart.match(/(\d+(?:\.\d+)?)\s*(?:usdg|usd|dollars?|margin)/i)
+          const marginUsd = marginM ? parseFloat(marginM[1]) : null
+          const trigM = triggerPart.match(/\$\s*(\d+(?:\.\d+)?)/) || triggerPart.match(/(\d+(?:\.\d+)?)/)
+          const triggerPrice = trigM ? parseFloat(trigM[1]) : null
+          const comparator: 'above' | 'below' | null =
+            /\b(above|over|higher|greater|exceeds?|goes? (above|over|up)|rises?|hits?)\b/i.test(triggerPart) ? 'above'
+            : /\b(below|under|lower|drops?|falls?|dips?|less than|down to)\b/i.test(triggerPart) ? 'below'
+            : null
+          const levM = txt.match(/(\d+(?:\.\d+)?)\s*x\b/i)
+          const leverage = levM ? parseFloat(levM[1]) : 2
+          const STOP = new Set(['OPEN', 'ENTER', 'GO', 'LONG', 'SHORT', 'POSITION', 'PERP', 'PERPS', 'PERPETUAL', 'WITH', 'MARGIN', 'WHEN', 'IF', 'ONCE', 'PRICE', 'ABOVE', 'BELOW', 'OVER', 'UNDER', 'HIGHER', 'LOWER', 'GOES', 'RISES', 'DROPS', 'FALLS', 'HITS', 'THE', 'OF', 'ON', 'AT', 'TO', 'USD', 'USDG', 'AND', 'A', 'AN', 'MY'])
+          const sym = (txt.toUpperCase().match(/\b[A-Z]{2,6}\b/g) || []).filter((w) => !STOP.has(w))[0] || null
+          if (!marginUsd || !triggerPrice || !comparator || !sym) {
+            return NextResponse.json({ text: 'Tell me the market, side, margin, and trigger. e.g. "open a long on XRP with $2 when XRP goes above $1.5".' })
+          }
+          return NextResponse.json({
+            text: `Ready to arm: I'll open a ${leverage}x ${sideWord} on ${sym} with $${marginUsd} margin when the price goes ${comparator} $${triggerPrice}. Press Confirm. You'll sign once to unlock your trading key for this session, then it watches and opens automatically while the app is open. (Perps automation runs in your browser only, by design; it stops if you close the tab.)`,
+            action: {
+              id: `act-${Date.now()}`,
+              agent: 'perps',
+              action: `Auto-open ${leverage}x ${sideWord} ${sym} when price ${comparator} $${triggerPrice}`,
+              detail: `Watches ${sym} while this app is open and opens a ${leverage}x ${sideWord} with $${marginUsd} margin when the price goes ${comparator} $${triggerPrice}. Runs entirely in your browser; your trading key never leaves it. Only works while the tab is open (that's what keeps it compliant, it can't run on a server).`,
+              metrics: [
+                { label: 'Open', value: `${leverage}x ${sideWord} ${sym}` },
+                { label: 'Margin', value: `$${marginUsd}` },
+                { label: 'When', value: `price ${comparator} $${triggerPrice}` },
+              ],
+              status: 'pending',
+              outcome: { title: 'Auto-open armed', value: sym, meta: `${sideWord} ${comparator} $${triggerPrice}`, activityTitle: `Armed ${sym} auto-open` },
+              routeVia: 'perps-autoclose-arm',
+              perpsAutoClose: { kind: 'open', symbol: sym, side: sideWord, marginUsd, leverage, comparator, triggerPrice },
+              verified: true,
+            },
+          })
+        } catch (err) {
+          console.error('[robin] perps auto-open arm failed:', err)
+          return NextResponse.json({ text: 'I couldn\'t set up the auto-open just now, try again in a moment.' })
+        }
+      }
+
       // Perps context. You SELL spot but CLOSE a position — so "close/exit my <asset>" (a
       // position-closing verb) implies the perps position, even without the word "short".
       // Plus explicit perp/short/long words, or a non-yield "position". All exclude
