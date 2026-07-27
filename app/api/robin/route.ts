@@ -13,7 +13,7 @@ import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, buildSetAuthorizationTx, isAutomationAuthorized, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
-import { getAutomationAddress, yieldAutomationEnabled } from '@/lib/yield-automation'
+import { getAutomationAddress, yieldAutomationEnabled, resolveGasTopUp } from '@/lib/yield-automation'
 import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
 import { createCondition, getConditionsForWallet, deleteCondition, deleteConditionsBySymbol } from '@/lib/db/conditions'
 import { setRebalanceTarget, getRebalanceSettings, disableRebalanceByAddress, type RebalanceTarget } from '@/lib/db/portfolio-rebalance'
@@ -709,6 +709,20 @@ async function handlePOST(request: Request) {
       }
     }
 
+    // GAS TOP-UP: the shared automation key needs its own ETH to sign+send every sweep tx.
+    // Rather than an operator manually wiring ETH into it, a small top-up rides along
+    // whenever a user is granting/using automation (yield deposit, stop-loss/auto-buy/
+    // rebalance approval) — but ONLY when the key is actually running low, so it's not a
+    // recurring charge. Memoized so a card that hits multiple build sites shares one read.
+    let gasTopUpDecided = false
+    let gasTopUpTx: { to: string; value: string } | null = null
+    const resolveGasTopUpMemo = async (): Promise<{ to: string; value: string } | null> => {
+      if (gasTopUpDecided) return gasTopUpTx
+      gasTopUpDecided = true
+      gasTopUpTx = await resolveGasTopUp()
+      return gasTopUpTx
+    }
+
     // ── PRE-MODEL: cross-chain funding IN / cash-out OUT via Houdini ───────────────────
     // IN  : "add/fund/deposit <amt> FROM ethereum/base"  → external USDC → USDG on Robinhood.
     // OUT : "cash out/withdraw/swap <amt> USDG TO ethereum/base" → USDG on Robinhood → USDC.
@@ -1246,14 +1260,16 @@ async function handlePOST(request: Request) {
               const allow = (await getReadClient().readContract({ address: usdgAddr as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0))) as bigint
               if (allow < buyWei) {
                 const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, buyWei] })
+                const buyGasTopUp = await resolveGasTopUpMemo()
                 return NextResponse.json({
-                  text: `Set up. I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve exactly $${buyUsd} USDG for it, a bounded amount, not unlimited, revocable anytime; then it's armed.`,
+                  text: `Set up. I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve exactly $${buyUsd} USDG for it, a bounded amount, not unlimited, revocable anytime; then it's armed.${buyGasTopUp ? ' One more small popup: a tiny bit of ETH (a few cents) to keep the automation relayer funded for gas.' : ''}`,
                   action: {
                     id: `act-${Date.now()}`, agent: 'vault', action: `Approve $${buyUsd} USDG for auto-buy of ${symbol}`,
                     detail: `Approves exactly $${buyUsd} USDG (not unlimited) for the Nock automation address to buy ${symbol} when your trigger hits. Your key never leaves your wallet; revocable anytime.`,
                     metrics: [{ label: 'Buy', value: `$${buyUsd} of ${symbol}` }, { label: 'Approve exactly', value: `$${buyUsd} USDG` }, { label: 'When', value: `price ${comparator} $${threshold}` }],
                     status: 'pending', outcome: { title: 'Auto-buy armed', value: symbol, meta: `$${buyUsd} ${comparator} $${threshold}`, activityTitle: `Armed ${symbol} auto-buy` },
                     routeVia: 'token-approve', transactionData: { to: usdgAddr, data: approveData, value: '0' }, verified: true,
+                    ...(buyGasTopUp ? { gasTopUp: buyGasTopUp } : {}),
                   },
                 })
               }
@@ -1308,6 +1324,7 @@ async function handlePOST(request: Request) {
               ])) as [bigint, bigint]
               if (balance > BigInt(0) && allowance < balance) {
                 const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, balance] })
+                const sellGasTopUp = await resolveGasTopUpMemo()
                 const approveCard = {
                   id: `act-${Date.now()}`,
                   agent: 'vault',
@@ -1323,9 +1340,10 @@ async function handlePOST(request: Request) {
                   routeVia: 'token-approve',
                   transactionData: { to: tokenAddress, data: approveData, value: '0' },
                   verified: true,
+                  ...(sellGasTopUp ? { gasTopUp: sellGasTopUp } : {}),
                 }
                 return NextResponse.json({
-                  text: `Set up. I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. Press Confirm to approve it. This approves only your current ${symbol} balance, not an unlimited amount, and you can revoke anytime. Until then it acts as an alert only.`,
+                  text: `Set up. I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. Press Confirm to approve it. This approves only your current ${symbol} balance, not an unlimited amount, and you can revoke anytime. Until then it acts as an alert only.${sellGasTopUp ? ' One more small popup: a tiny bit of ETH (a few cents) to keep the automation relayer funded for gas.' : ''}`,
                   action: approveCard,
                 })
               }
@@ -1420,6 +1438,7 @@ async function handlePOST(request: Request) {
           if (missing.length > 0) {
             const first = missing[0]
             const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, first.balance] })
+            const rebalanceGasTopUp = await resolveGasTopUpMemo()
             const approveCard = {
               id: `act-${Date.now()}`,
               agent: 'vault',
@@ -1435,9 +1454,10 @@ async function handlePOST(request: Request) {
               routeVia: 'token-approve',
               transactionData: { to: first.address, data: approveData, value: '0' },
               verified: true,
+              ...(rebalanceGasTopUp ? { gasTopUp: rebalanceGasTopUp } : {}),
             }
             return NextResponse.json({
-              text: `Target set: ${mixStr}. To let me rebalance automatically I need approval for ${missing.map((m) => m.symbol).join(', ')}. Press Confirm to approve ${first.symbol}${missing.length > 1 ? `, then say "rebalance" again to approve the next` : ''}.`,
+              text: `Target set: ${mixStr}. To let me rebalance automatically I need approval for ${missing.map((m) => m.symbol).join(', ')}. Press Confirm to approve ${first.symbol}${missing.length > 1 ? `, then say "rebalance" again to approve the next` : ''}.${rebalanceGasTopUp ? ' One more small popup: a tiny bit of ETH (a few cents) to keep the automation relayer funded for gas.' : ''}`,
               action: approveCard,
             })
           }
@@ -1883,10 +1903,9 @@ async function handlePOST(request: Request) {
 
             // Auto-switch: a yield SUPPLY (not a withdrawal) carries the one-time
             // authorization pre-step by default (unless opted out / already authorized).
-            const proposeAuthorizeTx =
-              input.agent === 'yield' && !isWithdrawal && lastYieldQuote && 'transaction' in lastYieldQuote
-                ? await resolveAutoSwitchAuthorize()
-                : null
+            const isYieldSupply = input.agent === 'yield' && !isWithdrawal && lastYieldQuote && 'transaction' in lastYieldQuote
+            const proposeAuthorizeTx = isYieldSupply ? await resolveAutoSwitchAuthorize() : null
+            const proposeGasTopUp = isYieldSupply ? await resolveGasTopUpMemo() : null
 
             action = {
               id: `act-${Date.now()}`,
@@ -1897,6 +1916,7 @@ async function handlePOST(request: Request) {
               status: 'pending',
               outcome: { ...input.outcome, value: outcomeValue },
               ...(proposeAuthorizeTx ? { authorizeAutomation: proposeAuthorizeTx } : {}),
+              ...(proposeGasTopUp ? { gasTopUp: proposeGasTopUp } : {}),
               ...((input.agent === 'swap' || input.agent === 'stock') && lastSwapQuote?.transaction ? {
                 transactionData: lastSwapQuote.transaction,
                 fromToken: lastSwapQuote.fromSymbol,
@@ -2819,6 +2839,8 @@ async function handlePOST(request: Request) {
         // withdrawal) unless opted out / already authorized.
         const synthAuthorizeTx = !isW ? await resolveAutoSwitchAuthorize() : null
         if (synthAuthorizeTx) (action as any).authorizeAutomation = synthAuthorizeTx
+        const synthGasTopUp = !isW ? await resolveGasTopUpMemo() : null
+        if (synthGasTopUp) (action as any).gasTopUp = synthGasTopUp
         const autoPickNote =
           !isW && yieldDepositAutoPicked && yieldDepositAutoPicked.market === q.market
             ? `${q.market} is the highest-yielding market right now at ${yieldDepositAutoPicked.apyPct.toFixed(2)}% APY, so I picked it for you (say a specific market if you'd rather choose). `
@@ -2826,7 +2848,10 @@ async function handlePOST(request: Request) {
         const autoSwitchNote = synthAuthorizeTx
           ? " I'll also switch on auto-rebalancing (a one-time approval in the same Confirm) so your USDG keeps moving to the best rate automatically — say \"don't switch\" if you'd rather I leave it put."
           : ''
-        responseText = `${autoPickNote}Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.${autoSwitchNote}`
+        const gasTopUpNote = synthGasTopUp
+          ? ' One more small popup: a tiny bit of ETH (a few cents) to keep the automation relayer funded for gas.'
+          : ''
+        responseText = `${autoPickNote}Here's the ${isW ? 'withdrawal' : 'lending'} preview, built from live on-chain numbers. Press Confirm on the card to execute it, or Review to check the details first.${autoSwitchNote}${gasTopUpNote}`
       }
     }
 

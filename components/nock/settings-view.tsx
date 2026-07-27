@@ -17,6 +17,30 @@ import { executeLighterDeposit } from '@/lib/lighter-deposit'
 import { withdrawPerpsFunds } from '@/lib/lighter-order'
 import { user } from './data'
 
+// Best-effort: the shared automation key needs its own ETH for gas. Rather than needing a
+// manual top-up whenever a newly-provisioned key runs dry, a small send rides along right
+// after a user grants automation authorization — but only when the key is actually running
+// low (see lib/yield-automation.ts's resolveGasTopUp). Failure-safe: the authorization
+// itself already succeeded by the time this runs, so an error/decline here is just logged,
+// never surfaced as a failure of the thing the user actually asked for.
+async function maybeSendGasTopUp(walletClient: any, publicClient: any, walletAddress: string) {
+  try {
+    const res = await fetch('/api/automation/gas-topup')
+    const body = await res.json()
+    const topUp = body?.topUp as { to: string; value: string } | null
+    if (!topUp) return
+    const hash = await walletClient.sendTransaction({
+      account: walletAddress as `0x${string}`,
+      chain: nockChain,
+      to: topUp.to as `0x${string}`,
+      value: BigInt(topUp.value),
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch (err) {
+    console.warn('[Nock] Automation gas top-up skipped:', err)
+  }
+}
+
 // There's no wallet extension UI for the embedded instant-swap wallet the way there is
 // for a connected MetaMask/Phantom, so without this it's genuinely invisible — the only
 // way to check its balance was asking Robin for its address by name every time.
@@ -462,6 +486,7 @@ function YieldAutomationSection() {
       }
 
       if (enable) {
+        await maybeSendGasTopUp(walletClient, publicClient, walletAddress)
         setStep('Saving…')
         const headers = await authHeaders()
         const res = await fetch('/api/yield-automation/enable', {
@@ -639,6 +664,7 @@ function LiquidationProtectionSection() {
     setStep('Waiting for confirmation…')
     const receipt = await publicClient.waitForTransactionReceipt({ hash })
     if (receipt.status !== 'success') throw new Error('The authorization reverted on-chain.')
+    await maybeSendGasTopUp(walletClient, publicClient, walletAddress)
     return hash
   }
 

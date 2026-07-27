@@ -66,6 +66,28 @@ export function getAutomationAddress(): `0x${string}` {
   return getAutomationAccount().address
 }
 
+// The automation key needs its own ETH for gas — every sweep (yield/liq/conditions/
+// rebalance) signs and sends from it. Rather than an operator manually wiring ETH into a
+// new key every time one is provisioned (the actual gap that motivated this), a small
+// top-up rides along with the user's own authorize/approve transaction whenever the key
+// is running low — self-limiting, since it's skipped again once the balance recovers.
+const GAS_LOW_THRESHOLD_WEI = BigInt('300000000000000') // ~0.0003 ETH
+const GAS_TOPUP_WEI = BigInt('1000000000000000') // ~0.001 ETH — same order as the amount that funded the EU key and lasted days of real sweeps
+
+export async function resolveGasTopUp(): Promise<{ to: string; value: string } | null> {
+  if (!process.env.YIELD_AUTOMATION_PRIVATE_KEY) return null
+  try {
+    const { publicClient } = getAutomationClients()
+    const address = getAutomationAddress()
+    const balance = await publicClient.getBalance({ address })
+    if (balance >= GAS_LOW_THRESHOLD_WEI) return null
+    return { to: address, value: GAS_TOPUP_WEI.toString() }
+  } catch (err) {
+    console.error('[yield-automation] resolveGasTopUp failed:', err)
+    return null
+  }
+}
+
 function getClients() {
   return getAutomationClients()
 }

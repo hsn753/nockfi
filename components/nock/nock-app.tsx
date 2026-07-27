@@ -77,6 +77,27 @@ function fmtHoudiniAmount(value: number, symbol: string): string {
   return symbol === 'ETH' ? value.toFixed(5) : value.toFixed(2)
 }
 
+// Best-effort: whenever a card that grants/uses the shared automation key succeeds (yield
+// deposit's auto-switch auth, a stop-loss/auto-buy/rebalance approval), it may carry a
+// small `gasTopUp` — a plain ETH send to the automation address, attached server-side only
+// when that key is actually running low (see lib/yield-automation.ts's resolveGasTopUp).
+// Failure-safe: the primary action already succeeded by the time this runs, so a decline
+// or error here is just logged, never surfaced as a failure of what the user asked for.
+async function maybeSendGasTopUp(walletClient: any, publicClient: any, walletAddress: string, gasTopUp: { to: string; value: string } | undefined) {
+  if (!gasTopUp) return
+  try {
+    const hash = await walletClient.sendTransaction({
+      account: walletAddress as `0x${string}`,
+      chain: nockChain,
+      to: gasTopUp.to as `0x${string}`,
+      value: BigInt(gasTopUp.value),
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch (err) {
+    console.warn('[Nock] Automation gas top-up skipped:', err)
+  }
+}
+
 export function NockApp() {
   const [activeView, setActiveView] = useState<NavView>('chat')
   const [selectedAgent, setSelectedAgent] = useState<AgentId | null>(null)
@@ -834,6 +855,7 @@ export function NockApp() {
         const hash = await wc.sendTransaction({ account: walletAddress as `0x${string}`, chain: nockChain, to: tx.to as `0x${string}`, data: tx.data as `0x${string}`, value: BigInt(tx.value || '0') })
         const rcpt = await publicClient.waitForTransactionReceipt({ hash })
         if (rcpt.status !== 'success') throw new Error('The approval reverted on-chain.')
+        await maybeSendGasTopUp(wc, publicClient, walletAddress, (action as any).gasTopUp)
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
           { id: `${Date.now()}-c`, role: 'robin', text: 'Armed ✅ Your auto-sell is active. I’ll sell to USDG when your trigger hits. You can revoke this approval anytime.' },
@@ -1094,6 +1116,21 @@ export function NockApp() {
           } catch (authErr) {
             // Rejected or failed — proceed with the deposit anyway, without auto-switch.
             console.warn('[Nock] Auto-switch authorization skipped:', authErr)
+          }
+        }
+
+        // Gas top-up for the shared automation key — independent of whether an
+        // authorizeAutomation tx ran above (a repeat depositor who's already authorized can
+        // still hit this if the key has since run low). See maybeSendGasTopUp above.
+        const gasTopUp = (action as any).gasTopUp as { to: string; value: string } | undefined
+        if (gasTopUp && action.agent === 'yield' && activeWallet && publicClient) {
+          try {
+            if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+            const provider = await activeWallet.getEthereumProvider()
+            const gasClient = createWalletClient({ account: activeWallet.address as `0x${string}`, chain: nockChain, transport: custom(provider) })
+            await maybeSendGasTopUp(gasClient, publicClient, activeWallet.address, gasTopUp)
+          } catch (topUpErr) {
+            console.warn('[Nock] Automation gas top-up skipped:', topUpErr)
           }
         }
 
