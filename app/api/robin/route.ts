@@ -894,12 +894,19 @@ async function handlePOST(request: Request) {
     if (walletAddress && isAddress(walletAddress)) {
       const lastUser = [...messages].reverse().find((m) => m.role === 'user')
       const txt = (lastUser?.text || '').trim()
-      // Perps context = an explicit perp/short/long word, OR "position" that ISN'T a yield/
-      // lending/collateral position (so "close my yield position fully" never lands here).
+      // Perps context. You SELL spot but CLOSE a position — so "close/exit my <asset>" (a
+      // position-closing verb) implies the perps position, even without the word "short".
+      // Plus explicit perp/short/long words, or a non-yield "position". All exclude
+      // yield/lending/collateral/token-sell phrasing so "close my yield position" and
+      // "stop-loss my NOCK" never land here.
+      const notYieldOrSell = !/\b(yield|lending|lend|collateral|loan|supplied|sell)\b/i.test(txt)
+      const closeVerb = /\b(close|exit|auto[-\s]?close)\b/i.test(txt)
+      const stopVerb = /\b(stop[-\s]?loss|take[-\s]?profit|liquidat)\b/i.test(txt)
       const perpsCtx =
         /\b(perp|perps|perpetual|short|long)\b/i.test(txt) ||
-        (/\bposition\b/i.test(txt) && !/\b(yield|lending|lend|collateral|loan|supplied|market)\b/i.test(txt))
-      const closeIntent = /\b(close|exit|auto[-\s]?close|stop[-\s]?loss|take[-\s]?profit|liquidat)\b/i.test(txt)
+        (/\bposition\b/i.test(txt) && notYieldOrSell) ||
+        (closeVerb && notYieldOrSell)
+      const closeIntent = closeVerb || stopVerb
       if (perpsCtx && closeIntent && /\d/.test(txt)) {
         try {
           // The eligibility gate the user asked for — the SAME jurisdiction check the perps
