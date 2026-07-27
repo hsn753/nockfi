@@ -20,6 +20,8 @@ import { NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
 import { nockChain } from '@/lib/chain'
 import { startBridgeWatch, getPendingBridge, clearBridgeWatch, type PendingBridge } from '@/lib/bridge-tracker'
 import { placeClientPerpsOrder, hasClientPerpsKey, withdrawPerpsFunds } from '@/lib/lighter-order'
+import { resolveLighterMarket, getLighterPosition } from '@/lib/lighter-account'
+import { buildWrapMessage, loadStoredKeyMeta } from '@/lib/lighter-key-storage'
 import { executeLighterDeposit } from '@/lib/lighter-deposit'
 import {
   getAgent,
@@ -454,6 +456,16 @@ export function NockApp() {
   // guard the same swap could be broadcast twice. One in-flight execution per card.
   const executingActionsRef = useRef<Set<string>>(new Set())
 
+  // Armed PERPS auto-closes (compliance: browser-only). Each holds the trigger + the
+  // wrapSignature captured once at arm time, kept in MEMORY ONLY (never persisted — a page
+  // refresh disarms and the user re-arms, so a key-unlocking signature is never written to
+  // disk). The watcher below reads these and closes the position from the browser on a hit.
+  const perpsAutoCloseRef = useRef<Array<{ symbol: string; comparator: 'above' | 'below'; triggerPrice: number; wrapSignature: string }>>([])
+  // Mirror just the display fields into state so the watcher effect re-subscribes when the
+  // armed set changes (the ref alone wouldn't trigger the effect).
+  const [perpsAutoCloseArmed, setPerpsAutoCloseArmed] = useState<Array<{ symbol: string; comparator: 'above' | 'below'; triggerPrice: number }>>([])
+  const perpsAutoCloseFiringRef = useRef<Set<string>>(new Set())
+
   const handleSend = useCallback(
     async (text: string) => {
       const userMsg: ChatMessage = { id: `${Date.now()}-u`, role: 'user', text }
@@ -831,6 +843,39 @@ export function NockApp() {
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'pending' as const } } : m)),
           { id: `${Date.now()}-error`, role: 'robin', text: `Couldn't arm the auto-sell: ${rawMessage}` },
+        ])
+      }
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
+    // PERPS AUTO-CLOSE ARM (routeVia:'perps-autoclose-arm'): compliance-critical — this and
+    // the watcher below are the ONLY perps-close path, and both run in the browser. Capture
+    // ONE wrap signature now (unlocks the trading key for this session, kept in memory only),
+    // store the trigger, and the watcher does the rest. Nothing perps ever touches the server.
+    if ((action as any).routeVia === 'perps-autoclose-arm') {
+      try {
+        if (!walletAddress || !activeWallet) throw new Error('Please connect your wallet first.')
+        if (!hasClientPerpsKey(walletAddress)) throw new Error('Set up your perps trading key first (Settings → Perps trading key), then arm this.')
+        const cfg = (action as any).perpsAutoClose as { symbol: string; comparator: 'above' | 'below'; triggerPrice: number }
+        if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+        const provider = await activeWallet.getEthereumProvider()
+        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+        // One signature — unlocks the key for this session so the watcher can close hands-free.
+        const wrapSignature = await wc.signMessage({ account: walletAddress as `0x${string}`, message: buildWrapMessage(walletAddress) })
+        // Replace any existing arm for the same market, then add this one.
+        perpsAutoCloseRef.current = perpsAutoCloseRef.current.filter((c) => c.symbol !== cfg.symbol)
+        perpsAutoCloseRef.current.push({ symbol: cfg.symbol, comparator: cfg.comparator, triggerPrice: cfg.triggerPrice, wrapSignature })
+        setPerpsAutoCloseArmed(perpsAutoCloseRef.current.map((c) => ({ symbol: c.symbol, comparator: c.comparator, triggerPrice: c.triggerPrice })))
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
+          { id: `${Date.now()}-c`, role: 'robin', text: `Armed ✅ Watching ${cfg.symbol} — I'll close your position at market if the price goes ${cfg.comparator} $${cfg.triggerPrice}. This runs in this browser tab; if you close or refresh the app, re-arm it (that's the compliance trade-off — it can't run on a server).` },
+        ])
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'pending' as const } } : m)),
+          { id: `${Date.now()}-error`, role: 'robin', text: `Couldn't arm the auto-close: ${rawMessage}` },
         ])
       }
       executingActionsRef.current.delete(actionId)
@@ -1434,6 +1479,73 @@ export function NockApp() {
   }, [messages, activeWallet, isOnRobinhoodChain, delegatedWallet, fetchPortfolioValue, walletAddress])
 
   handleLooseRef.current = handleLoose
+
+  // PERPS AUTO-CLOSE WATCHER (browser-only, compliance-critical). While the app is open and
+  // at least one auto-close is armed, poll each market's live mark price (derived from the
+  // user's own Lighter position: |positionValue / signedSize|) and, on a trigger, close the
+  // position reduce-only — signed IN THE BROWSER with the session's captured wrap signature,
+  // submitted straight to Lighter (so Lighter's geoblock enforces on the user's real IP).
+  // Nothing here ever calls a server perps path. Disarms a trigger once it fires.
+  useEffect(() => {
+    if (perpsAutoCloseArmed.length === 0 || !activeWallet || !walletAddress) return
+    let cancelled = false
+    const tick = async () => {
+      for (const cfg of [...perpsAutoCloseRef.current]) {
+        const fireKey = `${cfg.symbol}:${cfg.triggerPrice}:${cfg.comparator}`
+        if (perpsAutoCloseFiringRef.current.has(fireKey)) continue
+        try {
+          const meta = loadStoredKeyMeta(walletAddress)
+          if (!meta) continue
+          const market = await resolveLighterMarket(cfg.symbol)
+          const pos = await getLighterPosition(meta.accountIndex, market.marketId)
+          if (!pos || Math.abs(pos.signedSize) === 0) continue
+          const markPrice = Math.abs(pos.positionValue / pos.signedSize)
+          if (!(markPrice > 0)) continue
+          const hit = cfg.comparator === 'above' ? markPrice >= cfg.triggerPrice : markPrice <= cfg.triggerPrice
+          if (!hit || cancelled) continue
+
+          perpsAutoCloseFiringRef.current.add(fireKey)
+          const res = await placeClientPerpsOrder({
+            walletAddress,
+            activeWallet,
+            symbol: cfg.symbol,
+            side: pos.signedSize > 0 ? 'long' : 'short',
+            marginUsd: 0,
+            leverage: 1,
+            markPrice,
+            reduceOnly: true,
+            wrapSignature: cfg.wrapSignature, // hands-free unlock — no popup on fire
+          })
+          // Disarm this trigger regardless of outcome (avoid a hot retry loop); the user can
+          // re-arm. Keep others.
+          perpsAutoCloseRef.current = perpsAutoCloseRef.current.filter((c) => c !== cfg)
+          setPerpsAutoCloseArmed(perpsAutoCloseRef.current.map((c) => ({ symbol: c.symbol, comparator: c.comparator, triggerPrice: c.triggerPrice })))
+          perpsAutoCloseFiringRef.current.delete(fireKey)
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-pac`,
+              role: 'robin',
+              text: res.ok
+                ? `Auto-closed your ${cfg.symbol} position at ~$${markPrice.toFixed(2)} — your trigger was price ${cfg.comparator} $${cfg.triggerPrice}. The freed margin is back in your perps account.`
+                : `Your ${cfg.symbol} auto-close triggered at ~$${markPrice.toFixed(2)} but didn't complete: ${res.error} I've disarmed it — re-arm to try again.`,
+            },
+          ])
+          void fetchPortfolioValue()
+        } catch (err) {
+          console.error('[perps-autoclose] watch error:', err)
+          perpsAutoCloseFiringRef.current.delete(fireKey)
+        }
+      }
+    }
+    const interval = setInterval(tick, 20_000)
+    void tick()
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [perpsAutoCloseArmed, activeWallet, walletAddress])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

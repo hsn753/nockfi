@@ -18,7 +18,7 @@ import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
 import { createCondition, getConditionsForWallet, deleteCondition, deleteConditionsBySymbol } from '@/lib/db/conditions'
 import { setRebalanceTarget, getRebalanceSettings, disableRebalanceByAddress, type RebalanceTarget } from '@/lib/db/portfolio-rebalance'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
-import { resolvePerpsGeo } from '@/lib/geo-gate'
+import { resolvePerpsGeo, PERPS_RESTRICTED_LABEL } from '@/lib/geo-gate'
 import { PERPS_ENABLED } from '@/lib/feature-flags'
 import { getStockTokens, findStockToken } from '@/lib/get-stock-tokens'
 import { getStockCollateralMarketData, getStockBorrowPositions, buildStockBorrow, buildStockRepay, type StockCollateralQuote } from '@/lib/get-stock-collateral'
@@ -880,6 +880,71 @@ async function handlePOST(request: Request) {
         const msg = (e as Error)?.message
         console.error('[robin] houdini cross-chain backstop failed:', msg)
         return NextResponse.json({ text: `I couldn't set up the cross-chain transfer right now${msg ? `: ${msg}` : '.'}`, bridgeInfo })
+      }
+    }
+
+    // ── PRE-MODEL: perps auto-close (arm an eligibility-gated browser watcher) ──────────
+    // "close my ETH short if ETH goes above $2000" / "auto-close my perps if eth drops
+    // below $1800". COMPLIANCE: perps execution is client-side ONLY (the Lighter key never
+    // leaves the browser; Lighter's geoblock enforces on the browser's IP; a server closing
+    // the position would be the forbidden "run the user's account from a box" pattern). So
+    // this route ONLY (a) checks the per-user eligibility gate and (b) hands back an ARM card
+    // — the actual watching + closing happens entirely in the browser (see nock-app
+    // routeVia:'perps-autoclose-arm'). It NEVER executes a perps trade server-side.
+    if (walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const txt = (lastUser?.text || '').trim()
+      // Perps context = an explicit perp/short/long word, OR "position" that ISN'T a yield/
+      // lending/collateral position (so "close my yield position fully" never lands here).
+      const perpsCtx =
+        /\b(perp|perps|perpetual|short|long)\b/i.test(txt) ||
+        (/\bposition\b/i.test(txt) && !/\b(yield|lending|lend|collateral|loan|supplied|market)\b/i.test(txt))
+      const closeIntent = /\b(close|exit|auto[-\s]?close|stop[-\s]?loss|take[-\s]?profit|liquidat)\b/i.test(txt)
+      if (perpsCtx && closeIntent && /\d/.test(txt)) {
+        try {
+          // The eligibility gate the user asked for — the SAME jurisdiction check the perps
+          // trade + onboarding paths use. Restricted region → refuse to arm.
+          const geo = await resolvePerpsGeo(request)
+          if (!geo.allowed) {
+            return NextResponse.json({
+              text: `Automated perps closing isn't available in your region (${PERPS_RESTRICTED_LABEL} are restricted) — this is a regulatory limit, not a bug. Everything else Nock automates (yield, alerts, stop-loss on tokens, rebalancing) still works for you.`,
+            })
+          }
+          const dollar = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)/)
+          const triggerPrice = dollar ? parseFloat(dollar[1]) : null
+          const comparator: 'above' | 'below' | null =
+            /\b(above|over|exceeds?|reach(es)?|goes? (above|over|up)|rises?|hits?)\b/i.test(txt) ? 'above'
+            : /\b(below|under|drops?|falls?|dips?|less than|down to)\b/i.test(txt) ? 'below'
+            : null
+          const STOP = new Set(['CLOSE','EXIT','STOP','LOSS','TAKE','PROFIT','PERP','PERPS','POSITION','SHORT','LONG','AUTO','IF','WHEN','ABOVE','BELOW','OVER','UNDER','MY','THE','AT','TO','ON','GOES','DROPS','FALLS','RISES','HITS','USD','AND'])
+          const sym = (txt.toUpperCase().match(/\b[A-Z]{2,5}\b/g) || []).filter((w) => !STOP.has(w))[0] || null
+          if (!triggerPrice || !comparator || !sym) {
+            return NextResponse.json({ text: 'Tell me the market, direction, and price — e.g. "close my ETH short if ETH goes above $2000" or "auto-close my ETH position if it drops below $1800".' })
+          }
+          const arm = {
+            id: `act-${Date.now()}`,
+            agent: 'perps',
+            action: `Auto-close ${sym} if price goes ${comparator} $${triggerPrice}`,
+            detail: `Watches ${sym} while this app is open and closes your ${sym} perps position at market when the price goes ${comparator} $${triggerPrice}. Runs entirely in your browser — your trading key never leaves it. Only works while the tab is open (that's what keeps it compliant — it can't run on a server).`,
+            metrics: [
+              { label: 'Market', value: sym },
+              { label: 'Close when', value: `price ${comparator} $${triggerPrice}` },
+              { label: 'Runs', value: 'In your browser, tab open' },
+            ],
+            status: 'pending',
+            outcome: { title: 'Auto-close armed', value: sym, meta: `${comparator} $${triggerPrice}`, activityTitle: `Armed ${sym} auto-close ${comparator} $${triggerPrice}` },
+            routeVia: 'perps-autoclose-arm',
+            perpsAutoClose: { symbol: sym, comparator, triggerPrice },
+            verified: true,
+          }
+          return NextResponse.json({
+            text: `Ready to arm: I'll close your ${sym} position if the price goes ${comparator} $${triggerPrice}. Press Confirm — you'll sign once to unlock your trading key for this session, then it watches and closes automatically while the app is open. (Perps automation runs in your browser only, by design — it stops if you close the tab.)`,
+            action: arm,
+          })
+        } catch (err) {
+          console.error('[robin] perps auto-close arm failed:', err)
+          return NextResponse.json({ text: 'I couldn\'t set up the auto-close just now — try again in a moment.' })
+        }
       }
     }
 

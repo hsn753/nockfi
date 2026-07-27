@@ -43,6 +43,11 @@ export type PlacePerpsOrderArgs = {
   // Fraction (0-1) of the position to close when reduceOnly. Omitted/>=1 = full close;
   // e.g. 0.5 trims half. Below the venue min it's rejected with a clear message.
   reducePct?: number
+  // Pre-captured wrap signature (the deterministic signature over buildWrapMessage). When
+  // provided, the key is unlocked WITHOUT prompting a fresh wallet signature — this is what
+  // lets the browser-resident perps auto-close watcher close a position hands-free on a
+  // trigger, using a signature the user provided once at arm time. Omitted = prompt as usual.
+  wrapSignature?: string
 }
 
 export type PlacePerpsOrderResult =
@@ -126,18 +131,23 @@ export async function placeClientPerpsOrder(args: PlacePerpsOrderArgs): Promise<
       return { ok: false, error: 'Invalid order parameters.' }
     }
 
-    // Unlock the API private key: one wallet signature over a fixed message re-derives the
-    // AES key and decrypts the stored blob. No key material ever leaves the browser.
-    const provider = await args.activeWallet.getEthereumProvider()
-    const walletClient = createWalletClient({
-      account: args.walletAddress as `0x${string}`,
-      chain: nockChain,
-      transport: custom(provider as Parameters<typeof custom>[0]),
-    })
-    const wrapSignature = await walletClient.signMessage({
-      account: args.walletAddress as `0x${string}`,
-      message: buildWrapMessage(args.walletAddress),
-    })
+    // Unlock the API private key: a wallet signature over a FIXED message re-derives the
+    // AES key and decrypts the stored blob. No key material ever leaves the browser. The
+    // signature is deterministic, so the auto-close watcher can pass one captured earlier
+    // (args.wrapSignature) to unlock hands-free; otherwise prompt for it now.
+    let wrapSignature = args.wrapSignature
+    if (!wrapSignature) {
+      const provider = await args.activeWallet.getEthereumProvider()
+      const walletClient = createWalletClient({
+        account: args.walletAddress as `0x${string}`,
+        chain: nockChain,
+        transport: custom(provider as Parameters<typeof custom>[0]),
+      })
+      wrapSignature = await walletClient.signMessage({
+        account: args.walletAddress as `0x${string}`,
+        message: buildWrapMessage(args.walletAddress),
+      })
+    }
     const privateKey = await unlockPrivateKey({ walletAddress: args.walletAddress, wrapSignature })
 
     await loadLighterSigner()
