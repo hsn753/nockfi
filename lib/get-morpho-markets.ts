@@ -269,10 +269,16 @@ export async function getUserMarketPositions(user: string): Promise<MorphoPositi
     const supplyShares = pos[0]
     if (supplyShares === BigInt(0) || state.totalSupplyShares === BigInt(0)) return null
     const assets = (supplyShares * state.totalSupplyAssets) / state.totalSupplyShares
+    const suppliedUsd = Number(formatUnits(assets, USDG_DECIMALS))
+    // Ignore DUST: a withdraw-by-assets leaves a tiny non-zero share remainder that values
+    // to a sub-cent amount. Surfacing it as a "position" both mis-shows a phantom holding
+    // AND makes the auto-switch sweep endlessly try to rebalance an amount that rounds to
+    // 0 ("Amount must be greater than zero"). Below a cent there's nothing worth acting on.
+    if (suppliedUsd < 0.01) return null
     return {
       market: key,
       collateralSymbol: m.collateralSymbol,
-      suppliedUsd: Number(formatUnits(assets, USDG_DECIMALS)),
+      suppliedUsd,
     }
   }))
   return positions.filter((p): p is MorphoPosition => p !== null)
