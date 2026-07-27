@@ -1057,7 +1057,13 @@ async function handlePOST(request: Request) {
                 return NextResponse.json({ text: `How much USDG should I spend when it triggers? e.g. "buy $50 of ${symbol} when the price goes ${comparator} $${threshold}".` })
               }
               let buyToken = SWAP_TOKENS[symbol.toUpperCase()]?.address ?? (symbol.toUpperCase() === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null)
-              if (!buyToken) { const st = await findStockToken(symbol).catch(() => null); if (st) buyToken = st.address }
+              if (!buyToken) {
+                const st = await findStockToken(symbol).catch(() => null)
+                if (st) {
+                  // Same Uniswap-vs-0x limitation as the sell side — no auto-buying stock tokens yet.
+                  return NextResponse.json({ text: `Automated buying of stock tokens like ${symbol} isn't supported yet — they trade via Uniswap, which the auto-trader can't route through yet (only USDG-paired tokens like NOCK/WETH). I can set a price ALERT for ${symbol} instead so you buy manually when it hits.` })
+                }
+              }
               if (!buyToken) return NextResponse.json({ text: `I can't resolve ${symbol} as a tradable asset.` })
               await createCondition({ walletAddress, kind: 'token_price', symbol, tokenAddress: buyToken, comparator, threshold, action: 'buy_with_usdg', actionAmountUsd: buyUsd })
               // Arm: approve EXACTLY the USDG to spend on this buy — a bounded amount, not
@@ -1099,7 +1105,13 @@ async function handlePOST(request: Request) {
                 condAction = 'sell_to_usdg'; tokenAddress = known.address
               } else if (!known) {
                 const stock = await findStockToken(symbol).catch(() => null)
-                if (stock) { condAction = 'sell_to_usdg'; tokenAddress = stock.address }
+                if (stock) {
+                  // Stock tokens trade through Uniswap, not the 0x router the auto-trader
+                  // uses — so an auto-sell would fail at the quote step (and previously
+                  // stranded the pulled token). Refuse cleanly with the honest reason +
+                  // the alert alternative, instead of arming something that can't execute.
+                  return NextResponse.json({ text: `Automated selling of stock tokens like ${symbol} isn't supported yet — they trade via Uniswap, which the auto-trader can't route through yet (only USDG-paired tokens like NOCK/WETH work). I can set a price ALERT for ${symbol} instead — e.g. "alert me if ${symbol} drops below $${threshold}" — and you sell manually when it fires.` })
+                }
               }
             }
 

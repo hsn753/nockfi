@@ -80,8 +80,24 @@ function alertMessage(cond: ConditionRow, observed: number): string {
   return `${sym} is ${cond.comparator === 'below' ? 'down to' : 'up to'} $${observed < 1 ? observed.toPrecision(4) : observed.toFixed(2)} (your alert was ${cond.comparator} $${threshold}).`
 }
 
+// Single-flight lock. Every automated action signs with the ONE shared automation key; two
+// overlapping sweeps (the 10-min cron overlapping a manual trigger, or a slow sweep) raced
+// on that key and stranded a real user's token mid-swap despite the return safety net. Only
+// one conditions sweep runs at a time; a second call returns immediately.
+let conditionSweepRunning = false
+
 export async function runConditionSweep(): Promise<ConditionSweepSummary> {
   const summary: ConditionSweepSummary = { checked: 0, fired: 0, reset: 0, errored: 0 }
+  if (conditionSweepRunning) return summary
+  conditionSweepRunning = true
+  try {
+    return await runConditionSweepInner(summary)
+  } finally {
+    conditionSweepRunning = false
+  }
+}
+
+async function runConditionSweepInner(summary: ConditionSweepSummary): Promise<ConditionSweepSummary> {
   const [conditions, prices] = await Promise.all([getAllEnabledConditions(), getReferencePrices()])
 
   for (const cond of conditions) {
