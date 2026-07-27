@@ -5,7 +5,7 @@ import { getTokenPriceByAddress } from './get-trending-tokens'
 import { findStockToken } from './get-stock-tokens'
 import { getStockBorrowPositions } from './get-stock-collateral'
 import { SWAP_TOKENS } from './get-swap-quote'
-import { executeSellToUsdg } from './strategy-execution'
+import { executeSellToUsdg, buyWithUsdg } from './strategy-execution'
 import {
   getAllEnabledConditions,
   markConditionTriggered,
@@ -105,6 +105,21 @@ export async function runConditionSweep(): Promise<ConditionSweepSummary> {
               : res.status === 'not_authorized'
                 ? `${cond.symbol} ${cond.comparator} $${Number(cond.threshold)} — but I'm not approved to sell it. Re-approve the automation address for ${cond.symbol} to arm this.`
                 : `Tried to sell ${cond.symbol} on your stop-loss but it didn't complete: ${res.message}`
+          await recordConditionEvent(cond.walletId, cond.id, msg, observed)
+          if (res.status === 'executed') await disableCondition(cond.id)
+        } else if (cond.action === 'buy_with_usdg' && cond.tokenAddress) {
+          // Conditional BUY — spend a fixed USDG amount on the token when the trigger hits.
+          // One-shot like the sell. USDG is ERC20 (approvable), so this works even to buy
+          // native ETH (the target is received, not pulled).
+          const decimals = await resolveDecimals(cond.symbol, cond.tokenAddress)
+          const usd = Number(cond.actionAmountUsd ?? 0)
+          const res = await buyWithUsdg(cond.address, { address: cond.tokenAddress, decimals, symbol: cond.symbol ?? 'token' }, usd)
+          const msg =
+            res.status === 'executed'
+              ? `Bought ${Number(res.boughtAmount).toLocaleString()} ${cond.symbol ?? ''} with ${usd.toFixed(2)} USDG (${cond.symbol} was ${cond.comparator} $${Number(cond.threshold)}).`
+              : res.status === 'not_authorized'
+                ? `${cond.symbol} ${cond.comparator} $${Number(cond.threshold)} — but I'm not approved to spend your USDG. Re-approve USDG to arm this buy.`
+                : `Tried to buy ${cond.symbol} but it didn't complete: ${res.message}`
           await recordConditionEvent(cond.walletId, cond.id, msg, observed)
           if (res.status === 'executed') await disableCondition(cond.id)
         } else {

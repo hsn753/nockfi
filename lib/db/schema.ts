@@ -249,7 +249,8 @@ export const automationConditions = pgTable('automation_conditions', {
   tokenAddress: text('token_address'), // resolved token address for price lookups, when applicable
   comparator: text('comparator').notNull(), // 'below' | 'above'
   threshold: numeric('threshold').notNull(),
-  action: text('action').notNull().default('alert'), // 'alert' (v1); future: 'sell_to_usdg' | 'yield_move'
+  action: text('action').notNull().default('alert'), // 'alert' | 'sell_to_usdg' | 'buy_with_usdg'
+  actionAmountUsd: numeric('action_amount_usd'), // USDG to spend on a 'buy_with_usdg' trigger (null for alert/sell)
   enabled: boolean('enabled').notNull().default(true),
   lastValue: numeric('last_value'),
   lastTriggeredAt: timestamp('last_triggered_at', { withTimezone: true }),

@@ -13,6 +13,7 @@ export type CreateConditionInput = {
   comparator: 'below' | 'above'
   threshold: number
   action?: string
+  actionAmountUsd?: number | null
 }
 
 export async function createCondition(input: CreateConditionInput): Promise<ConditionRow> {
@@ -28,6 +29,7 @@ export async function createCondition(input: CreateConditionInput): Promise<Cond
       comparator: input.comparator,
       threshold: String(input.threshold),
       action: input.action ?? 'alert',
+      actionAmountUsd: input.actionAmountUsd != null ? String(input.actionAmountUsd) : null,
     })
     .returning()
   return row

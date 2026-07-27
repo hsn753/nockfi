@@ -998,8 +998,12 @@ async function handlePOST(request: Request) {
           return NextResponse.json({ text: 'Which alert would you like to remove? e.g. "remove my ETH alert", or "remove all alerts".' })
         }
 
-        // CREATE — needs a threshold number and a direction.
-        const wantsCreate = mentionsAlert || /\bif\b.*\b(below|above|under|over|hits?|reach|drop|fall|dip)/i.test(txt)
+        // CREATE — needs a threshold number and a direction. A conditional keyword
+        // (if/when/once) + a comparator word covers "buy/sell X WHEN price ..." too, not
+        // just "alert ... if ...".
+        const condWord = /\b(if|when|once|whenever)\b/i.test(txt)
+        const cmpWord = /\b(below|under|above|over|higher|greater|lower|less|drops?|falls?|dips?|rises?|hits?|reach|goes?|exceeds?)\b/i.test(txt)
+        const wantsCreate = mentionsAlert || (condWord && cmpWord)
         if (wantsCreate && /\d/.test(txt)) {
           const isLoan = /\b(loan|ltv|liquidat|collateral)\b/i.test(txt)
           const isStopLoss = /\bstop\s*-?\s*loss\b/i.test(txt)
@@ -1007,13 +1011,19 @@ async function handlePOST(request: Request) {
           let comparator: 'below' | 'above' | null =
             isStopLoss ? 'below'
             : isTakeProfit ? 'above'
-            : /\b(below|under|drops?|falls?|dips?|less than|beneath|down to)\b/i.test(txt) ? 'below'
-            : /\b(above|over|exceeds?|more than|reach(es)?|goes? (above|over|up)|up to)\b/i.test(txt) ? 'above'
-            : /\bhits?\b/i.test(txt) ? (isLoan ? 'above' : 'above')
+            : /\b(below|under|drops?|falls?|dips?|less than|lower|beneath|down to)\b/i.test(txt) ? 'below'
+            : /\b(above|over|exceeds?|more than|higher|greater|reach(es)?|rises?|goes? (above|over|up)|up to)\b/i.test(txt) ? 'above'
+            : /\bhits?\b/i.test(txt) ? 'above'
             : null
-          // Loan LTV: threshold is a percentage; price: a dollar amount.
-          const pctMatch = txt.match(/(\d+(?:\.\d+)?)\s*%/) || (isLoan ? txt.match(/(\d+(?:\.\d+)?)/) : null)
-          const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)\s*(?:dollars?|usd)?/i)
+          // The trigger number lives in the part AFTER when/if — a BUY like "buy $50 of NVDA
+          // when price above $210" has two numbers, and $50 is the buy amount, not the
+          // threshold. Split so the threshold always comes from the trigger clause.
+          const condParts = txt.split(/\b(?:when|whenever|if|once)\b/i)
+          const triggerText = condParts.length > 1 ? condParts.slice(1).join(' ') : txt
+          const actionText = condParts[0]
+          // Loan LTV: threshold is a percentage; price: a dollar amount (from the trigger clause).
+          const pctMatch = triggerText.match(/(\d+(?:\.\d+)?)\s*%/) || (isLoan ? triggerText.match(/(\d+(?:\.\d+)?)/) : null)
+          const dollarMatch = triggerText.match(/\$\s*(\d+(?:\.\d+)?)/) || triggerText.match(/(\d+(?:\.\d+)?)\s*(?:dollars?|usd)?/i)
           // Symbol resolution — RESOLVE candidate words against REAL assets instead of
           // grabbing the first uppercase word. Verbs like "CLOSE" and "ME" were being
           // mis-read as tickers ("CLOSE price below $1950"), creating phantom alerts that
@@ -1034,6 +1044,42 @@ async function handlePOST(request: Request) {
 
           if (comparator && (isLoan ? pctMatch : dollarMatch)) {
             const threshold = parseFloat((isLoan ? pctMatch! : dollarMatch!)[1])
+
+            // CONDITIONAL BUY — "buy $50 of NVDA when the price goes above $210". Spends a
+            // fixed USDG amount on the token when the trigger hits (allowance model, USDG is
+            // the sell side so it works for any target incl. native ETH). Needs an explicit
+            // USDG amount (from the action clause, before when/if).
+            const isBuy = !isLoan && /\bbuy\b/i.test(txt) && !/\bsell\b/i.test(txt)
+            if (isBuy && symbol) {
+              const buyAmtMatch = actionText.match(/\$\s*(\d+(?:\.\d+)?)/) || actionText.match(/(\d+(?:\.\d+)?)\s*(?:usdg|usd|dollars?)/i)
+              const buyUsd = buyAmtMatch ? parseFloat(buyAmtMatch[1]) : null
+              if (!buyUsd || buyUsd <= 0) {
+                return NextResponse.json({ text: `How much USDG should I spend when it triggers? e.g. "buy $50 of ${symbol} when the price goes ${comparator} $${threshold}".` })
+              }
+              let buyToken = SWAP_TOKENS[symbol.toUpperCase()]?.address ?? (symbol.toUpperCase() === 'NOCK' ? '0x1b27fF6e68A2fd6490543b17C996c109E64eb432' : null)
+              if (!buyToken) { const st = await findStockToken(symbol).catch(() => null); if (st) buyToken = st.address }
+              if (!buyToken) return NextResponse.json({ text: `I can't resolve ${symbol} as a tradable asset.` })
+              await createCondition({ walletAddress, kind: 'token_price', symbol, tokenAddress: buyToken, comparator, threshold, action: 'buy_with_usdg', actionAmountUsd: buyUsd })
+              // Arm: the automation key needs a USDG allowance to spend on the buy.
+              const automationAddress = getAutomationAddress()
+              const usdgAddr = SWAP_TOKENS.USDG.address
+              const allow = (await getReadClient().readContract({ address: usdgAddr as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [walletAddress as `0x${string}`, automationAddress] }).catch(() => BigInt(0))) as bigint
+              if (allow === BigInt(0)) {
+                const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, (BigInt(1) << BigInt(256)) - BigInt(1)] })
+                return NextResponse.json({
+                  text: `Set up — I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve me to spend your USDG (standard approval, revocable anytime); then it's armed.`,
+                  action: {
+                    id: `act-${Date.now()}`, agent: 'vault', action: `Approve USDG for auto-buy of ${symbol}`,
+                    detail: `Lets the Nock automation address spend up to your approved USDG to buy ${symbol} when your trigger hits. Your key never leaves your wallet; revocable anytime.`,
+                    metrics: [{ label: 'Buy', value: `$${buyUsd} of ${symbol}` }, { label: 'When', value: `price ${comparator} $${threshold}` }, { label: 'Spend from', value: 'USDG' }],
+                    status: 'pending', outcome: { title: 'Auto-buy armed', value: symbol, meta: `$${buyUsd} ${comparator} $${threshold}`, activityTitle: `Armed ${symbol} auto-buy` },
+                    routeVia: 'token-approve', transactionData: { to: usdgAddr, data: approveData, value: '0' }, verified: true,
+                  },
+                })
+              }
+              return NextResponse.json({ text: `Armed — I'll buy $${buyUsd} of ${symbol} with USDG if the price goes ${comparator} $${threshold} (USDG already approved). I check about every 10 minutes.` })
+            }
+
             // SELL intent (stop-loss / take-profit / "...and sell it") on a PRICE condition →
             // auto-execute a sell-to-USDG when it fires (allowance model). Resolve the token
             // to an ERC20 address+decimals; native ETH can't be auto-sold (not approvable).
