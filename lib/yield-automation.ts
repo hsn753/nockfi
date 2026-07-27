@@ -124,6 +124,13 @@ export async function runYieldAutomationSweep(): Promise<SweepSummary> {
         const currentMarket = marketData.find((m) => m.key === position.market)
         if (!currentMarket) continue
 
+        // Don't churn tiny remnants. A withdraw-by-assets leaves a small share crumb; even
+        // above the $0.01 dust floor (which getUserMarketPositions already filters), a
+        // sub-dollar position isn't worth a gas-costing rebalance — and a near-zero one
+        // rounds its withdraw amount to 0 and fails "Amount must be greater than zero" on a
+        // loop. Skip anything under $1.
+        if (position.suppliedUsd < 1) continue
+
         // Best OTHER market with a materially higher rate and room for both legs.
         const candidate = [...marketData]
           .filter((m) => m.key !== position.market)
