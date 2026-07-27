@@ -804,14 +804,14 @@ async function handlePOST(request: Request) {
             }
           }
           if (ethPriceFetchFailed) {
-            responseText = `I couldn't fetch a live ETH price to convert that right now — give the amount in ETH directly instead, e.g. "${direction === 'in' ? `add 0.01 ETH from ${chain}` : `bridge 0.01 ETH to ${chain}`}".`
+            responseText = `I couldn't fetch a live ETH price to convert that right now. Give the amount in ETH directly instead, e.g. "${direction === 'in' ? `add 0.01 ETH from ${chain}` : `bridge 0.01 ETH to ${chain}`}".`
           } else if (!amount || amount <= 0) {
             responseText =
               direction === 'in'
                 ? `How much would you like to add from ${chainLabel}? Give an amount in ${assetSymbol} (e.g. "add 50 ${assetSymbol} from ${chain}").`
                 : `How much ${robinhoodAsset} do you want to ${robinhoodAsset === 'ETH' ? 'bridge' : 'cash out'} to ${chainLabel}? e.g. "${robinhoodAsset === 'ETH' ? `bridge 0.01 ETH to ${chain}` : `cash out 50 USDG to ${assetSymbol} on ${chain}`}".`
           } else if (assetSymbol === 'USDC' && amount < MIN_USD) {
-            responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more — e.g. ${
+            responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more, e.g. ${
               direction === 'in' ? `"add ${MIN_USD} USDC from ${chain}"` : `"cash out ${MIN_USD} USDG to USDC on ${chain}"`
             }.`
           } else {
@@ -944,12 +944,12 @@ async function handlePOST(request: Request) {
             transactionData = { to: tokenAddress, data, value: '0' }
           }
           return NextResponse.json({
-            text: `Here's the transfer — double-check the recipient address, then Confirm to send from your wallet.`,
+            text: `Here's the transfer. Double-check the recipient address, then Confirm to send from your wallet.`,
             action: {
               id: `act-${Date.now()}`,
               agent: 'swap',
               action: `Send ${amountLabel}`,
-              detail: `Sends ${amountLabel}${usdEstimate ? ` (~$${usdEstimate.toFixed(2)})` : ''} from your wallet to ${recipient}. A plain transfer on Robinhood Chain — verify the address is right; transfers can't be reversed.`,
+              detail: `Sends ${amountLabel}${usdEstimate ? ` (~$${usdEstimate.toFixed(2)})` : ''} from your wallet to ${recipient}. A plain transfer on Robinhood Chain. Verify the address is right; transfers can't be reversed.`,
               metrics: [
                 { label: 'Send', value: amountLabel },
                 { label: 'To', value: `${recipient.slice(0, 10)}…${recipient.slice(-6)}` },
@@ -1001,7 +1001,7 @@ async function handlePOST(request: Request) {
           const geo = await resolvePerpsGeo(request)
           if (!geo.allowed) {
             return NextResponse.json({
-              text: `Automated perps closing isn't available in your region (${PERPS_RESTRICTED_LABEL} are restricted) — this is a regulatory limit, not a bug. Everything else Nock automates (yield, alerts, stop-loss on tokens, rebalancing) still works for you.`,
+              text: `Automated perps closing isn't available in your region (${PERPS_RESTRICTED_LABEL} are restricted). This is a regulatory limit, not a bug. Everything else Nock automates (yield, alerts, stop-loss on tokens, rebalancing) still works for you.`,
             })
           }
           const dollar = txt.match(/\$\s*(\d+(?:\.\d+)?)/) || txt.match(/(\d+(?:\.\d+)?)/)
@@ -1019,7 +1019,7 @@ async function handlePOST(request: Request) {
             id: `act-${Date.now()}`,
             agent: 'perps',
             action: `Auto-close ${sym} if price goes ${comparator} $${triggerPrice}`,
-            detail: `Watches ${sym} while this app is open and closes your ${sym} perps position at market when the price goes ${comparator} $${triggerPrice}. Runs entirely in your browser — your trading key never leaves it. Only works while the tab is open (that's what keeps it compliant — it can't run on a server).`,
+            detail: `Watches ${sym} while this app is open and closes your ${sym} perps position at market when the price goes ${comparator} $${triggerPrice}. Runs entirely in your browser; your trading key never leaves it. Only works while the tab is open (that's what keeps it compliant, it can't run on a server).`,
             metrics: [
               { label: 'Market', value: sym },
               { label: 'Close when', value: `price ${comparator} $${triggerPrice}` },
@@ -1032,7 +1032,7 @@ async function handlePOST(request: Request) {
             verified: true,
           }
           return NextResponse.json({
-            text: `Ready to arm: I'll close your ${sym} position if the price goes ${comparator} $${triggerPrice}. Press Confirm — you'll sign once to unlock your trading key for this session, then it watches and closes automatically while the app is open. (Perps automation runs in your browser only, by design — it stops if you close the tab.)`,
+            text: `Ready to arm: I'll close your ${sym} position if the price goes ${comparator} $${triggerPrice}. Press Confirm. You'll sign once to unlock your trading key for this session, then it watches and closes automatically while the app is open. (Perps automation runs in your browser only, by design; it stops if you close the tab.)`,
             action: arm,
           })
         } catch (err) {
@@ -1162,7 +1162,7 @@ async function handlePOST(request: Request) {
               if (allow < buyWei) {
                 const approveData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [automationAddress, buyWei] })
                 return NextResponse.json({
-                  text: `Set up — I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve exactly $${buyUsd} USDG for it — a bounded amount, not unlimited, revocable anytime; then it's armed.`,
+                  text: `Set up. I'll buy $${buyUsd} of ${symbol} if the price goes ${comparator} $${threshold}. Press Confirm to approve exactly $${buyUsd} USDG for it, a bounded amount, not unlimited, revocable anytime; then it's armed.`,
                   action: {
                     id: `act-${Date.now()}`, agent: 'vault', action: `Approve $${buyUsd} USDG for auto-buy of ${symbol}`,
                     detail: `Approves exactly $${buyUsd} USDG (not unlimited) for the Nock automation address to buy ${symbol} when your trigger hits. Your key never leaves your wallet; revocable anytime.`,
@@ -1231,7 +1231,7 @@ async function handlePOST(request: Request) {
                   id: `act-${Date.now()}`,
                   agent: 'vault',
                   action: `Approve auto-sell of ${symbol}`,
-                  detail: `Approves selling up to your current ${symbol} balance to USDG when your stop-loss triggers — a bounded amount, NOT unlimited. Your wallet key never leaves your wallet, and you can revoke it anytime.`,
+                  detail: `Approves selling up to your current ${symbol} balance to USDG when your stop-loss triggers. A bounded amount, NOT unlimited. Your wallet key never leaves your wallet, and you can revoke it anytime.`,
                   metrics: [
                     { label: 'Token', value: symbol ?? 'token' },
                     { label: 'Approve up to', value: `${formatUnits(balance, 18)} ${symbol}` },
@@ -1244,12 +1244,12 @@ async function handlePOST(request: Request) {
                   verified: true,
                 }
                 return NextResponse.json({
-                  text: `Set up — I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. Press Confirm to approve it — this approves only your current ${symbol} balance, not an unlimited amount, and you can revoke anytime. Until then it acts as an alert only.`,
+                  text: `Set up. I'll sell your ${symbol} to USDG if it goes ${comparator} $${threshold}. Press Confirm to approve it. This approves only your current ${symbol} balance, not an unlimited amount, and you can revoke anytime. Until then it acts as an alert only.`,
                   action: approveCard,
                 })
               }
               return NextResponse.json({
-                text: `Armed — I'll automatically sell your ${symbol} to USDG if it goes ${comparator} $${threshold} (you've already approved ${symbol}). I check about every 10 minutes.`,
+                text: `Armed. I'll automatically sell your ${symbol} to USDG if it goes ${comparator} $${threshold} (you've already approved ${symbol}). I check about every 10 minutes.`,
               })
             }
 
@@ -1257,7 +1257,7 @@ async function handlePOST(request: Request) {
               ? `${symbol ?? 'any'} loan going ${comparator} ${threshold}% of its liquidation ceiling`
               : `${symbol ?? 'that asset'} going ${comparator} $${threshold}`
             return NextResponse.json({
-              text: `Done — I'll alert you if ${desc}. I check about every 10 minutes; the alert shows up in the app when it triggers. Say "my alerts" to see all of them.${!isLoan && !symbol ? ' (Heads up: I couldn’t tell which asset you meant — say the ticker, like ETH, if this looks wrong.)' : ''}`,
+              text: `Done. I'll alert you if ${desc}. I check about every 10 minutes; the alert shows up in the app when it triggers. Say "my alerts" to see all of them.${!isLoan && !symbol ? ' (Heads up: I couldn’t tell which asset you meant, say the ticker, like ETH, if this looks wrong.)' : ''}`,
             })
           }
           if (mentionsAlert) {
@@ -2506,7 +2506,7 @@ async function handlePOST(request: Request) {
         try {
           const positions = await getUserMarketPositions(walletAddress)
           if (positions.length === 0) {
-            responseText = "You don't have any USDG supplied to a yield market right now — there's nothing to withdraw."
+            responseText = "You don't have any USDG supplied to a yield market right now. There's nothing to withdraw."
           } else if (positions.length === 1) {
             // One position → build a full-balance withdraw card straight away.
             const p = positions[0]

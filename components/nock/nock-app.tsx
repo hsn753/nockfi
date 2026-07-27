@@ -726,7 +726,7 @@ export function NockApp() {
                 ? { ...m, action: { ...m.action, status: 'pending' as const } }
                 : m,
             ),
-            { id: `${Date.now()}-error`, role: 'robin', text: `That didn't go through: ${rawMessage} Nothing moved — press Confirm to try again.` },
+            { id: `${Date.now()}-error`, role: 'robin', text: `That didn't go through: ${rawMessage} Nothing moved. Press Confirm to try again.` },
           ])
         }
         executingActionsRef.current.delete(actionId)
@@ -812,7 +812,7 @@ export function NockApp() {
           {
             id: `${Date.now()}-error`,
             role: 'robin',
-            text: `The position was not ${perps.reduceOnly ? 'closed' : 'opened'}: ${rawMessage} Nothing was placed — press Confirm to try again.`,
+            text: `The position was not ${perps.reduceOnly ? 'closed' : 'opened'}: ${rawMessage} Nothing was placed. Press Confirm to try again.`,
           },
         ])
       }
@@ -836,7 +836,7 @@ export function NockApp() {
         if (rcpt.status !== 'success') throw new Error('The approval reverted on-chain.')
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
-          { id: `${Date.now()}-c`, role: 'robin', text: 'Armed ✅ Your auto-sell is active — I’ll sell to USDG when your trigger hits. You can revoke this approval anytime.' },
+          { id: `${Date.now()}-c`, role: 'robin', text: 'Armed ✅ Your auto-sell is active. I’ll sell to USDG when your trigger hits. You can revoke this approval anytime.' },
         ])
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -897,7 +897,7 @@ export function NockApp() {
         setPerpsAutoCloseArmed(perpsAutoCloseRef.current.map((c) => ({ symbol: c.symbol, comparator: c.comparator, triggerPrice: c.triggerPrice })))
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
-          { id: `${Date.now()}-c`, role: 'robin', text: `Armed ✅ Watching ${cfg.symbol} — I'll close your position at market if the price goes ${cfg.comparator} $${cfg.triggerPrice}. This runs in this browser tab; if you close or refresh the app, re-arm it (that's the compliance trade-off — it can't run on a server).` },
+          { id: `${Date.now()}-c`, role: 'robin', text: `Armed ✅ Watching ${cfg.symbol}. I'll close your position at market if the price goes ${cfg.comparator} $${cfg.triggerPrice}. This runs in this browser tab; if you close or refresh the app, re-arm it (that's the compliance trade-off; it can't run on a server).` },
         ])
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -1026,7 +1026,7 @@ export function NockApp() {
                 return
               }
               if (s?.failed) {
-                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: `Heads up — the cross-chain transfer reported an issue. Your funds are safe; reference Houdini order ${String(data.houdiniId).slice(0, 8)}… if you need support.` }])
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hf`, role: 'robin', text: `Heads up: the cross-chain transfer reported an issue. Your funds are safe; reference Houdini order ${String(data.houdiniId).slice(0, 8)}… if you need support.` }])
                 return
               }
             } catch {}
@@ -1358,7 +1358,7 @@ export function NockApp() {
             {
               id: `${Date.now()}-verifying`,
               role: 'robin',
-              text: `Your transaction is still being confirmed on Robinhood Chain (tx: ${shortHash}). It may just be finalizing. Check your holdings in a moment — do NOT send this again, or it could execute twice.`,
+              text: `Your transaction is still being confirmed on Robinhood Chain (tx: ${shortHash}). It may just be finalizing. Check your holdings in a moment. Do NOT send this again, or it could execute twice.`,
             },
           ])
           fetchPortfolioValue()

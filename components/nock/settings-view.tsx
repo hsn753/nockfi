@@ -499,7 +499,7 @@ function YieldAutomationSection() {
       <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
         Moves USDG you&apos;ve already supplied to whichever approved Morpho market pays
         the best rate, without a signature every time. You authorize one dedicated
-        address on-chain — funds always settle back to your own wallet, never a third
+        address on-chain. Funds always settle back to your own wallet, never a third
         address, and you can revoke this at any time.
       </p>
 
@@ -687,7 +687,7 @@ function LiquidationProtectionSection() {
       <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Liquidation protection</h2>
       <p className="mt-1.5 text-xs text-muted-foreground text-pretty">
         If a stock-collateral loan approaches liquidation, Robin automatically repays it down
-        to a safe level using USDG from your own yield position — no third party, and never
+        to a safe level using USDG from your own yield position. No third party, and never
         from your wallet. Uses the same one-time authorization as auto-switching; if you
         haven&apos;t any yield to draw on, you just get an urgent alert instead.
       </p>
@@ -1183,7 +1183,7 @@ function PerpsKeySection() {
           Withdraw
         </button>
       </div>
-      {wdDone && <p className="mt-1.5 text-xs text-primary">Withdrawal submitted — USDG returns to your wallet shortly.</p>}
+      {wdDone && <p className="mt-1.5 text-xs text-primary">Withdrawal submitted. USDG returns to your wallet shortly.</p>}
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
         Moves free (unused) margin back to your connected wallet. Margin backing an open position must be freed by closing it first.
       </p>
@@ -1217,7 +1217,7 @@ function PerpsKeySection() {
           Add funds
         </button>
       </div>
-      {addDone && <p className="mt-1.5 text-xs text-primary">Funds added — your perps margin will update shortly.</p>}
+      {addDone && <p className="mt-1.5 text-xs text-primary">Funds added. Your perps margin will update shortly.</p>}
     </div>
   )
 
