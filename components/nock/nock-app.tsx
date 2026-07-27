@@ -974,9 +974,28 @@ export function NockApp() {
         if (!signChain) throw new Error('That chain isn’t supported yet.')
 
         // Sign on the sell chain (external for funding-in; Robinhood for cash-out — a no-op
-        // switch since the user is already there).
+        // switch since the user is already there). Privy's switchChain() can resolve at the
+        // SDK level before an EXTERNAL (non-embedded, e.g. WalletConnect) wallet's own
+        // provider session has actually caught up — viem's sendTransaction below then throws
+        // a raw "current chain doesn't match" dump even though we just successfully awaited
+        // the switch (hit live: a real funding attempt failed this way). Poll the provider's
+        // own eth_chainId directly and give it a moment to catch up before proceeding.
         await activeWallet.switchChain(sign.chainId)
         const provider = await activeWallet.getEthereumProvider()
+        let confirmedChainId: number | null = null
+        for (let i = 0; i < 8; i++) {
+          try {
+            const hex = (await provider.request({ method: 'eth_chainId' })) as string
+            confirmedChainId = parseInt(hex, 16)
+          } catch {
+            confirmedChainId = null
+          }
+          if (confirmedChainId === sign.chainId) break
+          await new Promise((r) => setTimeout(r, 400))
+        }
+        if (confirmedChainId !== sign.chainId) {
+          throw new Error(`Your wallet didn't finish switching to ${signChain.name} — please switch to ${signChain.name} manually in your wallet app, then try again.`)
+        }
         const signWallet = createWalletClient({ account: walletAddress as `0x${string}`, chain: signChain, transport: custom(provider) })
         // Reads (allowance checks, waitForTransactionReceipt) go through a real public RPC,
         // not the embedded wallet's own provider — routing receipt polling through the
