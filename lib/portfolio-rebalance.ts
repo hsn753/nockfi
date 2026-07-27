@@ -1,5 +1,6 @@
 import { fetchWalletBalances } from './get-balances'
 import { sellUsdWorthToUsdg, buyWithUsdg, type TokenRef } from './strategy-execution'
+import { withAutomationLock } from './automation-lock'
 import {
   getEnabledRebalanceWallets,
   touchRebalanceCheckedAt,
@@ -23,8 +24,17 @@ const MIN_REBALANCE_USD = 1
 
 export type RebalanceSweepSummary = { checked: number; rebalanced: number; skipped: number; failed: number }
 
+const EMPTY_REBALANCE_SUMMARY: RebalanceSweepSummary = { checked: 0, rebalanced: 0, skipped: 0, failed: 0 }
+
+// Serialized against every other sweep (any type, any pm2 worker) via withAutomationLock —
+// see its comment for why an in-process-only lock isn't enough on production's 2 workers.
 export async function runPortfolioRebalanceSweep(): Promise<RebalanceSweepSummary> {
-  const summary: RebalanceSweepSummary = { checked: 0, rebalanced: 0, skipped: 0, failed: 0 }
+  const result = await withAutomationLock('portfolio-rebalance', runPortfolioRebalanceSweepInner)
+  return result ?? EMPTY_REBALANCE_SUMMARY
+}
+
+async function runPortfolioRebalanceSweepInner(): Promise<RebalanceSweepSummary> {
+  const summary: RebalanceSweepSummary = { ...EMPTY_REBALANCE_SUMMARY }
   const wallets = await getEnabledRebalanceWallets()
 
   for (const w of wallets) {

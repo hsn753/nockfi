@@ -226,3 +226,10 @@ export async function findStockToken(symbol: string): Promise<StockToken | null>
   const all = await getStockTokens()
   return all.find((t) => t.symbol.toLowerCase() === symbol.toLowerCase()) ?? null
 }
+
+// Address-keyed version of findStockToken — used where a swap leg is already resolved to
+// an address (e.g. deciding whether to route a strategy swap via Uniswap instead of 0x).
+export async function isStockTokenAddress(address: string): Promise<boolean> {
+  const all = await getStockTokens()
+  return all.some((t) => t.address.toLowerCase() === address.toLowerCase())
+}

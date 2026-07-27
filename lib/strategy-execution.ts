@@ -2,12 +2,16 @@ import { erc20Abi, encodeFunctionData, formatUnits, parseUnits, type Hash } from
 import { nockChain } from './chain'
 import { getAutomationClients, getAutomationAddress } from './yield-automation'
 import { fetchSwapQuote, SWAP_TOKENS } from './get-swap-quote'
+import { fetchUniswapStockQuote } from './get-uniswap-quote'
+import { executeUniswapV4Swap } from './execute-uniswap-swap'
+import { isStockTokenAddress } from './get-stock-tokens'
 
 // Conditional / rebalance swap execution via the ALLOWANCE model (user's choice). The user
 // grants a standard ERC20 allowance to the automation key for a token (a normal approve()
 // tx — their private key never leaves their wallet). To move funds the automation key:
 //   1. transferFrom(user -> key) the sell token (up to the granted allowance),
-//   2. swaps it to the buy token via 0x (key is the taker),
+//   2. swaps it to the buy token via 0x (key is the taker), or via Uniswap v4 directly if
+//      the non-USDG leg is a Robinhood stock token (0x refuses those at its API layer),
 //   3. transfers the bought token back to the user.
 // Native ETH is unsupported on the sell side (can't be approved). Every failure after
 // step 1 tries to return the pulled token to the user (safety net).
@@ -61,36 +65,67 @@ export async function swapForUser(userAddress: string, from: TokenRef, to: Token
       return { status: 'failed', message: `${reason}. ${returned ? `Your ${from.symbol} was returned to your wallet.` : `Your ${from.symbol} is temporarily at the automation address (${keyAddr}); needs manual follow-up, not lost.`}` }
     }
 
-    const quote = await fetchSwapQuote({ fromToken, toToken: to.address, amount: formatUnits(keyBalance, from.decimals), taker: keyAddr })
-    if (!quote.transaction || !quote.liquidityAvailable) return bail(`No swap route for ${from.symbol} -> ${to.symbol} right now`)
-
-    try {
-      const routerAllowance = (await publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'allowance', args: [keyAddr, quote.transaction.to as `0x${string}`] })) as bigint
-      if (routerAllowance < keyBalance) {
-        const apData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [quote.transaction.to as `0x${string}`, keyBalance] })
-        const apHash = await walletClient.sendTransaction({ account, chain: nockChain, to: fromToken, data: apData, value: BigInt(0) })
-        const apRcpt = await publicClient.waitForTransactionReceipt({ hash: apHash })
-        if (apRcpt.status !== 'success') return bail(`The ${from.symbol} router approval reverted`)
-      }
-    } catch (err) {
-      return bail(`Approving the swap failed: ${err instanceof Error ? err.message : 'unknown error'}`)
-    }
-
     const toAddr = to.address as `0x${string}`
+    // Exactly one side of every strategy swap is USDG (see executeSellToUsdg / buyWithUsdg
+    // below) — the other side is what decides the route. Stock tokens (NVDA/TSLA/...)
+    // aren't listed on 0x, so route those through Uniswap v4 directly instead, mirroring
+    // the manual stock-trade path.
+    const nonUsdgToken = fromToken.toLowerCase() === USDG_ADDRESS.toLowerCase() ? toAddr : fromToken
+    const routeViaUniswap = await isStockTokenAddress(nonUsdgToken)
+
     const boughtBefore = (await publicClient.readContract({ address: toAddr, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
     let swapHash: Hash
-    try {
-      swapHash = await walletClient.sendTransaction({
-        account, chain: nockChain,
-        to: quote.transaction.to as `0x${string}`, data: quote.transaction.data as `0x${string}`,
-        value: BigInt(quote.transaction.value || '0'),
-        ...(quote.transaction.gas ? { gas: BigInt(quote.transaction.gas) } : {}),
+
+    if (routeViaUniswap) {
+      const direction: 'buy' | 'sell' = toAddr.toLowerCase() === nonUsdgToken.toLowerCase() ? 'buy' : 'sell'
+      const stockQuote = await fetchUniswapStockQuote({
+        stockAddress: nonUsdgToken,
+        stockSymbol: direction === 'buy' ? to.symbol : from.symbol,
+        direction,
+        amount: formatUnits(keyBalance, from.decimals),
       })
-    } catch (err) {
-      return bail(`The swap failed to submit: ${err instanceof Error ? err.message : 'unknown error'}`)
+      if (!stockQuote.liquidityAvailable || !stockQuote.transaction) {
+        return bail(stockQuote.error || `No Uniswap route for ${from.symbol} -> ${to.symbol} right now`)
+      }
+      const result = await executeUniswapV4Swap({
+        walletClient, publicClient,
+        amount: formatUnits(keyBalance, from.decimals),
+        sellTokenAddress: fromToken,
+        sellTokenDecimals: from.decimals,
+        sellAmountRaw: stockQuote.sellAmountRaw,
+        transaction: stockQuote.transaction,
+      })
+      if (result.error) return bail(result.error)
+      swapHash = result.txHash
+    } else {
+      const quote = await fetchSwapQuote({ fromToken, toToken: to.address, amount: formatUnits(keyBalance, from.decimals), taker: keyAddr })
+      if (!quote.transaction || !quote.liquidityAvailable) return bail(`No swap route for ${from.symbol} -> ${to.symbol} right now`)
+
+      try {
+        const routerAllowance = (await publicClient.readContract({ address: fromToken, abi: erc20Abi, functionName: 'allowance', args: [keyAddr, quote.transaction.to as `0x${string}`] })) as bigint
+        if (routerAllowance < keyBalance) {
+          const apData = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [quote.transaction.to as `0x${string}`, keyBalance] })
+          const apHash = await walletClient.sendTransaction({ account, chain: nockChain, to: fromToken, data: apData, value: BigInt(0) })
+          const apRcpt = await publicClient.waitForTransactionReceipt({ hash: apHash })
+          if (apRcpt.status !== 'success') return bail(`The ${from.symbol} router approval reverted`)
+        }
+      } catch (err) {
+        return bail(`Approving the swap failed: ${err instanceof Error ? err.message : 'unknown error'}`)
+      }
+
+      try {
+        swapHash = await walletClient.sendTransaction({
+          account, chain: nockChain,
+          to: quote.transaction.to as `0x${string}`, data: quote.transaction.data as `0x${string}`,
+          value: BigInt(quote.transaction.value || '0'),
+          ...(quote.transaction.gas ? { gas: BigInt(quote.transaction.gas) } : {}),
+        })
+      } catch (err) {
+        return bail(`The swap failed to submit: ${err instanceof Error ? err.message : 'unknown error'}`)
+      }
+      const swapRcpt = await publicClient.waitForTransactionReceipt({ hash: swapHash })
+      if (swapRcpt.status !== 'success') return bail(`The ${from.symbol} -> ${to.symbol} swap reverted`)
     }
-    const swapRcpt = await publicClient.waitForTransactionReceipt({ hash: swapHash })
-    if (swapRcpt.status !== 'success') return bail(`The ${from.symbol} -> ${to.symbol} swap reverted`)
 
     const boughtAfter = (await publicClient.readContract({ address: toAddr, abi: erc20Abi, functionName: 'balanceOf', args: [keyAddr] })) as bigint
     const bought = boughtAfter - boughtBefore

@@ -158,6 +158,19 @@ export const rateLimits = pgTable('rate_limits', {
   index('rate_limits_created_idx').on(t.createdAt),
 ])
 
+// A single-row mutex for the ONE shared automation key (see lib/automation-lock.ts).
+// Production runs pm2 in 2 cluster workers (separate processes) — an in-process boolean
+// only prevents overlap within one worker, not across workers, and this key's nonce
+// sequence can't tolerate two sweeps signing concurrently from different processes.
+// Postgres's row-level locking (atomic INSERT..ON CONFLICT..WHERE) makes this safe across
+// any number of processes without needing a held-open connection (works over the
+// stateless neon-http driver).
+export const automationLock = pgTable('automation_lock', {
+  id: text('id').primaryKey(), // fixed value: 'automation-key'
+  lockedBy: text('locked_by'),
+  lockedAt: timestamp('locked_at', { withTimezone: true }),
+})
+
 // One row per wallet — whether automated yield rebalancing is on, and the user's own
 // threshold for triggering a switch. `enabled` here is the app's record of intent; the
 // real authority is Morpho's own on-chain isAuthorized(wallet, automationAddress) — every

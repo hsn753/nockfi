@@ -1,6 +1,7 @@
 import { createWalletClient, createPublicClient, http, erc20Abi, encodeFunctionData, parseUnits, nonceManager, type Hash } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { nockChain } from './chain'
+import { withAutomationLock } from './automation-lock'
 import {
   type MorphoMarketKey,
   getMorphoMarketData,
@@ -90,10 +91,18 @@ export type SweepSummary = {
   failed: number
 }
 
+const EMPTY_SWEEP_SUMMARY: SweepSummary = { checked: 0, rebalanced: 0, skippedNoPosition: 0, skippedNoImprovement: 0, autoDisabledRevoked: 0, failed: 0 }
+
 // One pass over every wallet with automation enabled. Safe to call repeatedly (e.g. from
-// a cron sweep) — a wallet with nothing to improve is a cheap no-op.
+// a cron sweep) — a wallet with nothing to improve is a cheap no-op. Serialized against
+// every other sweep (any type, any pm2 worker) via withAutomationLock — see its comment.
 export async function runYieldAutomationSweep(): Promise<SweepSummary> {
-  const summary: SweepSummary = { checked: 0, rebalanced: 0, skippedNoPosition: 0, skippedNoImprovement: 0, autoDisabledRevoked: 0, failed: 0 }
+  const result = await withAutomationLock('yield-automation', runYieldAutomationSweepInner)
+  return result ?? EMPTY_SWEEP_SUMMARY
+}
+
+async function runYieldAutomationSweepInner(): Promise<SweepSummary> {
+  const summary: SweepSummary = { ...EMPTY_SWEEP_SUMMARY }
   const automationAddress = getAutomationAddress()
   const wallets = await getEnabledYieldAutomationWallets()
   const marketData = await getMorphoMarketData()

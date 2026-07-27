@@ -10,6 +10,7 @@ import {
 } from './get-morpho-markets'
 import { getStockBorrowPositions, buildLiquidationRepayTx } from './get-stock-collateral'
 import { getAutomationClients, getAutomationAddress } from './yield-automation'
+import { withAutomationLock } from './automation-lock'
 import {
   getEnabledLiquidationProtectionWallets,
   disableLiquidationProtection,
@@ -42,8 +43,17 @@ export type ProtectionSweepSummary = {
   noRisk: number
 }
 
+const EMPTY_PROTECTION_SUMMARY: ProtectionSweepSummary = { checked: 0, protected: 0, atRiskButNoYield: 0, autoDisabledRevoked: 0, failed: 0, noRisk: 0 }
+
+// Serialized against every other sweep (any type, any pm2 worker) via withAutomationLock —
+// see its comment for why an in-process-only lock isn't enough on production's 2 workers.
 export async function runLiquidationProtectionSweep(): Promise<ProtectionSweepSummary> {
-  const summary: ProtectionSweepSummary = { checked: 0, protected: 0, atRiskButNoYield: 0, autoDisabledRevoked: 0, failed: 0, noRisk: 0 }
+  const result = await withAutomationLock('liquidation-protection', runLiquidationProtectionSweepInner)
+  return result ?? EMPTY_PROTECTION_SUMMARY
+}
+
+async function runLiquidationProtectionSweepInner(): Promise<ProtectionSweepSummary> {
+  const summary: ProtectionSweepSummary = { ...EMPTY_PROTECTION_SUMMARY }
   const automationAddress = getAutomationAddress()
   const wallets = await getEnabledLiquidationProtectionWallets()
 

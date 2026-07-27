@@ -6,6 +6,7 @@ import { findStockToken } from './get-stock-tokens'
 import { getStockBorrowPositions } from './get-stock-collateral'
 import { SWAP_TOKENS } from './get-swap-quote'
 import { executeSellToUsdg, buyWithUsdg } from './strategy-execution'
+import { withAutomationLock } from './automation-lock'
 import {
   getAllEnabledConditions,
   markConditionTriggered,
@@ -82,19 +83,15 @@ function alertMessage(cond: ConditionRow, observed: number): string {
 
 // Single-flight lock. Every automated action signs with the ONE shared automation key; two
 // overlapping sweeps (the 10-min cron overlapping a manual trigger, or a slow sweep) raced
-// on that key and stranded a real user's token mid-swap despite the return safety net. Only
-// one conditions sweep runs at a time; a second call returns immediately.
-let conditionSweepRunning = false
+// on that key and stranded a real user's token mid-swap despite the return safety net.
+// withAutomationLock is a cross-process mutex (Postgres-backed) — production runs pm2 as 2
+// cluster workers, so an in-process-only lock wouldn't stop this sweep on worker A racing
+// yield/liq/rebalance on worker B. See lib/automation-lock.ts.
+const EMPTY_CONDITION_SUMMARY: ConditionSweepSummary = { checked: 0, fired: 0, reset: 0, errored: 0 }
 
 export async function runConditionSweep(): Promise<ConditionSweepSummary> {
-  const summary: ConditionSweepSummary = { checked: 0, fired: 0, reset: 0, errored: 0 }
-  if (conditionSweepRunning) return summary
-  conditionSweepRunning = true
-  try {
-    return await runConditionSweepInner(summary)
-  } finally {
-    conditionSweepRunning = false
-  }
+  const result = await withAutomationLock('conditions', () => runConditionSweepInner({ ...EMPTY_CONDITION_SUMMARY }))
+  return result ?? EMPTY_CONDITION_SUMMARY
 }
 
 async function runConditionSweepInner(summary: ConditionSweepSummary): Promise<ConditionSweepSummary> {
