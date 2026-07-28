@@ -801,6 +801,24 @@ async function handlePOST(request: Request) {
             return NextResponse.json({ text: `How much ETH should I send privately to ${recipient.slice(0, 10)}…${recipient.slice(-6)}? e.g. "privately send 0.05 ETH to ${recipient.slice(0, 10)}…".` })
           }
 
+          // BALANCE PRE-CHECK, before quoting. Without it a shortfall only surfaces at the
+          // wallet as "Network fee Unavailable" with a greyed-out confirm button (seen live:
+          // a 0.0174 ETH send from a 0.00156 ETH balance), which reads as an app bug rather
+          // than "you don't have the funds". Done BEFORE getHoudiniQuote deliberately: the
+          // free tier allows only ~20 quotes/hour, so a doomed send must not spend one.
+          const ethBalance = (await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null))
+          if (ethBalance !== null) {
+            const needed = parseUnits(String(amount), 18)
+            // Leave headroom for gas — a send of the entire balance always fails.
+            const GAS_HEADROOM = parseUnits('0.00002', 18)
+            if (ethBalance < needed + GAS_HEADROOM) {
+              const have = Number(formatUnits(ethBalance, 18))
+              return NextResponse.json({
+                text: `You have ${have.toFixed(6)} ETH on Robinhood Chain, which isn't enough to send ${amount} ETH plus gas. Add more ETH first, or try a smaller amount (keeping a little back for the network fee).`,
+              })
+            }
+          }
+
           const country =
             request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
           // Sell side is the user's ETH on Robinhood; buy side is ETH on the external chain,
@@ -952,6 +970,22 @@ async function handlePOST(request: Request) {
             responseText = `Cross-chain transfers have a $${MIN_USD} minimum. Try $${MIN_USD} or more, e.g. ${
               direction === 'in' ? `"add ${MIN_USD} USDC from ${chain}"` : `"cash out ${MIN_USD} USDG to USDC on ${chain}"`
             }.`
+          } else if (
+            // Same balance pre-check as the private-send flow above, for the one case we can
+            // verify here: cashing OUT native ETH from Robinhood Chain. (Funding IN sells on
+            // an external chain, whose balance this server-side path can't read, and a USDG
+            // sell side is an ERC20 rather than the native balance read below.)
+            direction === 'out' && robinhoodAsset === 'ETH' &&
+            await (async () => {
+              const bal = await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null)
+              if (bal === null) return false
+              const needed = parseUnits(String(amount), 18) + parseUnits('0.00002', 18)
+              if (bal >= needed) return false
+              responseText = `You have ${Number(formatUnits(bal, 18)).toFixed(6)} ETH on Robinhood Chain, which isn't enough to bridge ${amount} ETH plus gas. Add more ETH first, or try a smaller amount (keeping a little back for the network fee).`
+              return true
+            })()
+          ) {
+            // responseText set inside the guard above.
           } else {
             const country =
               request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
