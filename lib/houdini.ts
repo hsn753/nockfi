@@ -146,6 +146,34 @@ export type HoudiniRoute = {
 // ~18 routes each way) but ZERO routes for anything USDG, since no CEX lists USDG.
 export type HoudiniRouteType = 'standard' | 'private'
 
+// Houdini returns ZERO private quotes for an amount below the tier's minimum — it does NOT
+// return a quote carrying a `min` you could read. So "no private routes" is ambiguous
+// between "this pair has no private tier at all" and "your amount is just too small", and
+// telling a user the wrong one sends them away from a feature that would have worked.
+// Resolve it by re-quoting once at a deliberately generous amount and reading the `min`
+// off that. Cached per pair because the free tier allows only ~20 quotes/hour, so a user
+// retrying a too-small amount must not burn the budget rediscovering the same number.
+const privateMinCache = new Map<string, { min: number; at: number }>()
+const PRIVATE_MIN_TTL_MS = 10 * 60 * 1000
+
+async function probePrivateMin(fromId: string, toId: string, sellSymbol: string): Promise<number | null> {
+  const key = `${fromId}->${toId}`
+  const hit = privateMinCache.get(key)
+  if (hit && Date.now() - hit.at < PRIVATE_MIN_TTL_MS) return hit.min
+  // Generous enough to clear the minimum on any pair we support: ~$95 of ETH, or 100 units
+  // of a stablecoin-denominated sell side.
+  const probeAmount = sellSymbol.toUpperCase() === 'ETH' ? 0.05 : 100
+  try {
+    const data = await hfetch(`/quotes?amount=${probeAmount}&from=${fromId}&to=${toId}`)
+    const priv = (data.quotes || []).find((q: any) => q?.type === 'private' && q.min != null)
+    if (!priv) return null
+    privateMinCache.set(key, { min: priv.min, at: Date.now() })
+    return priv.min as number
+  } catch {
+    return null
+  }
+}
+
 // The token the user actually SIGNS with (the sell side), plus the chain they sign on.
 // address is null for a native-coin sell (e.g. ETH) — there's no ERC20 to approve; the
 // amount is sent as tx value instead.
@@ -182,11 +210,20 @@ export async function getHoudiniQuote(
   }
   if (!quotes.length) {
     if (wantPrivate) {
-      // Distinguish "this pair has no private tier at all" (true for anything USDG) from
-      // "the amount is outside the private range" — the user can act on the second.
-      const anyPrivate = raw.find((q) => q.type === 'private')
-      if (!anyPrivate) throw new Error(`Private routing isn't available for this pair. Houdini's private tier routes through exchanges, and this asset isn't listed on them.`)
-      throw new Error('No private route available for this amount right now.')
+      const sellSymbol = direction === 'in' ? asset.symbol : rh.symbol
+      // Zero private routes usually means "below the minimum", not "unsupported pair" —
+      // probe for the real minimum before blaming the pair (see probePrivateMin).
+      const probedMin = await probePrivateMin(fromId, toId, sellSymbol)
+      if (probedMin != null) {
+        if (amount < probedMin) {
+          // Pad the quoted floor slightly: the minimum drifts with price between quotes, so
+          // echoing it exactly sends users straight back into the same failure.
+          const suggested = Math.ceil(probedMin * 1.05 * 1e4) / 1e4
+          throw new Error(`that's below the private-routing minimum for this route. Private sends need at least ~${suggested} ${sellSymbol} here (you asked for ${amount}). Try ~${suggested} ${sellSymbol} or more${asset.chain !== 'base' ? ', or send to Base instead, which has a much lower minimum' : ''}.`)
+        }
+        throw new Error('no private route is available for this amount right now.')
+      }
+      throw new Error(`private routing isn't available for this pair. Houdini's private tier routes through exchanges, and this asset isn't listed on them.`)
     }
     throw new Error('No route available for this amount right now.')
   }
@@ -194,11 +231,13 @@ export async function getHoudiniQuote(
   // still returns a quote but would strand the deposit, so refuse it up front.
   if (wantPrivate) {
     const withRange = quotes.find((q) => q.min != null || q.max != null)
+    const sellSymbol = direction === 'in' ? asset.symbol : rh.symbol
     if (withRange?.min != null && amount < withRange.min) {
-      throw new Error(`The private route needs at least ${withRange.min} ${direction === 'in' ? asset.symbol : rh.symbol} for this pair.`)
+      const suggested = Math.ceil(withRange.min * 1.05 * 1e4) / 1e4
+      throw new Error(`that's below the private-routing minimum for this route. Private sends need at least ~${suggested} ${sellSymbol} here.`)
     }
     if (withRange?.max != null && amount > withRange.max) {
-      throw new Error(`The private route accepts at most ${withRange.max} ${direction === 'in' ? asset.symbol : rh.symbol} for this pair.`)
+      throw new Error(`that's above the private-routing maximum for this route (max ~${withRange.max} ${sellSymbol}).`)
     }
   }
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
