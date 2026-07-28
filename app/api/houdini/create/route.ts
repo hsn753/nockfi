@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { isAddress } from 'viem'
 import { withRateLimit } from '@/lib/api-guard'
 import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
-import { getHoudiniQuote, createHoudiniExchange, HOUDINI_ASSETS, houdiniEnabled, type HoudiniDirection, type RobinhoodAssetKey } from '@/lib/houdini'
+import { getHoudiniQuote, createHoudiniExchange, HOUDINI_ASSETS, houdiniEnabled, type HoudiniDirection, type RobinhoodAssetKey, type HoudiniRouteType } from '@/lib/houdini'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,12 +25,17 @@ async function handlePOST(req: NextRequest) {
     addressFrom?: string
     addressTo?: string
     robinhoodAsset?: RobinhoodAssetKey
+    routeType?: HoudiniRouteType
   }
   const assetKey = body.assetKey || body.sourceKey
   const direction: HoudiniDirection = body.direction === 'out' ? 'out' : 'in'
   const { addressFrom, addressTo } = body
   const amount = Number(body.amount)
   const robinhoodAsset: RobinhoodAssetKey = body.robinhoodAsset === 'ETH' ? 'ETH' : 'USDG'
+  // 'private' routes through Houdini's anonymity tier: nothing to sign, the client
+  // transfers to the returned depositAddress instead. addressTo is a real recipient here
+  // (deliberately NOT the sender — delivering back to the sender defeats the privacy).
+  const routeType: HoudiniRouteType = body.routeType === 'private' ? 'private' : 'standard'
 
   if (!assetKey || !HOUDINI_ASSETS[assetKey]) {
     return NextResponse.json({ error: 'Unsupported or missing assetKey' }, { status: 400 })
@@ -56,18 +61,26 @@ async function handlePOST(req: NextRequest) {
   try {
     const country =
       req.headers.get('x-vercel-ip-country') || req.headers.get('cf-ipcountry') || req.headers.get('x-country-code') || undefined
-    const { best, sign } = await getHoudiniQuote(assetKey, amount, direction, country || undefined, robinhoodAsset)
+    const { best, sign } = await getHoudiniQuote(assetKey, amount, direction, country || undefined, robinhoodAsset, routeType)
     const order = await createHoudiniExchange(best.quoteId, addressFrom, addressTo)
+    // A private order is useless without a deposit address — fail loudly rather than
+    // handing the client an order it can't act on.
+    if (routeType === 'private' && !order.depositAddress) {
+      return NextResponse.json({ error: 'Houdini did not return a deposit address for this private route. Nothing was sent; please try again.' }, { status: 502 })
+    }
     return NextResponse.json({
       houdiniId: order.houdiniId,
       status: order.status,
       metadata: order.metadata ?? null,
       depositAddress: order.depositAddress ?? null,
-      // The token + chain the client must sign on (approve + bridge tx).
+      expires: order.expires ?? null,
+      routeType,
+      // The token + chain the client must sign on (approve + bridge tx, or the plain
+      // transfer to depositAddress on a private route).
       sign: { chainId: sign.chainId, address: sign.address, decimals: sign.decimals, symbol: sign.symbol },
       amountIn: order.inAmount ?? amount,
-      amountOut: order.outAmount ?? best.netAmountOut,
-      requiresApproval: best.requiresApproval ?? true,
+      amountOut: order.outAmount ?? best.netAmountOut ?? best.amountOut,
+      requiresApproval: routeType === 'private' ? false : (best.requiresApproval ?? true),
     })
   } catch (err) {
     const e = err as Error & { status?: number }

@@ -738,6 +738,115 @@ async function handlePOST(request: Request) {
       return gasTopUpTx
     }
 
+    // ── PRE-MODEL: PRIVATE send via Houdini's anonymity tier ──────────────────────────
+    // "privately send 0.05 ETH to 0xABC…", "send 0.05 eth anonymously to 0xABC… on base".
+    // Distinct product from the standard cross-chain flows below: routed through exchanges,
+    // so there is NOTHING to sign — the user makes a plain transfer to a Houdini deposit
+    // address and Houdini delivers to the recipient, breaking the on-chain link between
+    // the two. Only ETH is supported (verified live: ~18 private routes each way on
+    // ETH<->ETH; ZERO for anything USDG, since no CEX lists USDG).
+    //
+    // Checked BEFORE the standard backstop because "send" is one of its cash-out verbs and
+    // would otherwise swallow this. Requires an explicit privacy word AND a recipient
+    // address, so a normal "send 5 usdg to 0x…" still goes to the plain-send flow.
+    if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
+      try {
+        const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+        const txt = (lastUser?.text || '').trim()
+        const wantsPrivate = /\b(private(ly)?|anonymous(ly)?|anon)\b/i.test(txt)
+        const recipientMatch = txt.match(/0x[a-fA-F0-9]{40}/)
+        if (wantsPrivate && recipientMatch) {
+          const recipient = recipientMatch[0] as `0x${string}`
+          const isEth = /\beth\b/i.test(txt) || /\bether\w*\b/i.test(txt)
+          const mentionsUsdg = /\busdg\b/i.test(txt)
+          const chain = /\bbase\b/i.test(txt) ? 'base' : 'ethereum'
+          const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
+
+          if (mentionsUsdg || !isEth) {
+            // Be specific about WHY rather than a generic refusal — this is a real product
+            // limit (exchange listings), not a NockFi bug, and the user can act on it.
+            return NextResponse.json({
+              text: mentionsUsdg
+                ? "Private sends aren't available for USDG. Houdini's private routing goes through exchanges, and no exchange lists USDG, so there's no private route to use. Private sending works with ETH: try \"privately send 0.05 ETH to 0x…\"."
+                : 'Private sends currently work with ETH only. Try "privately send 0.05 ETH to 0x…".',
+            })
+          }
+          // Delivering back to the sender's own address leaks exactly what the private
+          // route exists to hide, and costs a premium for nothing. Refuse rather than
+          // silently sell them a useless trade.
+          if (recipient.toLowerCase() === walletAddress.toLowerCase()) {
+            return NextResponse.json({
+              text: "That's your own address, so a private route wouldn't hide anything (and costs more than a normal transfer). Give a different destination address to send privately, or say \"bridge\" instead to move ETH to your own wallet on another chain.",
+            })
+          }
+
+          const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
+          // Exclude the recipient address from amount matching — its digits would otherwise
+          // be parsed as the amount.
+          const amountText = txt.replace(recipientMatch[0], ' ')
+          const m = dollarMatch || amountText.match(/(\d+(?:\.\d+)?)\s*(?:eth)?/i)
+          let amount = m ? parseFloat(m[1]) : null
+          let ethPriceNote = ''
+          if (dollarMatch && amount) {
+            const ethPrice = (await getReferencePrices()).ETH
+            if (ethPrice) {
+              const usdAmount = amount
+              amount = Math.round((usdAmount / ethPrice) * 1e6) / 1e6
+              ethPriceNote = ` (≈ $${usdAmount.toFixed(2)} at $${ethPrice.toFixed(2)}/ETH)`
+            } else {
+              return NextResponse.json({ text: 'I couldn\'t fetch a live ETH price to convert that. Give the amount in ETH directly, e.g. "privately send 0.05 ETH to 0x…".' })
+            }
+          }
+          if (!amount || amount <= 0) {
+            return NextResponse.json({ text: `How much ETH should I send privately to ${recipient.slice(0, 10)}…${recipient.slice(-6)}? e.g. "privately send 0.05 ETH to ${recipient.slice(0, 10)}…".` })
+          }
+
+          const country =
+            request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
+          // Sell side is the user's ETH on Robinhood; buy side is ETH on the external chain,
+          // delivered to `recipient`. getHoudiniQuote enforces the private tier's min/max.
+          const { asset, best } = await getHoudiniQuote(`${chain}:ETH`, amount, 'out', country || undefined, 'ETH', 'private')
+          const out = best.netAmountOut ?? best.amountOut
+          const outUsd = best.amountOutUsd ?? 0
+          const etaSec = best.eta ?? best.duration ?? 300
+          const etaLabel = etaSec < 60 ? '< 1 min' : `~${Math.round(etaSec / 60)} min`
+          const sellLabel = `${fmtHoudiniAmount(amount, 'ETH')} ETH`
+          const outStr = fmtHoudiniAmount(out, 'ETH')
+          const headline = `Privately send ${sellLabel} to ${recipient.slice(0, 10)}…${recipient.slice(-6)}`
+          action = {
+            id: `act-${Date.now()}`,
+            agent: 'swap',
+            action: headline,
+            detail: `Sends ${sellLabel} from your Robinhood Chain wallet through Houdini's private routing, delivering ~${outStr} ETH to ${recipient} on ${chainLabel}. Routed through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address; there is no smart contract to approve. Transfers cannot be reversed, so verify the recipient address.`,
+            metrics: [
+              { label: 'You send', value: `${sellLabel} on Robinhood` },
+              { label: 'Recipient gets', value: `~${outStr} ETH on ${chainLabel}` },
+              { label: 'To', value: `${recipient.slice(0, 10)}…${recipient.slice(-6)}` },
+              { label: 'Routing', value: 'Private' },
+              { label: 'ETA', value: etaLabel },
+            ],
+            status: 'pending',
+            outcome: { title: 'Sent privately', value: outUsd > 0 ? `~$${outUsd.toFixed(2)}` : `${outStr} ETH`, meta: `${outStr} ETH on ${chainLabel}`, activityTitle: headline },
+            routeVia: 'houdini-private',
+            houdiniAssetKey: `${chain}:ETH`,
+            houdiniAmount: String(amount),
+            houdiniDirection: 'out',
+            houdiniRobinhoodAsset: 'ETH',
+            houdiniRecipient: recipient,
+            verified: true,
+          } as any
+          return NextResponse.json({
+            text: `Here's your private send preview.${ethPriceNote} Press Confirm to sign one transfer to Houdini's deposit address; they deliver to the recipient on ${chainLabel} in ${etaLabel}. Private routing costs a bit more than a direct bridge, which is the tradeoff for breaking the on-chain link. Double-check the recipient address, transfers can't be reversed.`,
+            action,
+          })
+        }
+      } catch (e) {
+        const msg = (e as Error)?.message
+        console.error('[robin] houdini private-send backstop failed:', msg)
+        return NextResponse.json({ text: `I couldn't set up that private send${msg ? `: ${msg}` : '.'}` })
+      }
+    }
+
     // ── PRE-MODEL: cross-chain funding IN / cash-out OUT via Houdini ───────────────────
     // IN  : "add/fund/deposit <amt> FROM ethereum/base"  → external USDC → USDG on Robinhood.
     // OUT : "cash out/withdraw/swap <amt> USDG TO ethereum/base" → USDG on Robinhood → USDC.

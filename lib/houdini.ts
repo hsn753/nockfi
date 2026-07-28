@@ -131,7 +131,20 @@ export type HoudiniRoute = {
   requiresApproval?: boolean
   supportsSignatures?: boolean
   restrictedCountries?: string[]
+  // PRIVATE routes only: the accepted deposit range, in sell-side units. Private quotes
+  // carry no swapName/netAmountOut/supportsSignatures at all (verified live) — they're
+  // CEX-mediated, so there's nothing to sign and the user deposits to an address instead.
+  min?: number
+  max?: number
 }
+
+// 'standard' = DEX/bridge routes: one signature on the sell chain, non-custodial, the
+// default for funding/cash-out. 'private' = Houdini's anonymity tier: routed through
+// CEXs, so it CANNOT be signed — the user transfers to a Houdini deposit address and the
+// link between sender and recipient is broken on the way out. Private is only available
+// where a CEX lists both sides: verified live as ETH<->ETH (Robinhood <-> Ethereum/Base,
+// ~18 routes each way) but ZERO routes for anything USDG, since no CEX lists USDG.
+export type HoudiniRouteType = 'standard' | 'private'
 
 // The token the user actually SIGNS with (the sell side), plus the chain they sign on.
 // address is null for a native-coin sell (e.g. ETH) — there's no ERC20 to approve; the
@@ -151,6 +164,7 @@ export async function getHoudiniQuote(
   direction: HoudiniDirection,
   country?: string,
   robinhoodAsset: RobinhoodAssetKey = 'USDG',
+  routeType: HoudiniRouteType = 'standard',
 ): Promise<{ asset: HoudiniAsset; best: HoudiniRoute; all: HoudiniRoute[]; sign: HoudiniSignSide; robinhood: typeof ROBINHOOD_USDG | typeof ROBINHOOD_ETH }> {
   const asset = HOUDINI_ASSETS[assetKey]
   if (!asset) throw new Error(`Unsupported asset: ${assetKey}`)
@@ -158,15 +172,39 @@ export async function getHoudiniQuote(
   const fromId = direction === 'in' ? asset.tokenId : rh.tokenId
   const toId = direction === 'in' ? rh.tokenId : asset.tokenId
   const data = await hfetch(`/quotes?amount=${amount}&from=${fromId}&to=${toId}`)
-  let quotes: HoudiniRoute[] = (data.quotes || []).filter(
-    (q: any) => q && q.quoteId && q.type !== 'private' && (q.netAmountOut ?? q.amountOut) != null,
+  const wantPrivate = routeType === 'private'
+  const raw: HoudiniRoute[] = (data.quotes || []).filter(
+    (q: any) => q && q.quoteId && (q.netAmountOut ?? q.amountOut) != null,
   )
+  let quotes: HoudiniRoute[] = raw.filter((q) => (wantPrivate ? q.type === 'private' : q.type !== 'private'))
   if (country) {
     quotes = quotes.filter((q) => !(q.restrictedCountries || []).map((c) => c.toUpperCase()).includes(country.toUpperCase()))
   }
-  if (!quotes.length) throw new Error('No route available for this amount right now.')
+  if (!quotes.length) {
+    if (wantPrivate) {
+      // Distinguish "this pair has no private tier at all" (true for anything USDG) from
+      // "the amount is outside the private range" — the user can act on the second.
+      const anyPrivate = raw.find((q) => q.type === 'private')
+      if (!anyPrivate) throw new Error(`Private routing isn't available for this pair. Houdini's private tier routes through exchanges, and this asset isn't listed on them.`)
+      throw new Error('No private route available for this amount right now.')
+    }
+    throw new Error('No route available for this amount right now.')
+  }
+  // A private quote's `min`/`max` is the accepted deposit range — an out-of-range amount
+  // still returns a quote but would strand the deposit, so refuse it up front.
+  if (wantPrivate) {
+    const withRange = quotes.find((q) => q.min != null || q.max != null)
+    if (withRange?.min != null && amount < withRange.min) {
+      throw new Error(`The private route needs at least ${withRange.min} ${direction === 'in' ? asset.symbol : rh.symbol} for this pair.`)
+    }
+    if (withRange?.max != null && amount > withRange.max) {
+      throw new Error(`The private route accepts at most ${withRange.max} ${direction === 'in' ? asset.symbol : rh.symbol} for this pair.`)
+    }
+  }
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
-  const signable = quotes.filter((q) => q.type === 'dex' || q.supportsSignatures)
+  // Private routes are never signature-based, so the signable preference only applies to
+  // the standard tier (applying it there would empty the pool and fall through anyway).
+  const signable = wantPrivate ? [] : quotes.filter((q) => q.type === 'dex' || q.supportsSignatures)
   const pool = signable.length ? signable : quotes
   // `eta`/`duration` are in SECONDS. Rank by output alone can pick a route that's orders of
   // magnitude slower for a marginal gain (seen live: a 600s route beat an 8s route by 0.02%

@@ -937,6 +937,95 @@ export function NockApp() {
     // Robinhood) or cash OUT (USDG on Robinhood → external asset). It signs on the SELL
     // chain — the external chain for funding-in, Robinhood Chain for cash-out — so it has
     // its own client + chain switch and never touches the Robinhood-only executor path below.
+    // HOUDINI PRIVATE SEND (routeVia:'houdini-private'): Houdini's anonymity tier is
+    // CEX-routed, so unlike the standard bridge there is NO transaction to sign against a
+    // router — the order returns a deposit ADDRESS and the user makes a plain transfer to
+    // it. Houdini then delivers to the recipient, breaking the on-chain link. Sell side is
+    // always the user's ETH on Robinhood Chain, so no chain switching is needed.
+    if ((action as any).routeVia === 'houdini-private') {
+      try {
+        if (!walletAddress || !activeWallet || !publicClient) throw new Error('Please connect your wallet first.')
+        const assetKey = (action as any).houdiniAssetKey as string
+        const amount = (action as any).houdiniAmount as string
+        const recipient = (action as any).houdiniRecipient as string
+        const destLabel = String(assetKey || '').startsWith('base') ? 'Base' : 'Ethereum'
+
+        const { identityToken, accessToken } = await getAuthTokens()
+        const res = await fetch('/api/houdini/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Privy-Identity-Token': identityToken ?? '',
+            'X-Privy-Access-Token': accessToken ?? '',
+          },
+          body: JSON.stringify({
+            assetKey, direction: 'out', amount,
+            addressFrom: walletAddress,
+            addressTo: recipient, // the RECIPIENT, deliberately not the sender
+            robinhoodAsset: 'ETH',
+            routeType: 'private',
+          }),
+        })
+        const data = await res.json()
+        if (!res.ok || data.error) throw new Error(data.error || 'Could not set up the private send.')
+        const depositAddress = data.depositAddress as string | null
+        if (!depositAddress) throw new Error('Houdini did not return a deposit address. Nothing was sent.')
+
+        // Sell side is Robinhood-native ETH — make sure we're on that chain, then send.
+        if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
+        const provider = await activeWallet.getEthereumProvider()
+        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+        const hash = await wc.sendTransaction({
+          account: walletAddress as `0x${string}`,
+          chain: nockChain,
+          to: depositAddress as `0x${string}`,
+          value: parseUnits(String(amount), 18),
+        })
+        const rcpt = await publicClient.waitForTransactionReceipt({ hash })
+        if (rcpt.status !== 'success') throw new Error('The transfer reverted on-chain — nothing was sent (only gas was spent).')
+
+        const outEst = Number(data.amountOut)
+        const outStr = isFinite(outEst) ? `${fmtHoudiniAmount(outEst, 'ETH')} ` : ''
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
+          {
+            id: `${Date.now()}-c`,
+            role: 'robin',
+            text: `Sent ✅ Your ${amount} ETH is with Houdini's private routing — about ${outStr}ETH will reach ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel} shortly.`,
+          } as ChatMessage,
+        ])
+        void fetchPortfolioValue()
+
+        // Poll for delivery, same cadence as the standard flow.
+        void (async () => {
+          for (let i = 0; i < 24; i++) {
+            await new Promise((r) => setTimeout(r, 15_000))
+            try {
+              const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
+              if (s?.done) {
+                fetchPortfolioValue()
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Delivered 🎉 The ETH has arrived at ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}.` } as ChatMessage])
+                return
+              }
+              if (s?.failed) {
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Heads up: the private send reported an issue. Reference Houdini order ${String(data.houdiniId).slice(0, 8)}… if you need support.` } as ChatMessage])
+                return
+              }
+            } catch {}
+          }
+          fetchPortfolioValue()
+        })()
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error'
+        setMessages((prev) => [
+          ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'pending' as const } } : m)),
+          { id: `${Date.now()}-error`, role: 'robin', text: `The private send didn't complete: ${rawMessage}` } as ChatMessage,
+        ])
+      }
+      executingActionsRef.current.delete(actionId)
+      return
+    }
+
     if ((action as any).routeVia === 'houdini') {
       try {
         if (!walletAddress || !activeWallet) throw new Error('Please connect your wallet first.')
