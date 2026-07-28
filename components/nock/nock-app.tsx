@@ -83,6 +83,26 @@ function fmtHoudiniAmount(value: number, symbol: string): string {
 // when that key is actually running low (see lib/yield-automation.ts's resolveGasTopUp).
 // Failure-safe: the primary action already succeeded by the time this runs, so a decline
 // or error here is just logged, never surfaced as a failure of what the user asked for.
+// Privy's switchChain() can resolve at the SDK level before an EXTERNAL wallet's own
+// provider session has caught up, after which viem throws a raw "current chain doesn't
+// match" dump on the next send. Poll the provider's own eth_chainId until it agrees.
+// Shared by every flow that signs on a chain other than wherever the wallet happens to be.
+async function ensureWalletOnChain(activeWallet: any, targetChainId: number, chainLabel: string): Promise<any> {
+  await activeWallet.switchChain(targetChainId)
+  const provider = await activeWallet.getEthereumProvider()
+  for (let i = 0; i < 8; i++) {
+    let current: number | null = null
+    try {
+      current = parseInt((await provider.request({ method: 'eth_chainId' })) as string, 16)
+    } catch {
+      current = null
+    }
+    if (current === targetChainId) return provider
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  throw new Error(`Your wallet didn't finish switching to ${chainLabel} — please switch to ${chainLabel} manually in your wallet app, then try again.`)
+}
+
 async function maybeSendGasTopUp(walletClient: any, publicClient: any, walletAddress: string, gasTopUp: { to: string; value: string } | undefined) {
   if (!gasTopUp) return
   try {
@@ -971,9 +991,10 @@ export function NockApp() {
         const depositAddress = data.depositAddress as string | null
         if (!depositAddress) throw new Error('Houdini did not return a deposit address. Nothing was sent.')
 
-        // Sell side is Robinhood-native ETH — make sure we're on that chain, then send.
-        if (!isOnRobinhoodChain) await activeWallet.switchChain(nockChain.id)
-        const provider = await activeWallet.getEthereumProvider()
+        // Sell side is Robinhood-native ETH. Verify the wallet is really there before
+        // sending — a previous cross-chain flow may have left it on Ethereum/Base, and
+        // switchChain alone can resolve before the provider catches up.
+        const provider = await ensureWalletOnChain(activeWallet, nockChain.id, 'Robinhood Chain')
         const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
         const hash = await wc.sendTransaction({
           account: walletAddress as `0x${string}`,
@@ -1063,28 +1084,9 @@ export function NockApp() {
         if (!signChain) throw new Error('That chain isn’t supported yet.')
 
         // Sign on the sell chain (external for funding-in; Robinhood for cash-out — a no-op
-        // switch since the user is already there). Privy's switchChain() can resolve at the
-        // SDK level before an EXTERNAL (non-embedded, e.g. WalletConnect) wallet's own
-        // provider session has actually caught up — viem's sendTransaction below then throws
-        // a raw "current chain doesn't match" dump even though we just successfully awaited
-        // the switch (hit live: a real funding attempt failed this way). Poll the provider's
-        // own eth_chainId directly and give it a moment to catch up before proceeding.
-        await activeWallet.switchChain(sign.chainId)
-        const provider = await activeWallet.getEthereumProvider()
-        let confirmedChainId: number | null = null
-        for (let i = 0; i < 8; i++) {
-          try {
-            const hex = (await provider.request({ method: 'eth_chainId' })) as string
-            confirmedChainId = parseInt(hex, 16)
-          } catch {
-            confirmedChainId = null
-          }
-          if (confirmedChainId === sign.chainId) break
-          await new Promise((r) => setTimeout(r, 400))
-        }
-        if (confirmedChainId !== sign.chainId) {
-          throw new Error(`Your wallet didn't finish switching to ${signChain.name} — please switch to ${signChain.name} manually in your wallet app, then try again.`)
-        }
+        // switch since the user is already there). Verified rather than assumed: see
+        // ensureWalletOnChain for why awaiting switchChain alone isn't enough.
+        const provider = await ensureWalletOnChain(activeWallet, sign.chainId, signChain.name)
         const signWallet = createWalletClient({ account: walletAddress as `0x${string}`, chain: signChain, transport: custom(provider) })
         // Reads (allowance checks, waitForTransactionReceipt) go through a real public RPC,
         // not the embedded wallet's own provider — routing receipt polling through the

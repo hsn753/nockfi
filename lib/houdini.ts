@@ -107,7 +107,24 @@ async function hfetch(path: string, init?: RequestInit): Promise<any> {
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const msg = body?.message || body?.code || `Houdini API returned ${res.status}`
+    // Houdini's validation errors come back as a bare "Validation Failed" message with the
+    // ACTUAL offending field in a side array — surfacing only the message makes them
+    // undebuggable (hit live: three failed private sends that said nothing useful). Pull
+    // whatever detail is present into both the thrown message and the log.
+    const detail = (() => {
+      const arr = body?.errors || body?.details || body?.validationErrors
+      if (Array.isArray(arr) && arr.length) {
+        return arr
+          .map((e: any) => (typeof e === 'string' ? e : [e?.field ?? e?.param ?? e?.path, e?.message ?? e?.msg].filter(Boolean).join(': ')))
+          .filter(Boolean)
+          .join('; ')
+      }
+      if (typeof body?.error === 'string' && body.error !== body?.message) return body.error
+      return ''
+    })()
+    const base = body?.message || body?.code || `Houdini API returned ${res.status}`
+    const msg = detail ? `${base} (${detail})` : base
+    console.error('[houdini] request failed', { path, status: res.status, body: JSON.stringify(body).slice(0, 800) })
     const err = new Error(msg) as Error & { status?: number; body?: unknown }
     err.status = res.status
     err.body = body
