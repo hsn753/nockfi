@@ -174,6 +174,10 @@ const privateMinCache = new Map<string, { min: number; at: number }>()
 const PRIVATE_MIN_TTL_MS = 10 * 60 * 1000
 
 async function probePrivateMin(fromId: string, toId: string, sellSymbol: string): Promise<number | null> {
+  return probePrivateMinByIds(fromId, toId, sellSymbol)
+}
+
+async function probePrivateMinByIds(fromId: string, toId: string, sellSymbol: string): Promise<number | null> {
   const key = `${fromId}->${toId}`
   const hit = privateMinCache.get(key)
   if (hit && Date.now() - hit.at < PRIVATE_MIN_TTL_MS) return hit.min
@@ -182,10 +186,16 @@ async function probePrivateMin(fromId: string, toId: string, sellSymbol: string)
   const probeAmount = sellSymbol.toUpperCase() === 'ETH' ? 0.05 : 100
   try {
     const data = await hfetch(`/quotes?amount=${probeAmount}&from=${fromId}&to=${toId}`)
-    const priv = (data.quotes || []).find((q: any) => q?.type === 'private' && q.min != null)
-    if (!priv) return null
-    privateMinCache.set(key, { min: priv.min, at: Date.now() })
-    return priv.min as number
+    // Minimums vary a LOT between providers in the same pool (0.0047 to 0.0163 ETH seen on
+    // one pair), so take the LOWEST — reporting the first route's min told users they
+    // needed 3x more than they actually did.
+    const mins = (data.quotes || [])
+      .filter((q: any) => q?.type === 'private' && typeof q.min === 'number')
+      .map((q: any) => q.min as number)
+    if (!mins.length) return null
+    const min = Math.min(...mins)
+    privateMinCache.set(key, { min, at: Date.now() })
+    return min
   } catch {
     return null
   }
@@ -247,14 +257,17 @@ export async function getHoudiniQuote(
   // A private quote's `min`/`max` is the accepted deposit range — an out-of-range amount
   // still returns a quote but would strand the deposit, so refuse it up front.
   if (wantPrivate) {
-    const withRange = quotes.find((q) => q.min != null || q.max != null)
+    // Lowest min / highest max across the pool — per-route limits differ widely, and any
+    // single route that accepts the amount is enough for the send to work.
     const sellSymbol = direction === 'in' ? asset.symbol : rh.symbol
-    if (withRange?.min != null && amount < withRange.min) {
-      const suggested = Math.ceil(withRange.min * 1.05 * 1e4) / 1e4
+    const mins = quotes.filter((q) => typeof q.min === 'number').map((q) => q.min as number)
+    const maxes = quotes.filter((q) => typeof q.max === 'number').map((q) => q.max as number)
+    if (mins.length && amount < Math.min(...mins)) {
+      const suggested = Math.ceil(Math.min(...mins) * 1.05 * 1e4) / 1e4
       throw new Error(`that's below the private-routing minimum for this route. Private sends need at least ~${suggested} ${sellSymbol} here.`)
     }
-    if (withRange?.max != null && amount > withRange.max) {
-      throw new Error(`that's above the private-routing maximum for this route (max ~${withRange.max} ${sellSymbol}).`)
+    if (maxes.length && amount > Math.max(...maxes)) {
+      throw new Error(`that's above the private-routing maximum for this route (max ~${Math.max(...maxes)} ${sellSymbol}).`)
     }
   }
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
@@ -275,6 +288,137 @@ export async function getHoudiniQuote(
       ? { chainId: asset.chainId, address: asset.address, decimals: asset.decimals, symbol: asset.symbol }
       : { chainId: rh.chainId, address: rh.address, decimals: rh.decimals, symbol: rh.symbol }
   return { asset, best, all: quotes, sign, robinhood: rh }
+}
+
+// ── Dynamic chain + token resolution (private send to any supported destination) ──────
+// The hardcoded HOUDINI_ASSETS map above covers the four standard fund/cash-out pairs.
+// Private sends can target any of Houdini's ~100 chains and their whole token lists, which
+// is far too many to hardcode — so those resolve live against /chains and /tokens.
+// Both are cached for an hour: chain and token metadata is effectively static (a token id
+// never changes), and the free tier's request budget is small.
+
+export type HoudiniChain = {
+  shortName: string
+  chainId: number | null
+  kind: string
+  memoNeeded: boolean
+  addressValidation: string | null
+}
+
+let chainCache: { chains: HoudiniChain[]; at: number } | null = null
+const METADATA_TTL_MS = 60 * 60 * 1000
+
+export async function getHoudiniChains(): Promise<HoudiniChain[]> {
+  if (chainCache && Date.now() - chainCache.at < METADATA_TTL_MS) return chainCache.chains
+  const data = await hfetch('/chains')
+  const items: any[] = Array.isArray(data) ? data : data?.chains || data?.items || []
+  const chains: HoudiniChain[] = items
+    .filter((c) => c?.shortName)
+    .map((c) => ({
+      shortName: String(c.shortName),
+      chainId: typeof c.chainId === 'number' ? c.chainId : null,
+      kind: String(c.kind || ''),
+      memoNeeded: !!c.memoNeeded,
+      addressValidation: c.addressValidation ? String(c.addressValidation) : null,
+    }))
+  chainCache = { chains, at: Date.now() }
+  return chains
+}
+
+// Common ways users name a chain that don't match Houdini's shortName exactly.
+const CHAIN_ALIASES: Record<string, string> = {
+  eth: 'ethereum', mainnet: 'ethereum', ether: 'ethereum', etherium: 'ethereum', erc20: 'ethereum',
+  arb: 'arbitrum', arbitrumone: 'arbitrum',
+  matic: 'polygon', pol: 'polygon',
+  op: 'optimism',
+  avax: 'avalanche',
+  sol: 'solana',
+  bnb: 'bsc', binance: 'bsc', bep20: 'bsc',
+  btc: 'bitcoin',
+  xmr: 'monero',
+  rh: 'Robinhood', robinhood: 'Robinhood', robinhoodchain: 'Robinhood',
+}
+
+// Resolve a user-typed chain name to a Houdini chain. Matches the alias table first, then
+// an exact (case-insensitive) shortName match — never a fuzzy/partial match, which would
+// happily send funds to the wrong network.
+export async function resolveHoudiniChain(name: string): Promise<HoudiniChain | null> {
+  const cleaned = name.trim().toLowerCase().replace(/[\s_-]+/g, '')
+  const target = (CHAIN_ALIASES[cleaned] || cleaned).toLowerCase()
+  const chains = await getHoudiniChains()
+  return chains.find((c) => c.shortName.toLowerCase() === target) ?? null
+}
+
+type ResolvedToken = { tokenId: string; symbol: string; decimals: number; address: string | null }
+const tokenCache = new Map<string, { token: ResolvedToken | null; at: number }>()
+
+// Resolve (chain, symbol) to a Houdini token id. Uses the `search` endpoint and takes an
+// EXACT case-insensitive symbol match — `search` is fuzzy (a USDC search on arbitrum also
+// returns USDC.e and ~500 others), and picking a near-match would send the wrong asset.
+// Native coins come back with address:null and are only reachable this way, not via the
+// address-filtered lookup.
+export async function resolveHoudiniToken(chainShortName: string, symbol: string): Promise<ResolvedToken | null> {
+  const key = `${chainShortName.toLowerCase()}:${symbol.toUpperCase()}`
+  const hit = tokenCache.get(key)
+  if (hit && Date.now() - hit.at < METADATA_TTL_MS) return hit.token
+  let token: ResolvedToken | null = null
+  try {
+    const data = await hfetch(`/tokens?chain=${encodeURIComponent(chainShortName)}&search=${encodeURIComponent(symbol)}`)
+    const list: any[] = data?.tokens || []
+    const exact = list.find((t) => String(t?.symbol || '').toUpperCase() === symbol.toUpperCase())
+    if (exact?.id) {
+      token = {
+        tokenId: String(exact.id),
+        symbol: String(exact.symbol),
+        decimals: Number(exact.decimals ?? 18),
+        address: exact.address ? String(exact.address) : null,
+      }
+    }
+  } catch (err) {
+    console.error('[houdini] token resolution failed', { chainShortName, symbol, err: (err as Error)?.message })
+  }
+  tokenCache.set(key, { token, at: Date.now() })
+  return token
+}
+
+// Validate a recipient against the DESTINATION chain's own address rules (Houdini publishes
+// a regex per chain) — an EVM-shaped check would wave through a bad Solana/Bitcoin address.
+export function isValidHoudiniAddress(chain: HoudiniChain, address: string): boolean {
+  if (!chain.addressValidation) return address.trim().length > 0
+  try {
+    return new RegExp(chain.addressValidation).test(address.trim())
+  } catch {
+    return address.trim().length > 0
+  }
+}
+
+// Private quote between two arbitrary Houdini token ids (the generalized path used by
+// private sends). Mirrors getHoudiniQuote's private branch, including the lowest-minimum
+// handling, but without the fixed asset map.
+export async function getHoudiniPrivateQuote(params: {
+  fromTokenId: string
+  toTokenId: string
+  amount: number
+  sellSymbol: string
+  country?: string
+}): Promise<HoudiniRoute> {
+  const { fromTokenId, toTokenId, amount, sellSymbol, country } = params
+  const data = await hfetch(`/quotes?amount=${amount}&from=${fromTokenId}&to=${toTokenId}`)
+  const raw: HoudiniRoute[] = (data.quotes || []).filter((q: any) => q && q.quoteId && (q.netAmountOut ?? q.amountOut) != null)
+  let quotes = raw.filter((q) => q.type === 'private')
+  if (country) {
+    quotes = quotes.filter((q) => !(q.restrictedCountries || []).map((c) => c.toUpperCase()).includes(country.toUpperCase()))
+  }
+  if (!quotes.length) {
+    const probedMin = await probePrivateMinByIds(fromTokenId, toTokenId, sellSymbol)
+    if (probedMin != null && amount < probedMin) {
+      const suggested = Math.ceil(probedMin * 1.05 * 1e4) / 1e4
+      throw new Error(`that's below the private-routing minimum for this route. It needs at least ~${suggested} ${sellSymbol} (you asked for ${amount}).`)
+    }
+    throw new Error(`private routing isn't available for this pair. Houdini's private tier settles through exchanges, so it only covers assets those exchanges list.`)
+  }
+  const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
+  return [...quotes].sort((a, b) => out(b) - out(a))[0]
 }
 
 export type HoudiniOrder = {

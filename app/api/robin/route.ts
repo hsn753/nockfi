@@ -6,7 +6,7 @@ import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balan
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { lookupLighterAccount, getLighterAccountBalance, resolveLighterMarket } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
-import { houdiniEnabled, getHoudiniQuote, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
+import { houdiniEnabled, getHoudiniQuote, getHoudiniPrivateQuote, resolveHoudiniChain, resolveHoudiniToken, isValidHoudiniAddress, ROBINHOOD_ETH, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
@@ -754,22 +754,36 @@ async function handlePOST(request: Request) {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
         const wantsPrivate = /\b(private(ly)?|anonymous(ly)?|anon)\b/i.test(txt)
-        const recipientMatch = txt.match(/0x[a-fA-F0-9]{40}/)
-        if (wantsPrivate && recipientMatch) {
-          const recipient = recipientMatch[0] as `0x${string}`
-          const isEth = /\beth\b/i.test(txt) || /\bether\w*\b/i.test(txt)
+        // Any address-shaped token — validated below against the DESTINATION chain's own
+        // rules, so this covers Solana/Bitcoin recipients too, not just EVM.
+        const addressCandidates: string[] = [
+          ...(txt.match(/0x[a-fA-F0-9]{40}/g) ?? []),
+          ...(txt.match(/\b[A-Za-z0-9]{25,64}\b/g) ?? []),
+        ]
+        if (wantsPrivate && addressCandidates.length) {
           const mentionsUsdg = /\busdg\b/i.test(txt)
-          const chain = /\bbase\b/i.test(txt) ? 'base' : 'ethereum'
-          const chainLabel = chain === 'base' ? 'Base' : 'Ethereum'
-
-          if (mentionsUsdg || !isEth) {
-            // Be specific about WHY rather than a generic refusal — this is a real product
-            // limit (exchange listings), not a NockFi bug, and the user can act on it.
+          if (mentionsUsdg) {
             return NextResponse.json({
-              text: mentionsUsdg
-                ? "Private sends aren't available for USDG. Houdini's private routing goes through exchanges, and no exchange lists USDG, so there's no private route to use. Private sending works with ETH: try \"privately send 0.05 ETH to 0x…\"."
-                : 'Private sends currently work with ETH only. Try "privately send 0.05 ETH to 0x…".',
+              text: "Private sends aren't available for USDG. Houdini's private routing settles through exchanges, and no exchange lists USDG, so there's no private route to use. The sell side has to be your ETH: try \"privately send 0.02 ETH to 0x… as USDC on arbitrum\".",
             })
+          }
+
+          // DESTINATION CHAIN: "... on <chain>" / "to <chain>". Resolved against Houdini's
+          // live chain list (~100), defaulting to Ethereum when unnamed.
+          const chainWord = txt.match(/\b(?:on|to|via)\s+([A-Za-z][A-Za-z0-9\s_-]{1,20}?)(?:\s+(?:chain|network)\b|\s*$|[.,!?])/i)?.[1]
+          let destChain = chainWord ? await resolveHoudiniChain(chainWord) : null
+          if (!destChain) destChain = await resolveHoudiniChain('ethereum')
+          if (!destChain) return NextResponse.json({ text: "I couldn't reach Houdini's network list just now. Try again in a moment." })
+          if (destChain.memoNeeded) {
+            // These chains require a destination memo/tag we have no way to collect, and
+            // sending without one loses the funds at the exchange.
+            return NextResponse.json({ text: `${destChain.shortName} needs a destination memo/tag, which I can't collect yet, so I won't send there. Pick a chain that doesn't use memos (Ethereum, Base, Arbitrum, Polygon, Optimism, BSC, Avalanche, Solana).` })
+          }
+          const chainLabel = destChain.shortName
+
+          const recipient = addressCandidates.find((c) => isValidHoudiniAddress(destChain!, c))
+          if (!recipient) {
+            return NextResponse.json({ text: `That doesn't look like a valid ${chainLabel} address. Double-check the recipient and try again.` })
           }
           // Delivering back to the sender's own address leaks exactly what the private
           // route exists to hide, and costs a premium for nothing. Refuse rather than
@@ -783,7 +797,7 @@ async function handlePOST(request: Request) {
           const dollarMatch = txt.match(/\$\s*(\d+(?:\.\d+)?)/)
           // Exclude the recipient address from amount matching — its digits would otherwise
           // be parsed as the amount.
-          const amountText = txt.replace(recipientMatch[0], ' ')
+          const amountText = txt.replace(recipient, ' ')
           const m = dollarMatch || amountText.match(/(\d+(?:\.\d+)?)\s*(?:eth)?/i)
           let amount = m ? parseFloat(m[1]) : null
           let ethPriceNote = ''
@@ -819,11 +833,31 @@ async function handlePOST(request: Request) {
             }
           }
 
+          // DESTINATION TOKEN: "... as USDC" / "... in USDC" / "... to USDC on arbitrum".
+          // Defaults to ETH (the like-for-like send). Resolved live against Houdini's token
+          // list for that chain, so any listed asset works, not a hardcoded few.
+          const tokenWord = txt.match(/\b(?:as|in|into|receive|for)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/i)?.[1]
+          const destSymbol = (tokenWord || 'ETH').toUpperCase()
+          const destToken = await resolveHoudiniToken(destChain.shortName, destSymbol)
+          if (!destToken) {
+            return NextResponse.json({
+              text: `I couldn't find ${destSymbol} on ${chainLabel} in Houdini's token list. Name the destination asset explicitly, e.g. "privately send ${amount} ETH to ${recipient.slice(0, 10)}… as USDC on ${chainLabel}".`,
+            })
+          }
+          const sellToken = ROBINHOOD_ETH
+
           const country =
             request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
-          // Sell side is the user's ETH on Robinhood; buy side is ETH on the external chain,
-          // delivered to `recipient`. getHoudiniQuote enforces the private tier's min/max.
-          const { asset, best } = await getHoudiniQuote(`${chain}:ETH`, amount, 'out', country || undefined, 'ETH', 'private')
+          // Sell side is always the user's ETH on Robinhood Chain (the only asset they hold
+          // here that any exchange lists); buy side is whatever they asked for, delivered to
+          // `recipient`. The quote helper enforces the private tier's own min/max.
+          const best = await getHoudiniPrivateQuote({
+            fromTokenId: sellToken.tokenId,
+            toTokenId: destToken.tokenId,
+            amount,
+            sellSymbol: 'ETH',
+            country: country || undefined,
+          })
           const out = best.netAmountOut ?? best.amountOut
           const outUsd = best.amountOutUsd ?? 0
           // Private routes report a tiny `duration`/`eta` (4-11 SECONDS) that is NOT
@@ -833,28 +867,33 @@ async function handlePOST(request: Request) {
           // failed (hit live). Quote an honest range instead of a precise wrong number.
           const etaLabel = 'usually a few minutes'
           const sellLabel = `${fmtHoudiniAmount(amount, 'ETH')} ETH`
-          const outStr = fmtHoudiniAmount(out, 'ETH')
-          const headline = `Privately send ${sellLabel} to ${recipient.slice(0, 10)}…${recipient.slice(-6)}`
+          const outStr = fmtHoudiniAmount(out, destToken.symbol)
+          const recvLabel = `${outStr} ${destToken.symbol}`
+          const shortRecipient = `${recipient.slice(0, 10)}…${recipient.slice(-6)}`
+          const headline = `Privately send ${sellLabel} to ${shortRecipient}`
           action = {
             id: `act-${Date.now()}`,
             agent: 'swap',
             action: headline,
-            detail: `Sends ${sellLabel} from your Robinhood Chain wallet through Houdini's private routing, delivering ~${outStr} ETH to ${recipient} on ${chainLabel}. Routed through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address; there is no smart contract to approve. Transfers cannot be reversed, so verify the recipient address.`,
+            detail: `Sends ${sellLabel} from your Robinhood Chain wallet through Houdini's private routing, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. Settled through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address; there is no smart contract to approve. Delivery is not instant and costs a little more than a normal bridge. Transfers cannot be reversed, so verify the recipient address.`,
             metrics: [
               { label: 'You send', value: `${sellLabel} on Robinhood` },
-              { label: 'Recipient gets', value: `~${outStr} ETH on ${chainLabel}` },
-              { label: 'To', value: `${recipient.slice(0, 10)}…${recipient.slice(-6)}` },
+              { label: 'Recipient gets', value: `~${recvLabel} on ${chainLabel}` },
+              { label: 'To', value: shortRecipient },
               { label: 'Routing', value: 'Private' },
               { label: 'ETA', value: etaLabel },
             ],
             status: 'pending',
-            outcome: { title: 'Sent privately', value: outUsd > 0 ? `~$${outUsd.toFixed(2)}` : `${outStr} ETH`, meta: `${outStr} ETH on ${chainLabel}`, activityTitle: headline },
+            outcome: { title: 'Sent privately', value: outUsd > 0 ? `~$${outUsd.toFixed(2)}` : recvLabel, meta: `${recvLabel} on ${chainLabel}`, activityTitle: headline },
             routeVia: 'houdini-private',
-            houdiniAssetKey: `${chain}:ETH`,
             houdiniAmount: String(amount),
-            houdiniDirection: 'out',
-            houdiniRobinhoodAsset: 'ETH',
             houdiniRecipient: recipient,
+            // Resolved token ids travel with the card so Confirm re-quotes the SAME pair —
+            // re-deriving them from prose at confirm time could land on a different asset.
+            houdiniFromTokenId: sellToken.tokenId,
+            houdiniToTokenId: destToken.tokenId,
+            houdiniDestSymbol: destToken.symbol,
+            houdiniDestChain: chainLabel,
             verified: true,
           } as any
           return NextResponse.json({

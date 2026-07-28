@@ -965,10 +965,12 @@ export function NockApp() {
     if ((action as any).routeVia === 'houdini-private') {
       try {
         if (!walletAddress || !activeWallet || !publicClient) throw new Error('Please connect your wallet first.')
-        const assetKey = (action as any).houdiniAssetKey as string
         const amount = (action as any).houdiniAmount as string
         const recipient = (action as any).houdiniRecipient as string
-        const destLabel = String(assetKey || '').startsWith('base') ? 'Base' : 'Ethereum'
+        const fromTokenId = (action as any).houdiniFromTokenId as string
+        const toTokenId = (action as any).houdiniToTokenId as string
+        const destSymbol = ((action as any).houdiniDestSymbol as string) || 'ETH'
+        const destLabel = ((action as any).houdiniDestChain as string) || 'Ethereum'
 
         const { identityToken, accessToken } = await getAuthTokens()
         const res = await fetch('/api/houdini/create', {
@@ -979,11 +981,13 @@ export function NockApp() {
             'X-Privy-Access-Token': accessToken ?? '',
           },
           body: JSON.stringify({
-            assetKey, direction: 'out', amount,
+            direction: 'out', amount,
             addressFrom: walletAddress,
             addressTo: recipient, // the RECIPIENT, deliberately not the sender
             robinhoodAsset: 'ETH',
             routeType: 'private',
+            // Re-quote the exact pair the preview was built from.
+            fromTokenId, toTokenId,
           }),
         })
         const data = await res.json()
@@ -1006,13 +1010,13 @@ export function NockApp() {
         if (rcpt.status !== 'success') throw new Error('The transfer reverted on-chain — nothing was sent (only gas was spent).')
 
         const outEst = Number(data.amountOut)
-        const outStr = isFinite(outEst) ? `${fmtHoudiniAmount(outEst, 'ETH')} ` : ''
+        const outStr = isFinite(outEst) ? `about ${fmtHoudiniAmount(outEst, destSymbol)} ${destSymbol}` : `the ${destSymbol}`
         setMessages((prev) => [
           ...prev.map((m) => (m.role === 'robin' && m.action && m.action.id === actionId ? { ...m, action: { ...m.action, status: 'executed' as const } } : m)),
           {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Sent ✅ Your ${amount} ETH is with Houdini's private routing — about ${outStr}ETH will reach ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel} shortly.`,
+            text: `Sent ✅ Your ${amount} ETH is with Houdini's private routing — ${outStr} will reach ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}. It settles through an exchange, so give it a few minutes.`,
           } as ChatMessage,
         ])
         void fetchPortfolioValue()
@@ -1028,7 +1032,7 @@ export function NockApp() {
               const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
               if (s?.done) {
                 fetchPortfolioValue()
-                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Delivered 🎉 The ETH has arrived at ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}.` } as ChatMessage])
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Delivered 🎉 The ${destSymbol} has arrived at ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}.` } as ChatMessage])
                 return
               }
               if (s?.failed) {
