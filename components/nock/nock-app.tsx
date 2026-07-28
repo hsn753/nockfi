@@ -1017,10 +1017,13 @@ export function NockApp() {
         ])
         void fetchPortfolioValue()
 
-        // Poll for delivery, same cadence as the standard flow.
+        // Poll for delivery. Deliberately a LONGER window than the standard bridge: a
+        // private route settles through an exchange, and a real send took ~10 minutes —
+        // past the standard flow's 6-minute window, so the success message would never
+        // have fired on a transfer that actually worked. 30 min at 20s.
         void (async () => {
-          for (let i = 0; i < 24; i++) {
-            await new Promise((r) => setTimeout(r, 15_000))
+          for (let i = 0; i < 90; i++) {
+            await new Promise((r) => setTimeout(r, 20_000))
             try {
               const s = await fetch(`/api/houdini/status?houdiniId=${encodeURIComponent(data.houdiniId)}`).then((r) => r.json())
               if (s?.done) {
@@ -1029,11 +1032,14 @@ export function NockApp() {
                 return
               }
               if (s?.failed) {
-                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Heads up: the private send reported an issue. Reference Houdini order ${String(data.houdiniId).slice(0, 8)}… if you need support.` } as ChatMessage])
+                setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `Heads up: the private send reported an issue. Your funds are with Houdini, not lost. Reference order ${String(data.houdiniId)} if you need support.` } as ChatMessage])
                 return
               }
             } catch {}
           }
+          // Timed out watching — say so plainly and hand over the reference, rather than
+          // going silent and leaving the user unsure whether it worked.
+          setMessages((prev) => [...prev, { id: `${Date.now()}-hp`, role: 'robin', text: `I've stopped watching this private send, but it may still land — exchange-routed transfers can take a while. Reference order ${String(data.houdiniId)} if it doesn't arrive.` } as ChatMessage])
           fetchPortfolioValue()
         })()
       } catch (error) {

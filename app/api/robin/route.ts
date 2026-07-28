@@ -826,8 +826,12 @@ async function handlePOST(request: Request) {
           const { asset, best } = await getHoudiniQuote(`${chain}:ETH`, amount, 'out', country || undefined, 'ETH', 'private')
           const out = best.netAmountOut ?? best.amountOut
           const outUsd = best.amountOutUsd ?? 0
-          const etaSec = best.eta ?? best.duration ?? 300
-          const etaLabel = etaSec < 60 ? '< 1 min' : `~${Math.round(etaSec / 60)} min`
+          // Private routes report a tiny `duration`/`eta` (4-11 SECONDS) that is NOT
+          // time-to-delivery: they settle through an exchange, so the real wait is the
+          // deposit confirming, the exchange processing, then a withdrawal on the far side.
+          // Showing the raw number as "< 1 min" made a normal in-flight transfer look
+          // failed (hit live). Quote an honest range instead of a precise wrong number.
+          const etaLabel = 'usually a few minutes'
           const sellLabel = `${fmtHoudiniAmount(amount, 'ETH')} ETH`
           const outStr = fmtHoudiniAmount(out, 'ETH')
           const headline = `Privately send ${sellLabel} to ${recipient.slice(0, 10)}…${recipient.slice(-6)}`
@@ -854,7 +858,7 @@ async function handlePOST(request: Request) {
             verified: true,
           } as any
           return NextResponse.json({
-            text: `Here's your private send preview.${ethPriceNote} Press Confirm to sign one transfer to Houdini's deposit address; they deliver to the recipient on ${chainLabel} in ${etaLabel}. Private routing costs a bit more than a direct bridge, which is the tradeoff for breaking the on-chain link. Double-check the recipient address, transfers can't be reversed.`,
+            text: `Here's your private send preview.${ethPriceNote} Press Confirm to sign one transfer to Houdini's deposit address; they then deliver to the recipient on ${chainLabel}, ${etaLabel}. Because it settles through an exchange rather than a direct bridge, delivery is not instant, and it costs a bit more than a normal bridge. That is the tradeoff for breaking the on-chain link. Double-check the recipient address, transfers can't be reversed.`,
             action,
           })
         }

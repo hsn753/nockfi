@@ -68,6 +68,14 @@ async function handlePOST(req: NextRequest) {
     if (routeType === 'private' && !order.depositAddress) {
       return NextResponse.json({ error: 'Houdini did not return a deposit address for this private route. Nothing was sent; please try again.' }, { status: 502 })
     }
+    // Log the order id: once a user has deposited, this is the ONLY handle for tracing a
+    // transfer that hasn't landed, and nothing else server-side records it (a real support
+    // dead end the first time someone asked "where are my funds?"). No secrets here — the
+    // addresses are the user's own and the id is what Houdini's own support asks for.
+    console.log('[/api/houdini/create] order created', JSON.stringify({
+      houdiniId: order.houdiniId, routeType, direction, assetKey, robinhoodAsset,
+      amount, addressFrom, addressTo, depositAddress: order.depositAddress ?? null,
+    }))
     return NextResponse.json({
       houdiniId: order.houdiniId,
       status: order.status,
