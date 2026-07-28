@@ -11,6 +11,21 @@ export const OFFICIAL_STOCK_DEPLOYER = '0x4783C67b63dE2B358Ac5951a7D41F47A38F3C0
 const BLOCKSCOUT_BASE = 'https://robinhoodchain.blockscout.com/api/v2'
 const NAME_SUFFIX = '• Robinhood Token'
 
+// Plain fetch() has NO default timeout — a slow/hanging Blockscout or DexScreener
+// response can stall the caller indefinitely. This registry+pricing chain sits directly
+// behind every wallet-connect balances/yield/collateral read, and its caches reset on
+// every deploy — a cold cache hit right after a deploy paying an unbounded external-API
+// stall is exactly what surfaced as "connecting a wallet takes 1-2 minutes" in prod.
+async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export type StockToken = {
   symbol: string
   name: string // company name, suffix stripped
@@ -92,7 +107,7 @@ async function fetchVerifiedRegistry(): Promise<{ symbol: string; name: string; 
   const discovered: { symbol: string; name: string; address: string }[] = []
 
   try {
-    const res = await fetch(`${BLOCKSCOUT_BASE}/search?q=${encodeURIComponent('Robinhood Token')}`)
+    const res = await fetchWithTimeout(`${BLOCKSCOUT_BASE}/search?q=${encodeURIComponent('Robinhood Token')}`, 5000)
     if (res.ok) {
       const data = (await res.json()) as {
         items?: { type: string; name?: string; symbol?: string; address_hash?: string }[]
@@ -110,7 +125,7 @@ async function fetchVerifiedRegistry(): Promise<{ symbol: string; name: string; 
       // zero candidates reach this point, so the loop costs nothing.
       for (const c of candidates) {
         try {
-          const addrRes = await fetch(`${BLOCKSCOUT_BASE}/addresses/${c.address_hash}`)
+          const addrRes = await fetchWithTimeout(`${BLOCKSCOUT_BASE}/addresses/${c.address_hash}`, 5000)
           if (!addrRes.ok) continue
           const addr = (await addrRes.json()) as { creator_address_hash?: string; token?: { decimals?: string } }
           if (addr.creator_address_hash?.toLowerCase() === OFFICIAL_STOCK_DEPLOYER.toLowerCase()) {
@@ -154,32 +169,41 @@ type DexScreenerPair = {
 }
 
 // Batch price lookup — DexScreener accepts up to 30 comma-separated addresses per call.
+// Batches are independent, so fetched in parallel (was a sequential for-loop — with ~50
+// tokens that's 2 batches run one after another for no reason, doubling the exposure to a
+// slow response).
 async function fetchPrices(addresses: string[]): Promise<Map<string, { priceUsd: number | null; liquidityUsd: number; volume24hUsd: number }>> {
   const out = new Map<string, { priceUsd: number | null; liquidityUsd: number; volume24hUsd: number }>()
-  for (let i = 0; i < addresses.length; i += 30) {
-    const batch = addresses.slice(i, i + 30)
+  const batches: string[][] = []
+  for (let i = 0; i < addresses.length; i += 30) batches.push(addresses.slice(i, i + 30))
+
+  const results = await Promise.all(batches.map(async (batch) => {
     try {
-      const res = await fetch(`https://api.dexscreener.com/tokens/v1/robinhood/${batch.join(',')}`)
-      if (!res.ok) continue
+      const res = await fetchWithTimeout(`https://api.dexscreener.com/tokens/v1/robinhood/${batch.join(',')}`, 6000)
+      if (!res.ok) return []
       const pairs = (await res.json()) as DexScreenerPair[]
-      if (!Array.isArray(pairs)) continue
-      for (const p of pairs) {
-        const key = p.baseToken.address.toLowerCase()
-        const existing = out.get(key)
-        const liquidity = p.liquidity?.usd ?? 0
-        // A token can have several pools; keep the deepest one's price, but sum volume.
-        if (!existing || liquidity > existing.liquidityUsd) {
-          out.set(key, {
-            priceUsd: p.priceUsd ? parseFloat(p.priceUsd) : null,
-            liquidityUsd: liquidity,
-            volume24hUsd: (existing?.volume24hUsd ?? 0) + (p.volume?.h24 ?? 0),
-          })
-        } else {
-          existing.volume24hUsd += p.volume?.h24 ?? 0
-        }
-      }
+      return Array.isArray(pairs) ? pairs : []
     } catch {
       // Price enrichment is best-effort; the registry itself is the critical part.
+      return []
+    }
+  }))
+
+  for (const pairs of results) {
+    for (const p of pairs) {
+      const key = p.baseToken.address.toLowerCase()
+      const existing = out.get(key)
+      const liquidity = p.liquidity?.usd ?? 0
+      // A token can have several pools; keep the deepest one's price, but sum volume.
+      if (!existing || liquidity > existing.liquidityUsd) {
+        out.set(key, {
+          priceUsd: p.priceUsd ? parseFloat(p.priceUsd) : null,
+          liquidityUsd: liquidity,
+          volume24hUsd: (existing?.volume24hUsd ?? 0) + (p.volume?.h24 ?? 0),
+        })
+      } else {
+        existing.volume24hUsd += p.volume?.h24 ?? 0
+      }
     }
   }
   return out

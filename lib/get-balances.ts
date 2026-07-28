@@ -20,7 +20,7 @@ const TOKEN_NAMES: Record<string, string> = {
 // which is tracked separately via getBalance rather than an ERC-20 read.
 const TOKENS = Object.entries(SWAP_TOKENS)
   .filter(([symbol, t]) => symbol !== 'ETH' && t.address.toLowerCase() !== NATIVE_ETH_ADDRESS.toLowerCase())
-  .map(([symbol, t]) => ({ symbol, name: TOKEN_NAMES[symbol] || symbol, address: t.address as `0x${string}` }))
+  .map(([symbol, t]) => ({ symbol, name: TOKEN_NAMES[symbol] || symbol, address: t.address as `0x${string}`, decimals: t.decimals }))
 
 function fmtBalance(raw: bigint, decimals: number): string {
   const n = parseFloat(formatUnits(raw, decimals))
@@ -42,14 +42,18 @@ export async function fetchWalletBalances(address: `0x${string}`): Promise<Balan
   const client = getReadClient()
 
   try {
-    const [[ethRaw, ...erc20Results], prices, stockEntries] = await Promise.all([
-      Promise.all([
-        client.getBalance({ address }),
-        ...TOKENS.flatMap(({ address: tokenAddr }) => [
-          client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [address] }),
-          client.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'decimals' }),
-        ]),
-      ]),
+    const [ethRaw, erc20Balances, prices, stockEntries] = await Promise.all([
+      client.getBalance({ address }),
+      // One multicall for every tracked token's balance, not N individual round-trips —
+      // decimals are already known statically (SWAP_TOKENS) so there's no need to read
+      // them on-chain at all, they never change for an existing token. Fewer individual
+      // RPC calls means fewer independent chances to hit a slow/rate-limited response.
+      client.multicall({
+        contracts: TOKENS.map(({ address: tokenAddr }) => ({
+          address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf' as const, args: [address],
+        })),
+        allowFailure: true,
+      }),
       getReferencePrices().catch((err) => {
         console.error('[get-balances] Price fetch failed:', err)
         return {} as Record<string, number>
@@ -67,7 +71,7 @@ export async function fetchWalletBalances(address: `0x${string}`): Promise<Balan
 
     console.log('[get-balances] Raw results received')
 
-    return [...buildBalanceResults(ethRaw, erc20Results, prices), ...stockEntries]
+    return [...buildBalanceResults(ethRaw, erc20Balances, prices), ...stockEntries]
   } catch (err) {
     console.error('[get-balances] Error during fetch:', err)
     throw err
@@ -108,16 +112,19 @@ async function fetchStockBalances(
   })
 }
 
-function buildBalanceResults(ethRaw: any, erc20Results: any[], prices: Record<string, number>): BalanceEntry[] {
-
+function buildBalanceResults(
+  ethRaw: bigint,
+  erc20Balances: { status: string; result?: unknown }[],
+  prices: Record<string, number>,
+): BalanceEntry[] {
   const tokenBalances = TOKENS.map((t, i) => {
-    const raw = erc20Results[i * 2] as bigint
-    const dec = Number(erc20Results[i * 2 + 1])
-    return { symbol: t.symbol, name: t.name, amount: fmtBalance(raw, dec), usdValue: usdValueFor(raw, dec, prices[t.symbol]) }
+    const r = erc20Balances[i]
+    const raw = (r.status === 'success' ? (r.result as bigint) : BigInt(0))
+    return { symbol: t.symbol, name: t.name, amount: fmtBalance(raw, t.decimals), usdValue: usdValueFor(raw, t.decimals, prices[t.symbol]) }
   })
 
   return [
-    { symbol: 'ETH', name: 'Ether', amount: fmtBalance(ethRaw as bigint, 18), usdValue: usdValueFor(ethRaw as bigint, 18, prices.ETH) },
+    { symbol: 'ETH', name: 'Ether', amount: fmtBalance(ethRaw, 18), usdValue: usdValueFor(ethRaw, 18, prices.ETH) },
     ...tokenBalances,
   ]
 }

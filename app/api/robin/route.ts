@@ -14,7 +14,8 @@ import { requireAuthenticatedWallet, AuthError } from '@/lib/auth-server'
 import { getYieldOptions, buildYieldDeposit } from '@/lib/get-yield-data'
 import { getMorphoMarketData, getUserMarketPositions, buildMarketSupply, buildMarketWithdraw, buildSetAuthorizationTx, isAutomationAuthorized, MORPHO_MARKETS, type MorphoMarketKey } from '@/lib/get-morpho-markets'
 import { getAutomationAddress, yieldAutomationEnabled, resolveGasTopUp } from '@/lib/yield-automation'
-import { disableYieldAutomationByAddress } from '@/lib/db/yield-automation'
+import { disableYieldAutomationByAddress, getYieldAutomationSettings } from '@/lib/db/yield-automation'
+import { getLiquidationProtectionSettings } from '@/lib/db/liquidation-protection'
 import { createCondition, getConditionsForWallet, deleteCondition, deleteConditionsBySymbol } from '@/lib/db/conditions'
 import { setRebalanceTarget, getRebalanceSettings, disableRebalanceByAddress, type RebalanceTarget } from '@/lib/db/portfolio-rebalance'
 import { getPerpsMarkets } from '@/lib/get-perps-data'
@@ -273,6 +274,8 @@ CRITICAL — how perps funds actually move (do NOT get this wrong, it has confus
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
+Nock has REAL, already-built server-side automation: yield auto-switch, liquidation protection, portfolio rebalance, and price/LTV alerts + stop-loss/auto-buy conditions. When the user asks whether any of these is active/on/enabled for them ("is automatic yield active", "is auto-switch on", "is liquidation protection enabled", "is my portfolio rebalancing", "do I have any automation running"), call get_automation_status and answer from its real data — NEVER say automation isn't part of this chat's capabilities or isn't supported; that would be false. If something is off, tell them plainly how to turn it on (Settings for yield/liquidation-protection toggles, or the relevant chat phrasing for rebalance/conditions).
+
 If the user asks to set, raise, lower, or remove their spend limit: tell them plainly that's done from Settings, not through chat — Robin can only report the current limit, not change it. Do not invent a confirmation that a limit was changed.
 
 If a swap or yield deposit gets refused for exceeding the user's spend limit (the tool result will say so explicitly): relay that reason plainly, and mention they can adjust it from Settings if they want to allow it. Do not retry with a smaller amount unless the user explicitly asks for one.
@@ -477,6 +480,18 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'get_vault_status',
       description: 'Returns the user\'s real, currently-set spend limit (or "no limit set"), plus the automatic protections already in place on every proposed action. Call this whenever the user asks about their guardrails, spend limits, permissions, or what Vault Agent does.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_automation_status',
+      description: 'Returns whether each server-side automation feature is currently ON for this wallet: yield auto-switch (moves supplied USDG to the best-APY Morpho market automatically), liquidation protection (auto-repays a stock-collateral loan from this wallet\'s own yield position if it nears liquidation), portfolio rebalance (keeps a target asset mix by trimming/topping-up automatically), and any active price/LTV alerts or stop-loss/auto-buy conditions. Call this whenever the user asks "is automatic yield active", "is auto-switch on", "is liquidation protection enabled", "is my portfolio rebalancing", or similar status questions about these features — these are REAL, live, already-built features, never tell the user automation isn\'t supported.',
       parameters: {
         type: 'object',
         properties: {},
@@ -2525,6 +2540,45 @@ async function handlePOST(request: Request) {
             } catch (err) {
               console.error('[robin] get_vault_status error:', err)
               result = { error: 'Could not read guardrail settings. Try again in a moment.' }
+            }
+          }
+
+        } else if (functionName === 'get_automation_status') {
+          if (!walletAddress || !isAddress(walletAddress)) {
+            result = { error: 'No wallet connected. Ask the user to connect their wallet first.' }
+          } else {
+            try {
+              const [yieldSettings, liqSettings, rebalanceSettings, conditions] = await Promise.all([
+                getYieldAutomationSettings(walletAddress).catch(() => null),
+                getLiquidationProtectionSettings(walletAddress).catch(() => null),
+                getRebalanceSettings(walletAddress).catch(() => null),
+                getConditionsForWallet(walletAddress, true).catch(() => []),
+              ])
+              result = {
+                yieldAutoSwitch: {
+                  enabled: yieldSettings?.enabled ?? false,
+                  note: yieldSettings?.enabled
+                    ? `On — moves supplied USDG to whichever Morpho market pays at least ${yieldSettings.minApyDeltaPct}% more, checked every few hours.`
+                    : 'Off. Turn on from Settings, or a yield deposit card can bundle the one-time authorization.',
+                },
+                liquidationProtection: {
+                  enabled: liqSettings?.enabled ?? false,
+                  note: liqSettings?.enabled
+                    ? 'On — auto-repays a stock-collateral loan from this wallet\'s own yield position if it nears liquidation.'
+                    : 'Off. Turn on from Settings (Liquidation Protection section).',
+                },
+                portfolioRebalance: {
+                  enabled: !!rebalanceSettings,
+                  targets: rebalanceSettings?.targets ?? null,
+                  note: rebalanceSettings ? 'On — say "show my target" for the current mix.' : 'Off. Say e.g. "rebalance my portfolio to 60% USDG 40% WETH" to set one up.',
+                },
+                activeAlertsAndConditions: conditions.map((c) => ({
+                  kind: c.kind, symbol: c.symbol, comparator: c.comparator, threshold: c.threshold, action: c.action,
+                })),
+              }
+            } catch (err) {
+              console.error('[robin] get_automation_status error:', err)
+              result = { error: 'Could not read automation settings. Try again in a moment.' }
             }
           }
 
