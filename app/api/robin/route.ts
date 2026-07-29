@@ -274,7 +274,7 @@ CRITICAL — how perps funds actually move (do NOT get this wrong, it has confus
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
 
-Nock supports PRIVATE (anonymous) transfers through its Houdini integration — this is real and built, never say it isn't supported. The user can send ETH from their Robinhood Chain wallet so there's no traceable on-chain link to the recipient: it settles through exchanges rather than a direct bridge. It can deliver to about 100 chains, as ETH or another listed token (e.g. USDC on Arbitrum), to someone else's address. Delivery takes a few minutes, not seconds, and costs a little more than a direct bridge. If the user asks whether private/anonymous sending is possible or what routes exist, tell them yes and invite the actual request ("privately send 0.02 ETH to 0x… as USDC on arbitrum") — deterministic handlers answer those, so do NOT invent your own route list, fees or minimums. Note it only works selling ETH (no exchange lists USDG), and only to a DIFFERENT address than their own, since delivering back to themselves would defeat the privacy.
+Nock supports PRIVATE (anonymous) transfers through its Houdini integration — this is real and built, never say it isn't supported. The user can send ETH from their Robinhood Chain wallet so there's no traceable on-chain link to the recipient: it settles through exchanges rather than a direct bridge. It can deliver to about 100 chains, as ETH or another listed token (e.g. USDC on Arbitrum), to someone else's address. Delivery takes a few minutes, not seconds, and costs a little more than a direct bridge. If the user asks whether private/anonymous sending is possible or what routes exist, tell them yes and invite the actual request ("privately send 0.02 ETH to 0x… as USDC on arbitrum") — deterministic handlers answer those, so do NOT invent your own route list, fees or minimums. CRITICAL: you have NO tool that can build a private-send preview. Never say "confirm and I'll propose the route" or otherwise promise a preview for a private transfer — that leaves the user with nothing to confirm. If their request looks like a private send but no card appeared, simply restate it back in the working form (starting with the word "privately" and including the recipient address) and ask them to send that. Note it only works selling ETH (no exchange lists USDG), and only to a DIFFERENT address than their own, since delivering back to themselves would defeat the privacy.
 
 Nock has REAL, already-built server-side automation: yield auto-switch, liquidation protection, portfolio rebalance, and price/LTV alerts + stop-loss/auto-buy conditions. When the user asks whether any of these is active/on/enabled for them ("is automatic yield active", "is auto-switch on", "is liquidation protection enabled", "is my portfolio rebalancing", "do I have any automation running"), call get_automation_status and answer from its real data — NEVER say automation isn't part of this chat's capabilities or isn't supported; that would be false. If something is off, tell them plainly how to turn it on (Settings for yield/liquidation-protection toggles, or the relevant chat phrasing for rebalance/conditions).
 
@@ -799,7 +799,15 @@ async function handlePOST(request: Request) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
-        const wantsPrivate = /\b(priv(?:at|ac)\w*|anon\w*)\b/i.test(txt)
+        const PRIVACY_RE = /\b(priv(?:at|ac)\w*|anon\w*)\b/i
+        // Privacy intent CARRIES ACROSS TURNS. A user who just asked "can I send funds
+        // privately?" naturally follows up with "send 0.01 ETH from base to 0x…" and omits
+        // the word — that used to miss this handler entirely and fall through to the model,
+        // which described the feature and promised a preview it had no tool to build.
+        // Look back a few user turns, unless they explicitly asked for a normal transfer.
+        const recentUserTexts = [...messages].filter((m: any) => m.role === 'user').slice(-3).map((m: any) => String(m.text || ''))
+        const optedOutOfPrivacy = /\b(not private|non[-\s]?private|normal|regular|public|standard)\s+(send|transfer|send it)?/i.test(txt)
+        const wantsPrivate = !optedOutOfPrivacy && recentUserTexts.some((t) => PRIVACY_RE.test(t))
         // Any address-shaped token — validated below against the DESTINATION chain's own
         // rules, so this covers Solana/Bitcoin recipients too, not just EVM.
         const addressCandidates: string[] = [

@@ -1010,6 +1010,20 @@ export function NockApp() {
         const sellChain = HOUDINI_SOURCE_CHAINS[sellChainId] ?? nockChain
         const provider = await ensureWalletOnChain(activeWallet, sellChainId, sellChainLabel)
         const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: sellChain, transport: custom(provider) })
+
+        // Balance check on the SELL chain. The server pre-checks this for Robinhood, but it
+        // can't read an external chain's balance — and without this an over-balance send
+        // reaches the wallet as "Network fee Unavailable" with a dead confirm button, which
+        // reads as a broken app rather than "you don't have the funds".
+        const sellReadClient = sellChainId === nockChain.id
+          ? publicClient
+          : createPublicClient({ chain: sellChain, transport: http(HOUDINI_READ_RPC[sellChainId]) })
+        const sellValue = parseUnits(String(amount), 18)
+        const held = await sellReadClient.getBalance({ address: walletAddress as `0x${string}` }).catch(() => null)
+        if (held !== null && held < sellValue) {
+          throw new Error(`You have ${formatUnits(held, 18)} ETH on ${sellChainLabel}, which isn't enough to send ${amount} ETH plus gas.`)
+        }
+
         const hash = await wc.sendTransaction({
           account: walletAddress as `0x${string}`,
           chain: sellChain,
