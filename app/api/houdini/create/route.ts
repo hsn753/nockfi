@@ -77,10 +77,10 @@ async function handlePOST(req: NextRequest) {
     // asset map. Either way the order is created against a freshly fetched rate.
     const { best, sign } = isTokenIdPrivate
       ? {
-          best: await getHoudiniPrivateQuote({
+          best: (await getHoudiniPrivateQuote({
             fromTokenId: fromTokenId!, toTokenId: toTokenId!, amount,
             sellSymbol: ROBINHOOD_ETH.symbol, country: country || undefined,
-          }),
+          })).best,
           // The sell side of a private send is always the user's Robinhood-native ETH.
           sign: { chainId: ROBINHOOD_ETH.chainId, address: ROBINHOOD_ETH.address, decimals: ROBINHOOD_ETH.decimals, symbol: ROBINHOOD_ETH.symbol },
         }

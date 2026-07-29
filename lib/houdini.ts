@@ -469,7 +469,7 @@ export async function getHoudiniPrivateQuote(params: {
   amount: number
   sellSymbol: string
   country?: string
-}): Promise<HoudiniRoute> {
+}): Promise<{ best: HoudiniRoute; directOut: number | null }> {
   const { fromTokenId, toTokenId, amount, sellSymbol, country } = params
   const data = await hfetch(`/quotes?amount=${amount}&from=${fromTokenId}&to=${toTokenId}`)
   const raw: HoudiniRoute[] = (data.quotes || []).filter((q: any) => q && q.quoteId && (q.netAmountOut ?? q.amountOut) != null)
@@ -489,8 +489,13 @@ export async function getHoudiniPrivateQuote(params: {
     throw new Error(`private routing isn't available for this pair. Houdini's private tier settles through exchanges, so it only covers assets those exchanges list.`)
   }
   const out = (q: HoudiniRoute) => q.netAmountOut ?? q.amountOut ?? 0
-  return [...quotes].sort((a, b) => out(b) - out(a))[0]
+  // The best NON-private route from the same response, so callers can show what privacy
+  // costs without spending another quote (Houdini's own UI shows this side by side).
+  const direct = raw.filter((q) => q.type !== 'private')
+  const directOut = direct.length ? Math.max(...direct.map(out)) : null
+  return { best: [...quotes].sort((a, b) => out(b) - out(a))[0], directOut }
 }
+
 
 // ── Private route options (the "what can I send privately?" browse view) ─────────────
 // Houdini exposes NO provider/exchange name on private quotes, so a per-route picker would

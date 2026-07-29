@@ -206,8 +206,8 @@ When the user asks for their wallet address or deposit address:
 - If no wallet is connected, tell them to connect one first.
 
 When the user asks how to bridge, move, or send funds onto Robinhood Chain from Ethereum or another chain:
-- FIRST: if they specifically want to move USDC ↔ USDG (fund with USDC, or cash out to USDC on Ethereum/Base), that is handled IN-APP via the one-signature cross-chain flow — do NOT call get_bridge_info or hand out the external Arbitrum bridge link for that. Just tell them they can do it right here, e.g. "convert 20 USDC to USDG" or "cash out 20 USDG to USDC on Base" (a $10 minimum applies). The app builds the preview card itself.
-- Otherwise (bringing in ETH or another asset, or a general "how do I bridge" question): IMMEDIATELY call get_bridge_info. This is REQUIRED — never answer a bridging question from memory, always call the tool first.
+- Nock bridges ETH and USDC IN-APP via Houdini, in one signature — that is the answer for almost every bridging request, and it is strictly better than sending someone to an external site. Do NOT call get_bridge_info and do NOT hand out the external Arbitrum bridge link when the user wants to move ETH or USDC between Ethereum/Base and Robinhood Chain. Instead tell them it can be done right here and give the exact phrasing, e.g. "bridge $20 of ETH to robinhood", "convert 20 USDC to USDG", or "cash out 20 USDG to USDC on Base". The app builds the preview card itself. A $10 minimum applies to USDC.
+- ONLY call get_bridge_info for an asset Houdini can't route (something other than ETH/USDC/USDT) or a genuinely generic "how does bridging work" question. It returns an external Arbitrum link, which is a last resort, not the default.
 - The app shows the link, chain, and ETA in a card with its own button right below your reply — do not repeat those details or include the URL yourself. Just say one short sentence confirming it's ready to bridge into their connected wallet, and mention you'll let them know once it lands.
 - If no wallet is connected, tell them to connect one first so you can give them the right deposit address.
 
@@ -981,7 +981,7 @@ async function handlePOST(request: Request) {
           // Sell side is whatever asset they named on whichever chain it lives; buy side is
           // whatever they asked for, delivered to `recipient`. The quote helper enforces the
           // private tier's real (probed) minimum.
-          const best = await getHoudiniPrivateQuote({
+          const { best, directOut } = await getHoudiniPrivateQuote({
             fromTokenId: sellToken.tokenId,
             toTokenId: destToken.tokenId,
             amount,
@@ -1012,6 +1012,17 @@ async function handlePOST(request: Request) {
               { label: 'Recipient gets', value: `~${recvLabel} on ${chainLabel}` },
               { label: 'To', value: shortRecipient },
               { label: 'Routing', value: 'Private' },
+              // Show what privacy costs against the direct route, the same comparison
+              // Houdini's own UI puts side by side. Free — both tiers came back in the
+              // one quote we already made.
+              ...(directOut != null
+                ? [{
+                    label: 'vs direct',
+                    value: `${fmtHoudiniAmount(directOut, destToken.symbol)} ${destToken.symbol}${
+                      directOut > 0 ? ` (private costs ${(((directOut - out) / directOut) * 100).toFixed(1)}% more)` : ''
+                    }`,
+                  }]
+                : []),
               { label: 'ETA', value: etaLabel },
             ],
             status: 'pending',
@@ -1065,7 +1076,15 @@ async function handlePOST(request: Request) {
         // "etherum" — a message with the typo used to miss this regex entirely and fall
         // through to the general model, which doesn't know Houdini is an approved
         // integration and would refuse to help with it when named explicitly.
-        let chain = /\bbase\b/i.test(txt) ? 'base' : /\b(ether\w*|mainnet|eth\s*chain)\b/i.test(txt) ? 'ethereum' : null
+        // "from eth" / "on eth" names the NETWORK — bare "eth" elsewhere is the token, which
+        // is why the preposition is required here. Without this, "bridge $20 from eth in eth"
+        // resolved no chain at all, skipped this whole Houdini flow, and fell through to the
+        // model, which handed out the legacy external Arbitrum link instead (seen live).
+        let chain = /\bbase\b/i.test(txt)
+          ? 'base'
+          : /\b(ether\w*|mainnet|eth\s*chain)\b/i.test(txt) || /\b(from|on|via)\s+eth\b/i.test(txt)
+            ? 'ethereum'
+            : null
         const fundVerb = /\b(add|fund|deposit|bring|top\s*up)\b/i.test(txt)
         const cashVerb = /\b(cash\s*out|cashout|withdraw|off\s*ramp|take\s*out|send)\b/i.test(txt)
         const swapVerb = /\b(swap|convert|move|transfer|bridge)\b/i.test(txt)
