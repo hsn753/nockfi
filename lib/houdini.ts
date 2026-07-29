@@ -389,6 +389,17 @@ export async function resolveHoudiniChain(name: string): Promise<HoudiniChain | 
 type ResolvedToken = { tokenId: string; symbol: string; decimals: number; address: string | null }
 const tokenCache = new Map<string, { token: ResolvedToken | null; at: number }>()
 
+// Token ids we already verified when building the standard flows. Seeding these means the
+// common destinations resolve with ZERO API calls — faster, immune to the search
+// pagination quirk, and it conserves the free tier's small request budget.
+const SEEDED_TOKEN_IDS: Record<string, ResolvedToken> = {
+  'ethereum:ETH': { tokenId: '6689b73ec90e45f3b3e51566', symbol: 'ETH', decimals: 18, address: null },
+  'base:ETH': { tokenId: '6689b73ec90e45f3b3e51590', symbol: 'ETH', decimals: 18, address: null },
+  'ethereum:USDC': { tokenId: '6689b73ec90e45f3b3e51554', symbol: 'USDC', decimals: 6, address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
+  'base:USDC': { tokenId: '6689b757c90e45f3b3e51805', symbol: 'USDC', decimals: 6, address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+  'robinhood:ETH': { tokenId: '6a461601a5a43628a07b3b17', symbol: 'ETH', decimals: 18, address: null },
+}
+
 // Resolve (chain, symbol) to a Houdini token id. Uses the `search` endpoint and takes an
 // EXACT case-insensitive symbol match — `search` is fuzzy (a USDC search on arbitrum also
 // returns USDC.e and ~500 others), and picking a near-match would send the wrong asset.
@@ -398,18 +409,38 @@ export async function resolveHoudiniToken(chainShortName: string, symbol: string
   const key = `${chainShortName.toLowerCase()}:${symbol.toUpperCase()}`
   const hit = tokenCache.get(key)
   if (hit && Date.now() - hit.at < METADATA_TTL_MS) return hit.token
+
+  // Known-verified ids first: no request at all for the common pairs, and immune to the
+  // pagination problem below. These were each confirmed on-chain when added.
+  const seeded = SEEDED_TOKEN_IDS[key]
+  if (seeded) {
+    tokenCache.set(key, { token: seeded, at: Date.now() })
+    return seeded
+  }
+
   let token: ResolvedToken | null = null
   try {
-    const data = await hfetch(`/tokens?chain=${encodeURIComponent(chainShortName)}&search=${encodeURIComponent(symbol)}`)
-    const list: any[] = data?.tokens || []
-    const exact = list.find((t) => String(t?.symbol || '').toUpperCase() === symbol.toUpperCase())
-    if (exact?.id) {
-      token = {
-        tokenId: String(exact.id),
-        symbol: String(exact.symbol),
-        decimals: Number(exact.decimals ?? 18),
-        address: exact.address ? String(exact.address) : null,
+    // PAGINATED, and the match may not be on page 1. Ethereum's ETH search returns 1352
+    // results across 2 pages with native ETH on page TWO — reading only the first page made
+    // "privately send ETH ... on ethereum" fail with "couldn't find ETH", while Arbitrum and
+    // Base (single page) worked. Walk pages until the exact symbol turns up.
+    const MAX_PAGES = 4
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const suffix = page === 1 ? '' : `&page=${page}`
+      const data = await hfetch(`/tokens?chain=${encodeURIComponent(chainShortName)}&search=${encodeURIComponent(symbol)}${suffix}`)
+      const list: any[] = data?.tokens || []
+      const exact = list.find((t) => String(t?.symbol || '').toUpperCase() === symbol.toUpperCase())
+      if (exact?.id) {
+        token = {
+          tokenId: String(exact.id),
+          symbol: String(exact.symbol),
+          decimals: Number(exact.decimals ?? 18),
+          address: exact.address ? String(exact.address) : null,
+        }
+        break
       }
+      const totalPages = Number(data?.totalPages ?? 1)
+      if (!list.length || page >= totalPages) break
     }
   } catch (err) {
     console.error('[houdini] token resolution failed', { chainShortName, symbol, err: (err as Error)?.message })
