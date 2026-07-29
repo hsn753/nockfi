@@ -822,9 +822,15 @@ async function handlePOST(request: Request) {
           ...(txt.match(/0x[a-fA-F0-9]{40}/g) ?? []),
           ...(txt.match(/\b[A-Za-z0-9]{25,64}\b/g) ?? []),
         ]
-        if (wantsPrivate && addressCandidates.length) {
+        // Serve ANY cross-chain send to a named recipient, not just private ones. The
+        // standard backstop below can't: it only moves the four hardcoded pairs and always
+        // delivers to the user's OWN wallet, so "send $20 of ETH as USDC to 0x..." was
+        // answered with a USDG cash-out to themselves (wrong asset, wrong recipient).
+        const sendVerbForHoudini = /\b(send|transfer|pay|swap|convert|bridge)\b/i.test(txt)
+        if ((wantsPrivate || sendVerbForHoudini) && addressCandidates.length) {
+          const routeTier: 'private' | 'standard' = wantsPrivate ? 'private' : 'standard'
           const mentionsUsdg = /\busdg\b/i.test(txt)
-          if (mentionsUsdg) {
+          if (mentionsUsdg && routeTier === 'private') {
             return NextResponse.json({
               text: "Private sends aren't available for USDG. Houdini's private routing settles through exchanges, and no exchange lists USDG, so there's no private route to use. The sell side has to be your ETH: try \"privately send 0.02 ETH to 0x… as USDC on arbitrum\".",
             })
@@ -867,7 +873,7 @@ async function handlePOST(request: Request) {
           const sellIsExternal = !!sellChain && sellChain.shortName.toLowerCase() !== 'robinhood'
           if (!destChain) destChain = await resolveHoudiniChain(sellIsExternal ? 'robinhood' : 'ethereum')
           if (!destChain || !sellChain) return NextResponse.json({ text: "I couldn't reach Houdini's network list just now. Try again in a moment." })
-          if (destChain.shortName.toLowerCase() === sellChain.shortName.toLowerCase()) {
+          if (routeTier === 'private' && destChain.shortName.toLowerCase() === sellChain.shortName.toLowerCase()) {
             return NextResponse.json({ text: `A private send has to move between two different networks (that routing is what breaks the on-chain link). You named ${destChain.shortName} on both sides. Say something like "privately send 0.02 ETH to 0x… on arbitrum".` })
           }
           if (destChain.memoNeeded) {
@@ -884,7 +890,7 @@ async function handlePOST(request: Request) {
           // Delivering back to the sender's own address leaks exactly what the private
           // route exists to hide, and costs a premium for nothing. Refuse rather than
           // silently sell them a useless trade.
-          if (recipient.toLowerCase() === walletAddress.toLowerCase()) {
+          if (routeTier === 'private' && recipient.toLowerCase() === walletAddress.toLowerCase()) {
             return NextResponse.json({
               text: "That's your own address, so a private route wouldn't hide anything (and costs more than a normal transfer). Give a different destination address to send privately, or say \"bridge\" instead to move ETH to your own wallet on another chain.",
             })
@@ -938,7 +944,7 @@ async function handlePOST(request: Request) {
           }
           // USDG is the one asset on Robinhood Chain with no private route at all, so catch
           // it here with the real reason rather than letting the quote fail opaquely.
-          if (!sellIsExternal && sellSymbol !== 'ETH') {
+          if (routeTier === 'private' && !sellIsExternal && sellSymbol !== 'ETH') {
             return NextResponse.json({
               text: `From your Nock wallet on Robinhood Chain, only ETH can be sent privately. Privacy routing settles through exchanges, and ${sellSymbol} isn't listed on them. You can swap ${sellSymbol} to ETH first, then send that privately, and the recipient can still be paid in ${sellSymbol === 'USDG' ? 'USDC' : sellSymbol} on the other side.`,
             })
@@ -987,6 +993,7 @@ async function handlePOST(request: Request) {
             amount,
             sellSymbol,
             country: country || undefined,
+            routeType: routeTier,
           })
           const out = best.netAmountOut ?? best.amountOut
           const outUsd = best.amountOutUsd ?? 0
@@ -1001,21 +1008,25 @@ async function handlePOST(request: Request) {
           const outStr = fmtHoudiniAmount(out, destToken.symbol)
           const recvLabel = `${outStr} ${destToken.symbol}`
           const shortRecipient = `${recipient.slice(0, 10)}…${recipient.slice(-6)}`
-          const headline = `Privately send ${sellLabel} to ${shortRecipient}`
+          const headline = routeTier === 'private'
+            ? `Privately send ${sellLabel} to ${shortRecipient}`
+            : `Send ${sellLabel} to ${shortRecipient} as ${destToken.symbol}`
           action = {
             id: `act-${Date.now()}`,
             agent: 'swap',
             action: headline,
-            detail: `Sends ${sellLabel} from your wallet on ${sellChainLabel} through Houdini's private routing, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. Settled through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address on ${sellChainLabel}; there is no smart contract to approve. Delivery is not instant and costs a little more than a normal bridge. Transfers cannot be reversed, so verify the recipient address.`,
+            detail: routeTier !== 'private'
+              ? `Sends ${sellLabel} from your wallet on ${sellChainLabel} via Houdini, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. This is the standard route: cheaper and faster than private routing, but the transfer is publicly traceable on-chain. You sign one transaction on ${sellChainLabel}. Transfers cannot be reversed, so verify the recipient address.`
+              : `Sends ${sellLabel} from your wallet on ${sellChainLabel} through Houdini's private routing, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. Settled through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address on ${sellChainLabel}; there is no smart contract to approve. Delivery is not instant and costs a little more than a normal bridge. Transfers cannot be reversed, so verify the recipient address.`,
             metrics: [
               { label: 'You send', value: `${sellLabel} on ${sellChainLabel}` },
               { label: 'Recipient gets', value: `~${recvLabel} on ${chainLabel}` },
               { label: 'To', value: shortRecipient },
-              { label: 'Routing', value: 'Private' },
+              { label: 'Routing', value: routeTier === 'private' ? 'Private' : (best.swapName || 'Direct') },
               // Show what privacy costs against the direct route, the same comparison
               // Houdini's own UI puts side by side. Free — both tiers came back in the
               // one quote we already made.
-              ...(directOut != null
+              ...(routeTier === 'private' && directOut != null
                 ? [{
                     label: 'vs direct',
                     value: `${fmtHoudiniAmount(directOut, destToken.symbol)} ${destToken.symbol}${
@@ -1026,8 +1037,11 @@ async function handlePOST(request: Request) {
               { label: 'ETA', value: etaLabel },
             ],
             status: 'pending',
-            outcome: { title: 'Sent privately', value: outUsd > 0 ? `~$${outUsd.toFixed(2)}` : recvLabel, meta: `${recvLabel} on ${chainLabel}`, activityTitle: headline },
-            routeVia: 'houdini-private',
+            outcome: { title: routeTier === 'private' ? 'Sent privately' : 'Sent', value: outUsd > 0 ? `~$${outUsd.toFixed(2)}` : recvLabel, meta: `${recvLabel} on ${chainLabel}`, activityTitle: headline },
+            // Private orders return a deposit ADDRESS (nothing to sign); standard orders
+            // return a signable router tx, which the proven 'houdini' branch already
+            // handles including approvals. Route each to the path built for it.
+            routeVia: routeTier === 'private' ? 'houdini-private' : 'houdini',
             houdiniAmount: String(amount),
             houdiniRecipient: recipient,
             // Resolved token ids travel with the card so Confirm re-quotes the SAME pair —
@@ -1042,13 +1056,18 @@ async function handlePOST(request: Request) {
             houdiniSellChainLabel: sellChainLabel,
             // The sell asset itself: an ERC20 needs a transfer() to the deposit address,
             // a native coin needs a plain value send. The client can't infer which.
+            houdiniAssetKey: `${(sellIsExternal ? destChain : sellChain).shortName.toLowerCase()}:${sellIsExternal ? destToken.symbol : sellSymbol}`,
+            houdiniDirection: sellIsExternal ? 'in' : 'out',
+            houdiniRobinhoodAsset: sellIsExternal ? destToken.symbol : sellSymbol,
             houdiniSellSymbol: sellSymbol,
             houdiniSellTokenAddress: sellTokenAddress,
             houdiniSellDecimals: sellDecimals,
             verified: true,
           } as any
           return NextResponse.json({
-            text: `Here's your private send preview.${ethPriceNote} Press Confirm to sign one transfer to Houdini's deposit address; they then deliver to the recipient on ${chainLabel}, ${etaLabel}. Because it settles through an exchange rather than a direct bridge, delivery is not instant, and it costs a bit more than a normal bridge. That is the tradeoff for breaking the on-chain link. Double-check the recipient address, transfers can't be reversed.`,
+            text: routeTier !== 'private'
+              ? `Here's your transfer preview.${ethPriceNote} Press Confirm to sign one transaction on ${sellChainLabel}; the recipient gets ~${recvLabel} on ${chainLabel}. This is the standard route, so it's publicly traceable on-chain — say "privately" if you'd rather break that link (costs a bit more and needs a larger amount). Double-check the recipient address, transfers can't be reversed.`
+              : `Here's your private send preview.${ethPriceNote} Press Confirm to sign one transfer to Houdini's deposit address; they then deliver to the recipient on ${chainLabel}, ${etaLabel}. Because it settles through an exchange rather than a direct bridge, delivery is not instant, and it costs a bit more than a normal bridge. That is the tradeoff for breaking the on-chain link. Double-check the recipient address, transfers can't be reversed.`,
             action,
           })
         }

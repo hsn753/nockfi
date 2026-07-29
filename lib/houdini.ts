@@ -469,15 +469,25 @@ export async function getHoudiniPrivateQuote(params: {
   amount: number
   sellSymbol: string
   country?: string
+  // 'standard' reuses this same by-token-id path for a NON-private cross-chain send to an
+  // arbitrary recipient (Houdini's "Onchain DEX or Bridge" tier), which the fixed-asset
+  // getHoudiniQuote can't express — it only ever moves between the four hardcoded pairs
+  // and always delivers to the user's own wallet.
+  routeType?: HoudiniRouteType
 }): Promise<{ best: HoudiniRoute; directOut: number | null }> {
-  const { fromTokenId, toTokenId, amount, sellSymbol, country } = params
+  const { fromTokenId, toTokenId, amount, sellSymbol, country, routeType = 'private' } = params
+  const wantPrivate = routeType === 'private'
   const data = await hfetch(`/quotes?amount=${amount}&from=${fromTokenId}&to=${toTokenId}`)
   const raw: HoudiniRoute[] = (data.quotes || []).filter((q: any) => q && q.quoteId && (q.netAmountOut ?? q.amountOut) != null)
-  let quotes = raw.filter((q) => q.type === 'private')
+  let quotes = raw.filter((q) => (wantPrivate ? q.type === 'private' : q.type !== 'private'))
   if (country) {
     quotes = quotes.filter((q) => !(q.restrictedCountries || []).map((c) => c.toUpperCase()).includes(country.toUpperCase()))
   }
+  // A standard send must be SIGNABLE — the client signs a router tx rather than depositing
+  // to an address, so a route that only offers a deposit flow is no use here.
+  if (!wantPrivate) quotes = quotes.filter((q) => q.type === 'dex' || q.supportsSignatures)
   if (!quotes.length) {
+    if (!wantPrivate) throw new Error(`no route is available for ${amount} ${sellSymbol} on this pair right now.`)
     // The `min` on a private quote is NOT a reliable threshold: a pair can advertise
     // min 0.0047 ETH and still return ZERO private routes at 0.01, only reappearing at
     // 0.02 (measured live). So don't trust the number — probe upward from what the user

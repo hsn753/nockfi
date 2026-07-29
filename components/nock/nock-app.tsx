@@ -1130,7 +1130,21 @@ export function NockApp() {
             'X-Privy-Identity-Token': identityToken ?? '',
             'X-Privy-Access-Token': accessToken ?? '',
           },
-          body: JSON.stringify({ assetKey, direction, amount, addressFrom: walletAddress, addressTo: walletAddress, robinhoodAsset }),
+          body: JSON.stringify({
+            assetKey, direction, amount,
+            addressFrom: walletAddress,
+            // A send-to-address card names its recipient; funding/cash-out delivers to self.
+            addressTo: (action as any).houdiniRecipient || walletAddress,
+            robinhoodAsset,
+            ...((action as any).houdiniFromTokenId ? {
+              fromTokenId: (action as any).houdiniFromTokenId,
+              toTokenId: (action as any).houdiniToTokenId,
+              sellChainId: (action as any).houdiniSellChainId,
+              sellTokenAddress: (action as any).houdiniSellTokenAddress ?? null,
+              sellDecimals: (action as any).houdiniSellDecimals,
+              sellSymbol: (action as any).houdiniSellSymbol,
+            } : {}),
+          }),
         })
         const data = await res.json()
         if (!res.ok || data.error) throw new Error(data.error || 'Could not set up the order.')

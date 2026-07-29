@@ -30,6 +30,10 @@ async function handlePOST(req: NextRequest) {
     // target any of the ~100 supported chains and their token lists.
     fromTokenId?: string
     toTokenId?: string
+    sellChainId?: number
+    sellTokenAddress?: string | null
+    sellDecimals?: number
+    sellSymbol?: string
   }
   const assetKey = body.assetKey || body.sourceKey
   const direction: HoudiniDirection = body.direction === 'out' ? 'out' : 'in'
@@ -40,7 +44,9 @@ async function handlePOST(req: NextRequest) {
   // transfers to the returned depositAddress instead. addressTo is a real recipient here
   // (deliberately NOT the sender — delivering back to the sender defeats the privacy).
   const routeType: HoudiniRouteType = body.routeType === 'private' ? 'private' : 'standard'
-  const isTokenIdPrivate = routeType === 'private' && !!fromTokenId && !!toTokenId
+  // Token-id quoting now serves BOTH tiers: a standard send to an arbitrary recipient
+  // can't be expressed with the fixed asset map either.
+  const isTokenIdPrivate = !!fromTokenId && !!toTokenId
 
   if (!isTokenIdPrivate && (!assetKey || !HOUDINI_ASSETS[assetKey])) {
     return NextResponse.json({ error: 'Unsupported or missing assetKey' }, { status: 400 })
@@ -79,10 +85,16 @@ async function handlePOST(req: NextRequest) {
       ? {
           best: (await getHoudiniPrivateQuote({
             fromTokenId: fromTokenId!, toTokenId: toTokenId!, amount,
-            sellSymbol: ROBINHOOD_ETH.symbol, country: country || undefined,
+            sellSymbol: ROBINHOOD_ETH.symbol, country: country || undefined, routeType,
           })).best,
-          // The sell side of a private send is always the user's Robinhood-native ETH.
-          sign: { chainId: ROBINHOOD_ETH.chainId, address: ROBINHOOD_ETH.address, decimals: ROBINHOOD_ETH.decimals, symbol: ROBINHOOD_ETH.symbol },
+          // Where the client signs. Defaults to Robinhood-native ETH; an external sell side
+          // overrides it via sellChainId/sellTokenAddress from the card.
+          sign: {
+            chainId: Number(body.sellChainId ?? ROBINHOOD_ETH.chainId),
+            address: (body.sellTokenAddress ?? ROBINHOOD_ETH.address) as `0x${string}` | null,
+            decimals: Number(body.sellDecimals ?? ROBINHOOD_ETH.decimals),
+            symbol: String(body.sellSymbol ?? ROBINHOOD_ETH.symbol),
+          },
         }
       : await getHoudiniQuote(assetKey!, amount, direction, country || undefined, robinhoodAsset, routeType)
     const order = await createHoudiniExchange(best.quoteId, addressFrom, addressTo)
