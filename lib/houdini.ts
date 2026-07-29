@@ -421,6 +421,71 @@ export async function getHoudiniPrivateQuote(params: {
   return [...quotes].sort((a, b) => out(b) - out(a))[0]
 }
 
+// ── Private route options (the "what can I send privately?" browse view) ─────────────
+// Houdini exposes NO provider/exchange name on private quotes, so a per-route picker would
+// just be N anonymous rows. What users actually want to compare is DESTINATIONS: where can
+// this go, what's the minimum, and what does privacy cost versus a normal bridge. One
+// /quotes call per destination answers all three, because the same response carries both
+// the private and the dex routes — the gap between the best of each IS the privacy premium.
+
+export type PrivateRouteOption = {
+  chain: string
+  symbol: string
+  minSell: number | null // lowest accepted sell amount across the pool
+  privateOut: number | null
+  dexOut: number | null
+  premiumPct: number | null // how much less you receive vs the direct bridge
+  available: boolean
+}
+
+// Kept deliberately short: each entry costs one quote, and the free tier allows ~20/hour.
+const POPULAR_PRIVATE_DESTINATIONS: { chain: string; symbol: string }[] = [
+  { chain: 'base', symbol: 'ETH' },
+  { chain: 'ethereum', symbol: 'ETH' },
+  { chain: 'arbitrum', symbol: 'ETH' },
+  { chain: 'optimism', symbol: 'ETH' },
+  { chain: 'arbitrum', symbol: 'USDC' },
+]
+
+let routeOptionsCache: { amount: number; options: PrivateRouteOption[]; at: number } | null = null
+const ROUTE_OPTIONS_TTL_MS = 60 * 60 * 1000
+
+export async function getPrivateRouteOptions(referenceAmount = 0.02): Promise<PrivateRouteOption[]> {
+  if (routeOptionsCache && routeOptionsCache.amount === referenceAmount && Date.now() - routeOptionsCache.at < ROUTE_OPTIONS_TTL_MS) {
+    return routeOptionsCache.options
+  }
+  const options = await Promise.all(
+    POPULAR_PRIVATE_DESTINATIONS.map(async ({ chain, symbol }): Promise<PrivateRouteOption> => {
+      const empty: PrivateRouteOption = { chain, symbol, minSell: null, privateOut: null, dexOut: null, premiumPct: null, available: false }
+      try {
+        const token = await resolveHoudiniToken(chain, symbol)
+        if (!token) return empty
+        const data = await hfetch(`/quotes?amount=${referenceAmount}&from=${ROBINHOOD_ETH.tokenId}&to=${token.tokenId}`)
+        const quotes: any[] = data?.quotes || []
+        const priv = quotes.filter((q) => q?.type === 'private')
+        const dex = quotes.filter((q) => q?.type === 'dex')
+        if (!priv.length) return empty
+        const outOf = (q: any) => (q.netAmountOut ?? q.amountOut ?? 0) as number
+        const privateOut = Math.max(...priv.map(outOf))
+        const dexOut = dex.length ? Math.max(...dex.map(outOf)) : null
+        const mins = priv.filter((q) => typeof q.min === 'number').map((q) => q.min as number)
+        return {
+          chain, symbol,
+          minSell: mins.length ? Math.min(...mins) : null,
+          privateOut,
+          dexOut,
+          premiumPct: dexOut && dexOut > 0 ? ((dexOut - privateOut) / dexOut) * 100 : null,
+          available: true,
+        }
+      } catch {
+        return empty
+      }
+    }),
+  )
+  routeOptionsCache = { amount: referenceAmount, options, at: Date.now() }
+  return options
+}
+
 export type HoudiniOrder = {
   houdiniId: string
   status: number

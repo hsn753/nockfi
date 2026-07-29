@@ -6,7 +6,7 @@ import { fetchWalletBalances, fetchArbitraryTokenBalance } from '@/lib/get-balan
 import { getLighterPortfolio } from '@/lib/get-lighter-portfolio'
 import { lookupLighterAccount, getLighterAccountBalance, resolveLighterMarket } from '@/lib/lighter-account'
 import { fetchSwapQuote, SWAP_TOKENS, NATIVE_ETH_ADDRESS } from '@/lib/get-swap-quote'
-import { houdiniEnabled, getHoudiniQuote, getHoudiniPrivateQuote, resolveHoudiniChain, resolveHoudiniToken, isValidHoudiniAddress, ROBINHOOD_ETH, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
+import { houdiniEnabled, getHoudiniQuote, getHoudiniPrivateQuote, getPrivateRouteOptions, resolveHoudiniChain, resolveHoudiniToken, isValidHoudiniAddress, ROBINHOOD_ETH, fmtHoudiniAmount, type RobinhoodAssetKey } from '@/lib/houdini'
 import { getReadClient } from '@/lib/rpc'
 import { getReferencePrices } from '@/lib/get-prices'
 import { getTrendingTokens, findTokensBySymbol, getTokenPriceByAddress } from '@/lib/get-trending-tokens'
@@ -273,6 +273,8 @@ When the user asks to CLOSE or reduce an existing perps position: FIRST call get
 CRITICAL — how perps funds actually move (do NOT get this wrong, it has confused users): The perps account is SEPARATE from the wallet. Depositing moves USDG from the wallet INTO the perps account (its margin balance). Closing a position does NOT return USDG to the wallet — it frees that margin back into the PERPS ACCOUNT balance (perps.balanceUsd / available margin), where it stays until withdrawn. So after a close, never say the USDG "is back in your wallet" or "reflected in your wallet holdings"; say it's back as available margin in their perps account. ROUTING (important): a deposit/withdraw/add-funds/take-out request that mentions PERPS or PERPETUAL (or "perps account", "perps balance", "perps margin") is a PERPS FUNDS ACTION described here — it is NOT a yield-market withdrawal. get_yield_withdraw_quote is ONLY for pulling USDG out of a Morpho YIELD market (USDe / syrupUSDG / spUSDG); never use it, or a yield market, for a perps withdrawal. To move USDG between the wallet and the perps account, the user DEPOSITS (wallet → perps) or WITHDRAWS (perps → wallet) — opening a position never converts perps margin back to the wallet, so never suggest that. You CAN do both from chat: call propose_action for the perps agent with the 'perps' object set to { fundsAction: 'deposit', amountUsdg: N } to add margin, or { fundsAction: 'withdraw', amountUsdg: N } to take it out — OMIT symbol/side/markPrice/leverage for a funds action. Same preview → Confirm flow: on 'preview_ready', tell them to review and press Confirm; the app posts the real confirmation. A deposit moves USDG from their wallet into the perps account; a withdraw returns free margin to their wallet (margin backing an open position must be freed by closing first, and a withdraw settles to the wallet in a few minutes, not instantly). They can also do both in Settings → Perps trading key. Never fabricate a deposit/withdraw confirmation — it only happens on Confirm.
 
 When the user asks about their spend limit, guardrails, permissions, or what Vault Agent does: call get_vault_status and present what it returns directly — the real current limit (or that none is set) and the automatic protections already in place on every action. Never call propose_action for the vault agent — it doesn't move money, it constrains the agents that do.
+
+Nock supports PRIVATE (anonymous) transfers through its Houdini integration — this is real and built, never say it isn't supported. The user can send ETH from their Robinhood Chain wallet so there's no traceable on-chain link to the recipient: it settles through exchanges rather than a direct bridge. It can deliver to about 100 chains, as ETH or another listed token (e.g. USDC on Arbitrum), to someone else's address. Delivery takes a few minutes, not seconds, and costs a little more than a direct bridge. If the user asks whether private/anonymous sending is possible or what routes exist, tell them yes and invite the actual request ("privately send 0.02 ETH to 0x… as USDC on arbitrum") — deterministic handlers answer those, so do NOT invent your own route list, fees or minimums. Note it only works selling ETH (no exchange lists USDG), and only to a DIFFERENT address than their own, since delivering back to themselves would defeat the privacy.
 
 Nock has REAL, already-built server-side automation: yield auto-switch, liquidation protection, portfolio rebalance, and price/LTV alerts + stop-loss/auto-buy conditions. When the user asks whether any of these is active/on/enabled for them ("is automatic yield active", "is auto-switch on", "is liquidation protection enabled", "is my portfolio rebalancing", "do I have any automation running"), call get_automation_status and answer from its real data — NEVER say automation isn't part of this chat's capabilities or isn't supported; that would be false. If something is off, tell them plainly how to turn it on (Settings for yield/liquidation-protection toggles, or the relevant chat phrasing for rebalance/conditions).
 
@@ -736,6 +738,50 @@ async function handlePOST(request: Request) {
       gasTopUpDecided = true
       gasTopUpTx = await resolveGasTopUp()
       return gasTopUpTx
+    }
+
+    // ── PRE-MODEL: private-transfer DISCOVERY ("can I send privately?" / "what routes?") ──
+    // Two browse-style questions that precede an actual send. Handled deterministically
+    // because the model has no idea this integration exists and would otherwise deny it
+    // outright (the same failure mode that made it deny yield automation existed).
+    if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
+      const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
+      const txt = (lastUser?.text || '').trim()
+      const privacyWord = /\b(private(ly)?|anonymous(ly)?|anon|privacy)\b/i.test(txt)
+      const hasAddress = /0x[a-fA-F0-9]{40}/.test(txt)
+      // Only a QUESTION, not an actual send (those carry a recipient address).
+      if (privacyWord && !hasAddress) {
+        const asksRoutes = /\b(route|routes|option|options|network|networks|chain|chains|which|what|where|list|available|fee|fees|cost|eta)\b/i.test(txt)
+        const asksCapability = /\b(can|could|do|does|is it|able|possible|support)\b/i.test(txt)
+        if (asksRoutes || asksCapability) {
+          try {
+            // Capability-only question: answer without spending any quotes.
+            if (asksCapability && !asksRoutes) {
+              return NextResponse.json({
+                text: `Yes. Nock is integrated with Houdini for private transfers, so you can send your ETH without a traceable on-chain link between your wallet and the recipient. It settles through exchanges rather than a direct bridge, which is what breaks the link, and it can deliver to almost any chain as ETH or another token like USDC.\n\nAsk "what private routes are available?" to see destinations, minimums and what privacy costs, or just tell me what you want, for example "privately send 0.02 ETH to 0x… as USDC on arbitrum", and I'll pick the best route.`,
+              })
+            }
+            const options = await getPrivateRouteOptions(0.02)
+            const usable = options.filter((o) => o.available)
+            if (!usable.length) {
+              return NextResponse.json({ text: "I couldn't reach Houdini's routing just now, so I can't show live private routes. Try again in a moment." })
+            }
+            const rows = usable
+              .map((o) => {
+                const min = o.minSell != null ? `${o.minSell.toFixed(4)} ETH` : 'n/a'
+                const cost = o.premiumPct != null ? `~${o.premiumPct.toFixed(1)}% vs a direct bridge` : 'n/a'
+                return `- ${o.symbol} on ${o.chain}: minimum ${min}, costs ${cost}`
+              })
+              .join('\n')
+            return NextResponse.json({
+              text: `Private transfers go through Houdini, settling via exchanges instead of a direct bridge, which is what breaks the on-chain link between you and the recipient. You send ETH from your Robinhood Chain wallet and the recipient gets paid on whichever chain you pick.\n\nHere are live options right now:\n\n${rows}\n\nThose are just the common ones. You can name any of about 100 chains (Polygon, Optimism, BSC, Avalanche, Solana and more) and any token those exchanges list, for example "as USDT on bsc".\n\nTwo honest notes: Houdini doesn't reveal which exchange handles a given route, so I pick the best-priced one for you automatically rather than showing you names to choose between. And delivery takes a few minutes, not seconds, because it clears through an exchange.\n\nTo go ahead, say something like "privately send 0.02 ETH to 0x… as USDC on arbitrum", or just tell me the amount and destination and I'll handle the routing.`,
+            })
+          } catch (e) {
+            console.error('[robin] private route discovery failed:', (e as Error)?.message)
+            return NextResponse.json({ text: "I couldn't load live private routes just now. Try again in a moment." })
+          }
+        }
+      }
     }
 
     // ── PRE-MODEL: PRIVATE send via Houdini's anonymity tier ──────────────────────────
