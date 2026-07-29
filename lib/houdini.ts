@@ -177,6 +177,43 @@ async function probePrivateMin(fromId: string, toId: string, sellSymbol: string)
   return probePrivateMinByIds(fromId, toId, sellSymbol)
 }
 
+// Find the smallest amount that ACTUALLY returns private routes, by escalating from what
+// the user asked for. Needed because the advertised `min` lies (see the caller). Bounded to
+// a few probes because the free tier allows ~20 quotes/hour, and cached per pair so a user
+// retrying a too-small amount doesn't re-spend the budget. Returns null if even the largest
+// probe finds nothing, which means the pair genuinely has no private tier.
+const workingAmountCache = new Map<string, { amount: number | null; at: number }>()
+
+async function findWorkingPrivateAmount(
+  fromId: string, toId: string, sellSymbol: string, requested: number,
+): Promise<number | null> {
+  const key = `${fromId}->${toId}`
+  const hit = workingAmountCache.get(key)
+  if (hit && Date.now() - hit.at < PRIVATE_MIN_TTL_MS) {
+    // Only reuse a cached figure that would actually help this request.
+    if (hit.amount === null || hit.amount > requested) return hit.amount
+  }
+  const ceiling = sellSymbol.toUpperCase() === 'ETH' ? 0.05 : 100
+  const candidates = [requested * 2, requested * 4, ceiling].filter((a, i, arr) => a > requested && arr.indexOf(a) === i)
+  for (const candidate of candidates) {
+    try {
+      const data = await hfetch(`/quotes?amount=${candidate}&from=${fromId}&to=${toId}`)
+      const hasPrivate = (data?.quotes || []).some((q: any) => q?.type === 'private')
+      if (hasPrivate) {
+        const rounded = Math.ceil(candidate * 1e4) / 1e4
+        workingAmountCache.set(key, { amount: rounded, at: Date.now() })
+        return rounded
+      }
+    } catch {
+      // Network/rate-limit failure tells us nothing about the pair — stop probing rather
+      // than reporting a wrong conclusion.
+      return null
+    }
+  }
+  workingAmountCache.set(key, { amount: null, at: Date.now() })
+  return null
+}
+
 async function probePrivateMinByIds(fromId: string, toId: string, sellSymbol: string): Promise<number | null> {
   const key = `${fromId}->${toId}`
   const hit = privateMinCache.get(key)
@@ -410,10 +447,13 @@ export async function getHoudiniPrivateQuote(params: {
     quotes = quotes.filter((q) => !(q.restrictedCountries || []).map((c) => c.toUpperCase()).includes(country.toUpperCase()))
   }
   if (!quotes.length) {
-    const probedMin = await probePrivateMinByIds(fromTokenId, toTokenId, sellSymbol)
-    if (probedMin != null && amount < probedMin) {
-      const suggested = Math.ceil(probedMin * 1.05 * 1e4) / 1e4
-      throw new Error(`that's below the private-routing minimum for this route. It needs at least ~${suggested} ${sellSymbol} (you asked for ${amount}).`)
+    // The `min` on a private quote is NOT a reliable threshold: a pair can advertise
+    // min 0.0047 ETH and still return ZERO private routes at 0.01, only reappearing at
+    // 0.02 (measured live). So don't trust the number — probe upward from what the user
+    // actually asked for and report the smallest size that really returns routes.
+    const working = await findWorkingPrivateAmount(fromTokenId, toTokenId, sellSymbol, amount)
+    if (working != null) {
+      throw new Error(`private routing doesn't cover ${amount} ${sellSymbol} on this pair right now. It starts working from about ${working} ${sellSymbol} — try that or more. (Exchange minimums here are higher than the quoted figure suggests.)`)
     }
     throw new Error(`private routing isn't available for this pair. Houdini's private tier settles through exchanges, so it only covers assets those exchanges list.`)
   }

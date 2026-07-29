@@ -846,8 +846,16 @@ async function handlePOST(request: Request) {
           // DESTINATION CHAIN: "... on <chain>" / "to <chain>". Resolved against Houdini's
           // live chain list (~100). Defaults to Ethereum, unless we're already selling FROM
           // an external chain, in which case the natural destination is Robinhood.
-          const chainWord = txt.match(/\b(?:on|to|via)\s+([A-Za-z][A-Za-z0-9\s_-]{1,20}?)(?:\s+(?:chain|network)\b|\s*$|[.,!?])/i)?.[1]
-          let destChain = chainWord ? await resolveHoudiniChain(chainWord) : null
+          // Try EVERY word following a location preposition and keep the first that resolves
+          // to a real chain. "in" has to be included ("...in robinhood chain"), which means
+          // the destination-token regex below must not also claim it — otherwise "in
+          // robinhood chain" is read as a token named ROBINHOOD (seen live).
+          const chainCandidates = [...txt.matchAll(/\b(?:on|to|via|in|into|onto)\s+([A-Za-z][A-Za-z0-9_-]{1,20})/gi)].map((m) => m[1])
+          let destChain: Awaited<ReturnType<typeof resolveHoudiniChain>> = null
+          for (const candidate of chainCandidates) {
+            const resolved = await resolveHoudiniChain(candidate)
+            if (resolved) { destChain = resolved; break }
+          }
           const sellIsExternal = !!sellChain && sellChain.shortName.toLowerCase() !== 'robinhood'
           if (!destChain) destChain = await resolveHoudiniChain(sellIsExternal ? 'robinhood' : 'ethereum')
           if (!destChain || !sellChain) return NextResponse.json({ text: "I couldn't reach Houdini's network list just now. Try again in a moment." })
@@ -920,8 +928,12 @@ async function handlePOST(request: Request) {
           // DESTINATION TOKEN: "... as USDC" / "... in USDC" / "... to USDC on arbitrum".
           // Defaults to ETH (the like-for-like send). Resolved live against Houdini's token
           // list for that chain, so any listed asset works, not a hardcoded few.
-          const tokenWord = txt.match(/\b(?:as|in|into|receive|for)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/i)?.[1]
-          const destSymbol = (tokenWord || 'ETH').toUpperCase()
+          // "as USDC" / "receive USDC". Deliberately excludes "in"/"into", which read as
+          // location prepositions above. Also skipped if the word is itself a chain name, so
+          // "as base" can't be mistaken for a token.
+          const tokenWord = txt.match(/\b(?:as|receive|convert(?:ed)?\s+to)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/i)?.[1]
+          const tokenWordIsChain = tokenWord ? !!(await resolveHoudiniChain(tokenWord)) : false
+          const destSymbol = (tokenWord && !tokenWordIsChain ? tokenWord : 'ETH').toUpperCase()
           const destToken = await resolveHoudiniToken(destChain.shortName, destSymbol)
           if (!destToken) {
             return NextResponse.json({
