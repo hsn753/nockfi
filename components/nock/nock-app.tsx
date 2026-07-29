@@ -1018,18 +1018,38 @@ export function NockApp() {
         const sellReadClient = sellChainId === nockChain.id
           ? publicClient
           : createPublicClient({ chain: sellChain, transport: http(HOUDINI_READ_RPC[sellChainId]) })
-        const sellValue = parseUnits(String(amount), 18)
-        const held = await sellReadClient.getBalance({ address: walletAddress as `0x${string}` }).catch(() => null)
+        const sellSymbol = ((action as any).houdiniSellSymbol as string) || 'ETH'
+        const sellTokenAddress = (action as any).houdiniSellTokenAddress as string | null
+        const sellDecimals = Number((action as any).houdiniSellDecimals ?? 18)
+        const sellValue = parseUnits(String(amount), sellDecimals)
+
+        // Balance check on the SELL chain, against the SELL asset. Native and ERC20 read
+        // differently, and the server can only pre-check the Robinhood-native case.
+        const held = sellTokenAddress
+          ? ((await sellReadClient.readContract({
+              address: sellTokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`],
+            }).catch(() => null)) as bigint | null)
+          : await sellReadClient.getBalance({ address: walletAddress as `0x${string}` }).catch(() => null)
         if (held !== null && held < sellValue) {
-          throw new Error(`You have ${formatUnits(held, 18)} ETH on ${sellChainLabel}, which isn't enough to send ${amount} ETH plus gas.`)
+          throw new Error(`You have ${formatUnits(held, sellDecimals)} ${sellSymbol} on ${sellChainLabel}, which isn't enough to send ${amount} ${sellSymbol}.`)
         }
 
-        const hash = await wc.sendTransaction({
-          account: walletAddress as `0x${string}`,
-          chain: sellChain,
-          to: depositAddress as `0x${string}`,
-          value: parseUnits(String(amount), 18),
-        })
+        // Fund the order: an ERC20 needs a transfer() to the deposit address, a native coin
+        // is sent as tx value. Houdini's private tier takes a PLAIN transfer either way —
+        // there's no router to approve, unlike the standard bridge.
+        const hash = sellTokenAddress
+          ? await wc.sendTransaction({
+              account: walletAddress as `0x${string}`,
+              chain: sellChain,
+              to: sellTokenAddress as `0x${string}`,
+              data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [depositAddress as `0x${string}`, sellValue] }),
+            })
+          : await wc.sendTransaction({
+              account: walletAddress as `0x${string}`,
+              chain: sellChain,
+              to: depositAddress as `0x${string}`,
+              value: sellValue,
+            })
         // Receipt polling goes through a real public RPC for external chains — the embedded
         // wallet's own provider proxy is unreliable for this (same fix as the bridge flow).
         const receiptClient = sellChainId === nockChain.id
@@ -1045,7 +1065,7 @@ export function NockApp() {
           {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text: `Sent ✅ Your ${amount} ETH is with Houdini's private routing — ${outStr} will reach ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}. It settles through an exchange, so give it a few minutes.`,
+            text: `Sent ✅ Your ${amount} ${sellSymbol} is with Houdini's private routing — ${outStr} will reach ${recipient.slice(0, 10)}…${recipient.slice(-6)} on ${destLabel}. It settles through an exchange, so give it a few minutes.`,
           } as ChatMessage,
         ])
         void fetchPortfolioValue()

@@ -747,7 +747,15 @@ async function handlePOST(request: Request) {
     if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
       const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
       const txt = (lastUser?.text || '').trim()
-      const privacyWord = /\b(priv(?:at|ac)\w*|anon\w*)\b/i.test(txt)
+      // Fires on an explicit privacy word, on naming Houdini directly ("what routes are
+      // available on houdini?" contains no privacy word at all and used to fall through to
+      // the model, which then invented answers and wrongly denied private swaps), or on
+      // privacy intent established in the last few turns.
+      const recentQuestionTexts = [...messages].filter((m: any) => m.role === 'user').slice(-3).map((m: any) => String(m.text || ''))
+      const privacyWord =
+        /\b(priv(?:at|ac)\w*|anon\w*)\b/i.test(txt) ||
+        /\bhoudini\b/i.test(txt) ||
+        recentQuestionTexts.some((t) => /\b(priv(?:at|ac)\w*|anon\w*|houdini)\b/i.test(t))
       const hasAddress = /0x[a-fA-F0-9]{40}/.test(txt)
       // Only a QUESTION, not an actual send (those carry a recipient address).
       if (privacyWord && !hasAddress) {
@@ -758,7 +766,7 @@ async function handlePOST(request: Request) {
             // Capability-only question: answer without spending any quotes.
             if (asksCapability && !asksRoutes) {
               return NextResponse.json({
-                text: `Yes. Nock is integrated with Houdini for private transfers, so you can send your ETH without a traceable on-chain link between your wallet and the recipient. It settles through exchanges rather than a direct bridge, which is what breaks the link, and it can deliver to almost any chain as ETH or another token like USDC.\n\nAsk "what private routes are available?" to see destinations, minimums and what privacy costs, or just tell me what you want, for example "privately send 0.02 ETH to 0x… as USDC on arbitrum", and I'll pick the best route.`,
+                text: `Yes, both. Nock is integrated with Houdini, so you can send funds with no traceable on-chain link between your wallet and the recipient, and you can privately SWAP at the same time: send one asset and have the recipient paid in a different one (for example send ETH, they receive USDC). It settles through exchanges instead of a direct bridge, which is what breaks the link.\n\nWhat you can send: ETH from your Nock wallet on Robinhood Chain, or ETH/USDC/USDT from Ethereum, Base, Arbitrum, Optimism or Polygon. USDG can't be sent privately, because privacy routing settles through exchanges and none of them list USDG. The recipient can be paid on almost any chain, in whichever listed token you name.\n\nAsk "what private routes are available?" for live destinations, minimums and costs, or just say what you want, for example "privately send 0.02 ETH to 0x… as USDC on arbitrum", and I'll pick the best route.`,
               })
             }
             const options = await getPrivateRouteOptions(0.02)
@@ -774,7 +782,7 @@ async function handlePOST(request: Request) {
               })
               .join('\n')
             return NextResponse.json({
-              text: `Private transfers go through Houdini, settling via exchanges instead of a direct bridge, which is what breaks the on-chain link between you and the recipient. You send ETH from your Robinhood Chain wallet and the recipient gets paid on whichever chain you pick.\n\nHere are live options right now:\n\n${rows}\n\nThose are just the common ones. You can name any of about 100 chains (Polygon, Optimism, BSC, Avalanche, Solana and more) and any token those exchanges list, for example "as USDT on bsc".\n\nTwo honest notes: Houdini doesn't reveal which exchange handles a given route, so I pick the best-priced one for you automatically rather than showing you names to choose between. And delivery takes a few minutes, not seconds, because it clears through an exchange.\n\nTo go ahead, say something like "privately send 0.02 ETH to 0x… as USDC on arbitrum", or just tell me the amount and destination and I'll handle the routing.`,
+              text: `Private transfers go through Houdini, settling via exchanges instead of a direct bridge, which is what breaks the on-chain link between you and the recipient. You can also privately swap in the same step, sending one asset and having them paid in another.\n\nWhat you can SEND: ETH from your Nock wallet on Robinhood Chain, or ETH/USDC/USDT from Ethereum, Base, Arbitrum, Optimism or Polygon. Not USDG, since no exchange lists it.\n\nLive costs on common destinations, priced from a 0.02 ETH send:\n\n${rows}\n\nThose are just examples. The recipient can be paid on any of about 100 chains (Polygon, Optimism, BSC, Avalanche, Solana and more) in any token those exchanges list, for example "as USDT on bsc".\n\nThree things worth knowing. Houdini doesn't reveal which exchange handles a route, so I pick the best-priced one automatically rather than showing names to choose between. Delivery takes a few minutes, not seconds, because it clears through an exchange. And small amounts often won't route at all: on most pairs private routing starts working around 0.02 ETH, regardless of the lower figure the quotes advertise.\n\nTo go ahead: "privately send 0.02 ETH to 0x… as USDC on arbitrum", or just tell me the amount and destination.`,
             })
           } catch (e) {
             console.error('[robin] private route discovery failed:', (e as Error)?.message)
@@ -886,7 +894,11 @@ async function handlePOST(request: Request) {
           // Exclude the recipient address from amount matching — its digits would otherwise
           // be parsed as the amount.
           const amountText = txt.replace(recipient, ' ')
-          const m = dollarMatch || amountText.match(/(\d+(?:\.\d+)?)\s*(?:eth)?/i)
+          // SELL ASSET: whatever symbol follows the amount ("send 50 USDC ..."). Privacy
+          // routing is not ETH-only — USDC from Ethereum has ~75 private routes — so don't
+          // hardcode it. USDG is the real exception and is rejected above.
+          const sellSymbol = (amountText.match(/(?:\d+(?:\.\d+)?)\s*([A-Za-z]{2,6})\b/)?.[1] || 'ETH').toUpperCase()
+          const m = dollarMatch || amountText.match(/(\d+(?:\.\d+)?)\s*(?:[A-Za-z]{2,6})?/i)
           let amount = m ? parseFloat(m[1]) : null
           let ethPriceNote = ''
           if (dollarMatch && amount) {
@@ -910,7 +922,7 @@ async function handlePOST(request: Request) {
           // free tier allows only ~20 quotes/hour, so a doomed send must not spend one.
           // Only possible when selling from Robinhood Chain — this server can't read a
           // balance on an external chain, so those surface at the wallet instead.
-          if (!sellIsExternal) {
+          if (!sellIsExternal && sellSymbol === 'ETH') {
             const ethBalance = (await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null))
             if (ethBalance !== null) {
               const needed = parseUnits(String(amount), 18)
@@ -924,38 +936,56 @@ async function handlePOST(request: Request) {
               }
             }
           }
+          // USDG is the one asset on Robinhood Chain with no private route at all, so catch
+          // it here with the real reason rather than letting the quote fail opaquely.
+          if (!sellIsExternal && sellSymbol !== 'ETH') {
+            return NextResponse.json({
+              text: `From your Nock wallet on Robinhood Chain, only ETH can be sent privately. Privacy routing settles through exchanges, and ${sellSymbol} isn't listed on them. You can swap ${sellSymbol} to ETH first, then send that privately, and the recipient can still be paid in ${sellSymbol === 'USDG' ? 'USDC' : sellSymbol} on the other side.`,
+            })
+          }
 
           // DESTINATION TOKEN: "... as USDC" / "... in USDC" / "... to USDC on arbitrum".
           // Defaults to ETH (the like-for-like send). Resolved live against Houdini's token
           // list for that chain, so any listed asset works, not a hardcoded few.
-          // "as USDC" / "receive USDC". Deliberately excludes "in"/"into", which read as
-          // location prepositions above. Also skipped if the word is itself a chain name, so
-          // "as base" can't be mistaken for a token.
-          const tokenWord = txt.match(/\b(?:as|receive|convert(?:ed)?\s+to)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/i)?.[1]
-          const tokenWordIsChain = tokenWord ? !!(await resolveHoudiniChain(tokenWord)) : false
-          const destSymbol = (tokenWord && !tokenWordIsChain ? tokenWord : 'ETH').toUpperCase()
+          // DESTINATION TOKEN. "in" is genuinely ambiguous — "in usdc" names an asset while
+          // "in robinhood chain" names a network — so every candidate is disambiguated by
+          // what it actually resolves to rather than by which preposition introduced it.
+          // Chain candidates were already consumed above, so anything left that resolves as
+          // a token here is the destination asset.
+          const tokenCandidates = [...txt.matchAll(/\b(?:as|in|into|receive|for|to)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/gi)].map((m) => m[1])
+          let destSymbol = 'ETH'
+          for (const candidate of tokenCandidates) {
+            if (candidate.toUpperCase() === sellSymbol) continue // that's the sell side
+            if (await resolveHoudiniChain(candidate)) continue // it's a network, not an asset
+            const maybe = await resolveHoudiniToken(destChain.shortName, candidate)
+            if (maybe) { destSymbol = maybe.symbol.toUpperCase(); break }
+          }
           const destToken = await resolveHoudiniToken(destChain.shortName, destSymbol)
           if (!destToken) {
             return NextResponse.json({
               text: `I couldn't find ${destSymbol} on ${chainLabel} in Houdini's token list. Name the destination asset explicitly, e.g. "privately send ${amount} ETH to ${recipient.slice(0, 10)}… as USDC on ${chainLabel}".`,
             })
           }
-          // Sell side: ETH on whichever chain the funds are coming from.
-          const sellToken = sellIsExternal ? await resolveHoudiniToken(sellChain.shortName, 'ETH') : ROBINHOOD_ETH
+          // Sell side: whichever asset they named, on whichever chain it's coming from.
+          const sellToken = !sellIsExternal && sellSymbol === 'ETH'
+            ? ROBINHOOD_ETH
+            : await resolveHoudiniToken(sellChain.shortName, sellSymbol)
           if (!sellToken) {
-            return NextResponse.json({ text: `I couldn't find ETH on ${sellChain.shortName} in Houdini's token list, so I can't send from there.` })
+            return NextResponse.json({ text: `I couldn't find ${sellSymbol} on ${sellChain.shortName} in Houdini's token list, so I can't send it privately from there. ETH works from Robinhood, and ETH/USDC/USDT work from Ethereum, Base, Arbitrum, Optimism and Polygon.` })
           }
+          const sellTokenAddress = 'address' in sellToken ? (sellToken.address as string | null) : null
+          const sellDecimals = 'decimals' in sellToken ? Number(sellToken.decimals) : 18
 
           const country =
             request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
-          // Sell side is always the user's ETH on Robinhood Chain (the only asset they hold
-          // here that any exchange lists); buy side is whatever they asked for, delivered to
-          // `recipient`. The quote helper enforces the private tier's own min/max.
+          // Sell side is whatever asset they named on whichever chain it lives; buy side is
+          // whatever they asked for, delivered to `recipient`. The quote helper enforces the
+          // private tier's real (probed) minimum.
           const best = await getHoudiniPrivateQuote({
             fromTokenId: sellToken.tokenId,
             toTokenId: destToken.tokenId,
             amount,
-            sellSymbol: 'ETH',
+            sellSymbol,
             country: country || undefined,
           })
           const out = best.netAmountOut ?? best.amountOut
@@ -966,7 +996,7 @@ async function handlePOST(request: Request) {
           // Showing the raw number as "< 1 min" made a normal in-flight transfer look
           // failed (hit live). Quote an honest range instead of a precise wrong number.
           const etaLabel = 'usually a few minutes'
-          const sellLabel = `${fmtHoudiniAmount(amount, 'ETH')} ETH`
+          const sellLabel = `${fmtHoudiniAmount(amount, sellSymbol)} ${sellSymbol}`
           const sellChainLabel = sellIsExternal ? sellChain.shortName : 'Robinhood'
           const outStr = fmtHoudiniAmount(out, destToken.symbol)
           const recvLabel = `${outStr} ${destToken.symbol}`
@@ -999,6 +1029,11 @@ async function handlePOST(request: Request) {
             // chain (private funding INTO Robinhood), so the client can't assume Robinhood.
             houdiniSellChainId: sellIsExternal ? sellChain.chainId : 4663,
             houdiniSellChainLabel: sellChainLabel,
+            // The sell asset itself: an ERC20 needs a transfer() to the deposit address,
+            // a native coin needs a plain value send. The client can't infer which.
+            houdiniSellSymbol: sellSymbol,
+            houdiniSellTokenAddress: sellTokenAddress,
+            houdiniSellDecimals: sellDecimals,
             verified: true,
           } as any
           return NextResponse.json({
