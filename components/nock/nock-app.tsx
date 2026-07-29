@@ -1212,10 +1212,19 @@ export function NockApp() {
           const confirm: ChatMessage = {
             id: `${Date.now()}-c`,
             role: 'robin',
-            text:
-              direction === 'in'
+            text: (() => {
+              // A send-to-address card names a recipient and a destination asset; the
+              // funding/cash-out wording ("will arrive at your wallet") is wrong for it and
+              // mislabelled the received token as ETH.
+              const recip = (action as any).houdiniRecipient as string | undefined
+              const destSym = ((action as any).houdiniDestSymbol as string) || externalSymbol
+              if (recip) {
+                return `Sent ✅ ${amount} ${sign.symbol} is on its way — about ${outStr}${destSym} will reach ${recip.slice(0, 10)}…${recip.slice(-6)} on ${destLabel} in a few minutes.`
+              }
+              return direction === 'in'
                 ? `Sent ✅ Your ${amount} ${sign.symbol} is on its way — about ${outStr}${robinhoodAsset} will arrive on Robinhood Chain in a few minutes. I'll pick it up in your balance once it lands.`
-                : `Sent ✅ Cashing out ${amount} ${robinhoodAsset} — about ${outStr}${externalSymbol} will arrive at your wallet on ${destLabel} in a few minutes.`,
+                : `Sent ✅ Cashing out ${amount} ${robinhoodAsset} — about ${outStr}${externalSymbol} will arrive at your wallet on ${destLabel} in a few minutes.`
+            })(),
           }
           return [...updated, confirm]
         })

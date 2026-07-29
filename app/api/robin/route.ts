@@ -827,6 +827,18 @@ async function handlePOST(request: Request) {
         // delivers to the user's OWN wallet, so "send $20 of ETH as USDC to 0x..." was
         // answered with a USDG cash-out to themselves (wrong asset, wrong recipient).
         const sendVerbForHoudini = /\b(send|transfer|pay|swap|convert|bridge)\b/i.test(txt)
+        // Words that must NEVER be read as an asset symbol. Real tokens exist with these
+        // tickers -- Ethereum lists a "SWAP" (TrustSwap) -- so "i want to swap ... in usdc"
+        // resolved "swap" as the DESTINATION and sent a user's ETH into TrustSwap instead of
+        // USDC. A verb in the sentence must lose to the asset the user actually named; the
+        // cost is that these few tickers can't be targeted by name, which is the right trade.
+        const NOT_A_SYMBOL = new Set([
+          'SWAP','SEND','SENT','TRANSFER','PAY','BRIDGE','CONVERT','MOVE','DEPOSIT','WITHDRAW',
+          'CASH','ADD','FUND','WANT','LIKE','PLEASE','THIS','THAT','THE','MY','YOUR','ITS',
+          'ADDRESS','WALLET','CHAIN','NETWORK','ROUTE','ROUTES','IT','ME','YOU','AND','OF',
+          'FROM','TO','ON','IN','AS','FOR','WITH','USING','VIA','NOW','ALL','SOME','HERE',
+          'THERE','PRIVATE','PRIVATELY','ANON','ANONYMOUS','ANONYMOUSLY','WORTH','ABOUT',
+        ])
         if ((wantsPrivate || sendVerbForHoudini) && addressCandidates.length) {
           const routeTier: 'private' | 'standard' = wantsPrivate ? 'private' : 'standard'
           const mentionsUsdg = /\busdg\b/i.test(txt)
@@ -903,11 +915,20 @@ async function handlePOST(request: Request) {
           // SELL ASSET: whatever symbol follows the amount ("send 50 USDC ..."). Privacy
           // routing is not ETH-only — USDC from Ethereum has ~75 private routes — so don't
           // hardcode it. USDG is the real exception and is rejected above.
-          const sellSymbol = (amountText.match(/(?:\d+(?:\.\d+)?)\s*([A-Za-z]{2,6})\b/)?.[1] || 'ETH').toUpperCase()
+          // "$25 of ETH" put "of" right after the number, so a naive first-match read the
+          // sell asset as "OF" and reported that it wasn't exchange-listed. Take the first
+          // candidate after the amount that is actually a plausible symbol.
+          const sellSymbol = ([...amountText.matchAll(/(?:\d+(?:\.\d+)?)\s*(?:of\s+)?([A-Za-z]{2,6})\b/gi)]
+            .map((mm) => mm[1].toUpperCase())
+            .find((sym) => !NOT_A_SYMBOL.has(sym)) || 'ETH')
           const m = dollarMatch || amountText.match(/(\d+(?:\.\d+)?)\s*(?:[A-Za-z]{2,6})?/i)
           let amount = m ? parseFloat(m[1]) : null
           let ethPriceNote = ''
-          if (dollarMatch && amount) {
+          const STABLES = new Set(['USDC', 'USDT', 'USDG', 'DAI'])
+          if (dollarMatch && amount && STABLES.has(sellSymbol)) {
+            // A dollar amount of a dollar-pegged asset needs no conversion.
+            ethPriceNote = ''
+          } else if (dollarMatch && amount) {
             const ethPrice = (await getReferencePrices()).ETH
             if (ethPrice) {
               const usdAmount = amount
@@ -961,6 +982,7 @@ async function handlePOST(request: Request) {
           const tokenCandidates = [...txt.matchAll(/\b(?:as|in|into|receive|for|to)\s+([A-Za-z][A-Za-z0-9.]{1,11})\b/gi)].map((m) => m[1])
           let destSymbol = 'ETH'
           for (const candidate of tokenCandidates) {
+            if (NOT_A_SYMBOL.has(candidate.toUpperCase())) continue // a verb/filler word, not an asset
             if (candidate.toUpperCase() === sellSymbol) continue // that's the sell side
             if (await resolveHoudiniChain(candidate)) continue // it's a network, not an asset
             const maybe = await resolveHoudiniToken(destChain.shortName, candidate)
