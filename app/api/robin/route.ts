@@ -747,7 +747,7 @@ async function handlePOST(request: Request) {
     if (houdiniEnabled() && walletAddress && isAddress(walletAddress)) {
       const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
       const txt = (lastUser?.text || '').trim()
-      const privacyWord = /\b(private(ly)?|anonymous(ly)?|anon|privacy)\b/i.test(txt)
+      const privacyWord = /\b(priv(?:at|ac)\w*|anon\w*)\b/i.test(txt)
       const hasAddress = /0x[a-fA-F0-9]{40}/.test(txt)
       // Only a QUESTION, not an actual send (those carry a recipient address).
       if (privacyWord && !hasAddress) {
@@ -799,7 +799,7 @@ async function handlePOST(request: Request) {
       try {
         const lastUser = [...messages].reverse().find((m: any) => m.role === 'user')
         const txt = (lastUser?.text || '').trim()
-        const wantsPrivate = /\b(private(ly)?|anonymous(ly)?|anon)\b/i.test(txt)
+        const wantsPrivate = /\b(priv(?:at|ac)\w*|anon\w*)\b/i.test(txt)
         // Any address-shaped token — validated below against the DESTINATION chain's own
         // rules, so this covers Solana/Bitcoin recipients too, not just EVM.
         const addressCandidates: string[] = [
@@ -814,12 +814,38 @@ async function handlePOST(request: Request) {
             })
           }
 
+          // SELL CHAIN: "from <chain>". Defaults to Robinhood (the user's Nock wallet), but
+          // a private send can equally originate on an external chain and land here —
+          // "send 0.01 ETH privately from ethereum to robinhood" is a private FUNDING.
+          const fromChainWord = txt.match(/\bfrom\s+([A-Za-z][A-Za-z0-9_-]{1,20})\b/i)?.[1]
+          let sellChain = fromChainWord ? await resolveHoudiniChain(fromChainWord) : null
+          if (fromChainWord && !sellChain) {
+            // Never guess a chain from an unrecognized word — the wrong network loses funds.
+            return NextResponse.json({ text: `I don't recognize "${fromChainWord}" as a network. Name the source chain exactly, e.g. "from ethereum", "from base", "from arbitrum", or leave it out to send from your Nock wallet on Robinhood Chain.` })
+          }
+          if (!sellChain) sellChain = await resolveHoudiniChain('robinhood')
+          // The user must be able to SIGN on the source chain, so it has to be one the
+          // wallet is configured for (lib/wagmi.ts + lib/providers.tsx). The DESTINATION has
+          // no such limit — Houdini delivers there, nothing is signed locally.
+          const SIGNABLE_SELL_CHAIN_IDS = new Set([4663, 1, 8453, 42161, 10, 137])
+          if (sellChain && sellChain.chainId != null && !SIGNABLE_SELL_CHAIN_IDS.has(sellChain.chainId)) {
+            return NextResponse.json({ text: `I can't sign a transfer on ${sellChain.shortName} yet. You can send FROM Robinhood, Ethereum, Base, Arbitrum, Optimism or Polygon, and deliver TO almost any chain.` })
+          }
+          if (sellChain && sellChain.chainId == null) {
+            return NextResponse.json({ text: `I can't sign a transfer on ${sellChain.shortName} yet (it isn't an EVM chain). You can send FROM Robinhood, Ethereum, Base, Arbitrum, Optimism or Polygon, and deliver TO almost any chain.` })
+          }
+
           // DESTINATION CHAIN: "... on <chain>" / "to <chain>". Resolved against Houdini's
-          // live chain list (~100), defaulting to Ethereum when unnamed.
+          // live chain list (~100). Defaults to Ethereum, unless we're already selling FROM
+          // an external chain, in which case the natural destination is Robinhood.
           const chainWord = txt.match(/\b(?:on|to|via)\s+([A-Za-z][A-Za-z0-9\s_-]{1,20}?)(?:\s+(?:chain|network)\b|\s*$|[.,!?])/i)?.[1]
           let destChain = chainWord ? await resolveHoudiniChain(chainWord) : null
-          if (!destChain) destChain = await resolveHoudiniChain('ethereum')
-          if (!destChain) return NextResponse.json({ text: "I couldn't reach Houdini's network list just now. Try again in a moment." })
+          const sellIsExternal = !!sellChain && sellChain.shortName.toLowerCase() !== 'robinhood'
+          if (!destChain) destChain = await resolveHoudiniChain(sellIsExternal ? 'robinhood' : 'ethereum')
+          if (!destChain || !sellChain) return NextResponse.json({ text: "I couldn't reach Houdini's network list just now. Try again in a moment." })
+          if (destChain.shortName.toLowerCase() === sellChain.shortName.toLowerCase()) {
+            return NextResponse.json({ text: `A private send has to move between two different networks (that routing is what breaks the on-chain link). You named ${destChain.shortName} on both sides. Say something like "privately send 0.02 ETH to 0x… on arbitrum".` })
+          }
           if (destChain.memoNeeded) {
             // These chains require a destination memo/tag we have no way to collect, and
             // sending without one loses the funds at the exchange.
@@ -866,16 +892,20 @@ async function handlePOST(request: Request) {
           // a 0.0174 ETH send from a 0.00156 ETH balance), which reads as an app bug rather
           // than "you don't have the funds". Done BEFORE getHoudiniQuote deliberately: the
           // free tier allows only ~20 quotes/hour, so a doomed send must not spend one.
-          const ethBalance = (await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null))
-          if (ethBalance !== null) {
-            const needed = parseUnits(String(amount), 18)
-            // Leave headroom for gas — a send of the entire balance always fails.
-            const GAS_HEADROOM = parseUnits('0.00002', 18)
-            if (ethBalance < needed + GAS_HEADROOM) {
-              const have = Number(formatUnits(ethBalance, 18))
-              return NextResponse.json({
-                text: `You have ${have.toFixed(6)} ETH on Robinhood Chain, which isn't enough to send ${amount} ETH plus gas. Add more ETH first, or try a smaller amount (keeping a little back for the network fee).`,
-              })
+          // Only possible when selling from Robinhood Chain — this server can't read a
+          // balance on an external chain, so those surface at the wallet instead.
+          if (!sellIsExternal) {
+            const ethBalance = (await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null))
+            if (ethBalance !== null) {
+              const needed = parseUnits(String(amount), 18)
+              // Leave headroom for gas — a send of the entire balance always fails.
+              const GAS_HEADROOM = parseUnits('0.00002', 18)
+              if (ethBalance < needed + GAS_HEADROOM) {
+                const have = Number(formatUnits(ethBalance, 18))
+                return NextResponse.json({
+                  text: `You have ${have.toFixed(6)} ETH on Robinhood Chain, which isn't enough to send ${amount} ETH plus gas. Add more ETH first, or try a smaller amount (keeping a little back for the network fee).`,
+                })
+              }
             }
           }
 
@@ -890,7 +920,11 @@ async function handlePOST(request: Request) {
               text: `I couldn't find ${destSymbol} on ${chainLabel} in Houdini's token list. Name the destination asset explicitly, e.g. "privately send ${amount} ETH to ${recipient.slice(0, 10)}… as USDC on ${chainLabel}".`,
             })
           }
-          const sellToken = ROBINHOOD_ETH
+          // Sell side: ETH on whichever chain the funds are coming from.
+          const sellToken = sellIsExternal ? await resolveHoudiniToken(sellChain.shortName, 'ETH') : ROBINHOOD_ETH
+          if (!sellToken) {
+            return NextResponse.json({ text: `I couldn't find ETH on ${sellChain.shortName} in Houdini's token list, so I can't send from there.` })
+          }
 
           const country =
             request.headers.get('x-vercel-ip-country') || request.headers.get('cf-ipcountry') || request.headers.get('x-country-code') || undefined
@@ -913,6 +947,7 @@ async function handlePOST(request: Request) {
           // failed (hit live). Quote an honest range instead of a precise wrong number.
           const etaLabel = 'usually a few minutes'
           const sellLabel = `${fmtHoudiniAmount(amount, 'ETH')} ETH`
+          const sellChainLabel = sellIsExternal ? sellChain.shortName : 'Robinhood'
           const outStr = fmtHoudiniAmount(out, destToken.symbol)
           const recvLabel = `${outStr} ${destToken.symbol}`
           const shortRecipient = `${recipient.slice(0, 10)}…${recipient.slice(-6)}`
@@ -921,9 +956,9 @@ async function handlePOST(request: Request) {
             id: `act-${Date.now()}`,
             agent: 'swap',
             action: headline,
-            detail: `Sends ${sellLabel} from your Robinhood Chain wallet through Houdini's private routing, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. Settled through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address; there is no smart contract to approve. Delivery is not instant and costs a little more than a normal bridge. Transfers cannot be reversed, so verify the recipient address.`,
+            detail: `Sends ${sellLabel} from your wallet on ${sellChainLabel} through Houdini's private routing, delivering ~${recvLabel} to ${recipient} on ${chainLabel}. Settled through exchanges rather than a direct bridge, so the on-chain link between your wallet and the recipient is broken. You sign one plain transfer to Houdini's deposit address on ${sellChainLabel}; there is no smart contract to approve. Delivery is not instant and costs a little more than a normal bridge. Transfers cannot be reversed, so verify the recipient address.`,
             metrics: [
-              { label: 'You send', value: `${sellLabel} on Robinhood` },
+              { label: 'You send', value: `${sellLabel} on ${sellChainLabel}` },
               { label: 'Recipient gets', value: `~${recvLabel} on ${chainLabel}` },
               { label: 'To', value: shortRecipient },
               { label: 'Routing', value: 'Private' },
@@ -940,6 +975,10 @@ async function handlePOST(request: Request) {
             houdiniToTokenId: destToken.tokenId,
             houdiniDestSymbol: destToken.symbol,
             houdiniDestChain: chainLabel,
+            // Where the user actually signs. A private send can originate on an external
+            // chain (private funding INTO Robinhood), so the client can't assume Robinhood.
+            houdiniSellChainId: sellIsExternal ? sellChain.chainId : 4663,
+            houdiniSellChainLabel: sellChainLabel,
             verified: true,
           } as any
           return NextResponse.json({
@@ -1195,6 +1234,28 @@ async function handlePOST(request: Request) {
           }
           const usdEstimate = dollarMatch ? rawAmt : priceUsd > 0 ? units * priceUsd : null
           const amountLabel = `${units.toFixed(sym === 'ETH' || sym === 'WETH' ? 6 : 4)} ${sym}`
+
+          // BALANCE PRE-CHECK. This path had none, so an over-balance send built a card that
+          // could never be confirmed: the wallet just showed "Network fee Unavailable" with
+          // a greyed-out button (seen live twice), which reads as a broken app rather than
+          // "you don't have the funds". Native ETH also needs gas headroom on top.
+          {
+            const needed = parseUnits(units.toFixed(Math.min(decimals, 18)), decimals)
+            const held = tokenAddress === null
+              ? await getReadClient().getBalance({ address: walletAddress as `0x${string}` }).catch(() => null)
+              : ((await getReadClient().readContract({
+                  address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [walletAddress as `0x${string}`],
+                }).catch(() => null)) as bigint | null)
+            if (held !== null) {
+              const gasHeadroom = tokenAddress === null ? parseUnits('0.00002', 18) : BigInt(0)
+              if (held < needed + gasHeadroom) {
+                const haveStr = Number(formatUnits(held, decimals)).toFixed(6)
+                return NextResponse.json({
+                  text: `You have ${haveStr} ${sym}, which isn't enough to send ${amountLabel}${tokenAddress === null ? ' plus gas' : ''}. Try a smaller amount${tokenAddress === null ? ', keeping a little back for the network fee' : ''}, or add more ${sym} first.`,
+                })
+              }
+            }
+          }
 
           let transactionData: { to: string; data: string; value: string }
           if (tokenAddress === null) {

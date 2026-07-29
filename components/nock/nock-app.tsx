@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useWallets, usePrivy, getIdentityToken } from '@privy-io/react-auth'
 import { usePublicClient } from 'wagmi'
 import { erc20Abi, formatUnits, parseUnits, createWalletClient, createPublicClient, encodeFunctionData, custom, http, type Chain } from 'viem'
-import { mainnet, base } from 'viem/chains'
+import { mainnet, base, arbitrum, optimism, polygon } from 'viem/chains'
 import { Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { INSTANT_SWAPS_ENABLED } from '@/lib/feature-flags'
@@ -58,6 +58,9 @@ const DEMO_IDS = new Set(['m1', 'm2'])
 const HOUDINI_SOURCE_CHAINS: Record<number, Chain> = {
   [mainnet.id]: mainnet,
   [base.id]: base,
+  [arbitrum.id]: arbitrum,
+  [optimism.id]: optimism,
+  [polygon.id]: polygon,
   [nockChain.id]: nockChain,
 }
 
@@ -68,6 +71,9 @@ const HOUDINI_SOURCE_CHAINS: Record<number, Chain> = {
 const HOUDINI_READ_RPC: Record<number, string> = {
   [mainnet.id]: 'https://ethereum-rpc.publicnode.com',
   [base.id]: 'https://base-rpc.publicnode.com',
+  [arbitrum.id]: 'https://arbitrum-one-rpc.publicnode.com',
+  [optimism.id]: 'https://optimism-rpc.publicnode.com',
+  [polygon.id]: 'https://polygon-bor-rpc.publicnode.com',
 }
 
 // Duplicated (not imported) from lib/houdini.ts, which is server-only and must never be
@@ -995,18 +1001,27 @@ export function NockApp() {
         const depositAddress = data.depositAddress as string | null
         if (!depositAddress) throw new Error('Houdini did not return a deposit address. Nothing was sent.')
 
-        // Sell side is Robinhood-native ETH. Verify the wallet is really there before
-        // sending — a previous cross-chain flow may have left it on Ethereum/Base, and
-        // switchChain alone can resolve before the provider catches up.
-        const provider = await ensureWalletOnChain(activeWallet, nockChain.id, 'Robinhood Chain')
-        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: nockChain, transport: custom(provider) })
+        // Sell side is native ETH on whichever chain the funds come from — usually
+        // Robinhood, but a private FUNDING originates on Ethereum/Base/etc. Verify the
+        // wallet really switched before sending: switchChain alone can resolve before the
+        // provider catches up, and a previous cross-chain flow may have left it elsewhere.
+        const sellChainId = Number((action as any).houdiniSellChainId ?? nockChain.id)
+        const sellChainLabel = ((action as any).houdiniSellChainLabel as string) || 'Robinhood Chain'
+        const sellChain = HOUDINI_SOURCE_CHAINS[sellChainId] ?? nockChain
+        const provider = await ensureWalletOnChain(activeWallet, sellChainId, sellChainLabel)
+        const wc = createWalletClient({ account: walletAddress as `0x${string}`, chain: sellChain, transport: custom(provider) })
         const hash = await wc.sendTransaction({
           account: walletAddress as `0x${string}`,
-          chain: nockChain,
+          chain: sellChain,
           to: depositAddress as `0x${string}`,
           value: parseUnits(String(amount), 18),
         })
-        const rcpt = await publicClient.waitForTransactionReceipt({ hash })
+        // Receipt polling goes through a real public RPC for external chains — the embedded
+        // wallet's own provider proxy is unreliable for this (same fix as the bridge flow).
+        const receiptClient = sellChainId === nockChain.id
+          ? publicClient
+          : createPublicClient({ chain: sellChain, transport: http(HOUDINI_READ_RPC[sellChainId]) })
+        const rcpt = await receiptClient.waitForTransactionReceipt({ hash })
         if (rcpt.status !== 'success') throw new Error('The transfer reverted on-chain — nothing was sent (only gas was spent).')
 
         const outEst = Number(data.amountOut)

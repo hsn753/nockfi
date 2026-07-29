@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { PrivyProvider } from '@privy-io/react-auth'
 import { WagmiProvider } from '@privy-io/wagmi'
 import { useState } from 'react'
-import { mainnet, base } from 'viem/chains'
+import { mainnet, base, arbitrum, optimism, polygon } from 'viem/chains'
 import { wagmiConfig } from './wagmi'
 import { nockChain } from './chain'
 
@@ -29,7 +29,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         // mainnet + base are here (not just Robinhood Chain) so Privy allows the wallet to
         // switchChain to them during Houdini cross-chain funding — otherwise it throws
         // "Unsupported chainId" for any chain not in this list.
-        supportedChains: [nockChain, mainnet, base] as never,
+        supportedChains: [nockChain, mainnet, base, arbitrum, optimism, polygon] as never,
         embeddedWallets: {
           ethereum: { createOnLogin: 'users-without-wallets' },
         },
